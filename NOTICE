@@ -1,0 +1,9 @@
+wattwise-core
+Copyright 2026 Viacheslav Rodionov
+
+This product is the open-source engine of the `wattwise` family (Apache-2.0).
+It is developed in the open. The closed commercial product `athload` depends on
+and builds on top of this engine; it is a separate, private repository.
+
+This product includes software developed by third parties under their own
+permissive licenses (see the dependency metadata in pyproject.toml / uv.lock).

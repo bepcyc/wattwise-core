@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.so
+
+# uv / venv
+.venv/
+venv/
+
+# test / coverage
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+junit*.xml
+
+# local data / scratch (the engine targets ONLY its own isolated store)
+*.sqlite
+*.sqlite3
+*.db
+local.db
+/data/
+/.scratch/
+
+# secrets — NEVER commit. Service/infra secrets come from env/secret-manager
+# at startup (BOOT-R4); the build agent never reads the operator's .env (TASK §5).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# the one-time legacy->canonical migration is out-of-repo + gitignored (RUN-R14)
+/scripts/legacy_migration*.py
+/migration_local/
+
+# generated typed client (built in CI; artifact, not source-of-truth)
+/clients/ts/node_modules/
+
+# OS
+.DS_Store

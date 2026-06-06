@@ -1,0 +1,164 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wattwise-core"
+version = "0.1.0"
+description = "Source-agnostic endurance-training analytics engine with a trustworthy AI coaching agent (OSS engine of the wattwise family)."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Viacheslav Rodionov", email = "viacheslav.rodionov@gmail.com" }]
+keywords = ["endurance", "cycling", "training", "analytics", "coaching", "agent", "langgraph"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering",
+  "Typing :: Typed",
+]
+
+# Runtime dependencies for the single OSS package `wattwise_core`.
+# The HTTP API is part of this package (its ASGI app) — not a separate package.
+dependencies = [
+  # --- config / core ---
+  "pydantic>=2.9",
+  "pydantic-settings>=2.5",
+  # --- persistence (portable ORM, async; SQLite/PostgreSQL/MariaDB via DSN) ---
+  "sqlalchemy[asyncio]>=2.0.36",
+  "alembic>=1.14",
+  "aiosqlite>=0.20",
+  # --- analytics / DSP ---
+  "numpy>=2.1",
+  "scipy>=1.14",
+  # --- ingestion: direct typed clients + file decoders ---
+  "httpx>=0.28",
+  "garmin-fit-sdk>=21.158",
+  "fitdecode>=0.10",
+  "gpxpy>=1.6",
+  "lxml>=5.3",
+  "python-multipart>=0.0.12",
+  "tenacity>=9.0",
+  # --- agent (LangGraph + OpenAI-compatible provider) ---
+  "langgraph>=0.2.60",
+  "langgraph-checkpoint>=2.0.9",
+  "langchain-core>=0.3.28",
+  "openai>=1.58",
+  "mcp>=1.2",
+  # --- API ---
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
+  "sse-starlette>=2.1",
+  "nh3>=0.2.19",
+  # --- security / ops ---
+  "cryptography>=44.0",
+  "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+# Async DB drivers for the non-default backends (kept optional so the SQLite
+# default install is lean; the portability CI matrix installs these).
+postgresql = ["asyncpg>=0.30"]
+mariadb = ["aiomysql>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/wattwise/wattwise-core"
+Repository = "https://github.com/wattwise/wattwise-core"
+
+# Adapter plugin registry (ADP-R*): each OSS ingestion adapter is registered on
+# the `wattwise_core.adapters` entry-point group. Adding a source is one adapter
+# (ROAD-R6) — register it here, no consumer change.
+[project.entry-points."wattwise_core.adapters"]
+file_upload = "wattwise_core.ingestion.adapters.file_upload:FileUploadAdapter"
+intervals_icu = "wattwise_core.ingestion.adapters.intervals_icu:IntervalsIcuAdapter"
+
+[dependency-groups]
+# uv dependency groups (PEP 735). Dev/test toolchain is NOT shipped in the wheel.
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "pytest-cov>=6.0",
+  "hypothesis>=6.122",
+  "mypy>=1.14",
+  "ruff>=0.8.4",
+  "respx>=0.22",
+  "pre-commit>=4.0",
+  "lxml-stubs>=0.5",
+  # DB drivers exercised by the portability matrix:
+  "asyncpg>=0.30",
+  "aiomysql>=0.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wattwise_core"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Ship package data the engine needs to boot from a clean wheel (DELIV-R2 / E5-T5):
+# config defaults, the agent's coach prompts/skills, locale catalogs, seam contracts.
+"src/wattwise_core/config/defaults.toml" = "wattwise_core/config/defaults.toml"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "migrations", "alembic.ini", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q --strict-markers --strict-config"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "unit: fast isolated unit tests",
+  "property: hypothesis property-based tests",
+  "golden: provenance-anchored golden-reference tests",
+  "contract: adapter contract tests over recorded payloads",
+  "integration: tests requiring a real DB backend",
+  "e2e: API-level end-to-end journeys",
+  "portability: 3-backend portability tests (SQLite/PostgreSQL/MariaDB)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["wattwise_core"]
+omit = ["*/migrations/*", "*/__main__.py"]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@(abc\\.)?abstractmethod",
+  "\\.\\.\\.",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "ASYNC", "S", "RUF", "PL", "TID", "PTH"]
+ignore = ["PLR0913", "PLR2004"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "PLR2004", "PLR0915"]
+"tools/lint/**" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"requests".msg = "Use httpx (async, typed) — see CLI-R13."
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tools"]
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+warn_redundant_casts = true
+disallow_any_generics = true
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = ["garmin_fit_sdk.*", "fitdecode.*", "gpxpy.*", "mcp.*", "langgraph.*", "langchain_core.*"]
+ignore_missing_imports = true

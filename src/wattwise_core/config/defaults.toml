@@ -1,0 +1,45 @@
+# wattwise-core packaged configuration defaults (lowest layer).
+#
+# Config layering (CFG-R*, doc 10): packaged defaults (this file) -> optional
+# operator file (WATTWISE_CONFIG_FILE) -> environment variables (WATTWISE_*).
+# A later layer overrides an earlier one. Secrets are NEVER read from this file
+# or any committed file: the database DSN, the LLM provider key, the token
+# signing key, and the encryption root key come ONLY from the environment / a
+# secret manager at startup (BOOT-R4, DEPLOY-R6). Absence of a required secret
+# fails the boot closed (RUN-R4.1) — it never silently degrades.
+
+[app]
+environment = "production"   # production | staging | development
+log_level = "INFO"
+
+[api]
+host = "0.0.0.0"
+port = 8000
+rate_limit_per_minute = 60
+request_max_bytes = 33554432   # 32 MiB upload ceiling for FIT/GPX/TCX imports
+
+[object_store]
+# OSS default object store for verbatim original-file retention (RAW-R*): a
+# local directory. An S3-compatible store is configured via env for production.
+kind = "local"
+local_root = "/var/lib/wattwise/objects"
+
+[analytics]
+# PMC time constants (doc 40 PMC-R*): CTL=42d, ATL=7d exponential decay.
+ctl_time_constant_days = 42
+atl_time_constant_days = 7
+
+[agent]
+# Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-chat"
+temperature = 0.0
+max_output_tokens = 1024
+# Fail-closed grounding (GROUND-R*): the agent abstains unless every claim is
+# grounded in retrieved canonical data at/above this coverage.
+grounding_min_coverage = 1.0
+request_timeout_seconds = 60
+
+[retention]
+# 0 = retain indefinitely; >0 = per-athlete retention window in days (PRIV-R*).
+raw_file_days = 0
