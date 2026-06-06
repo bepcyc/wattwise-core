@@ -23,12 +23,9 @@ HRV-R0, HRV-R5, DEC-R1, TRIMP-R1, TRIMP-R3.
 from __future__ import annotations
 
 import datetime as _dt
-import math
-from http import HTTPStatus
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query
 
 from wattwise_core.analytics.result import (
     Computed,
@@ -38,6 +35,36 @@ from wattwise_core.analytics.result import (
     is_computed,
 )
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.api.chart_schemas import ChartSeries, CoverageDescriptor, SeriesPoint
+from wattwise_core.api.errors import ProblemError
+from wattwise_core.api.perf_helpers import (
+    absent_coverage as _absent_coverage,
+)
+from wattwise_core.api.perf_helpers import (
+    coverage_for as _coverage_for,
+)
+from wattwise_core.api.perf_helpers import (
+    day_label as _day_label,
+)
+from wattwise_core.api.perf_helpers import (
+    duration_label as _duration_label,
+)
+from wattwise_core.api.perf_helpers import (
+    empty_coverage as _empty_coverage,
+)
+from wattwise_core.api.perf_helpers import (
+    now as _now,
+)
+from wattwise_core.api.perf_helpers import (
+    opt_float as _opt_float,
+)
+from wattwise_core.api.perf_helpers import (
+    present_coverage as _present_coverage,
+)
+from wattwise_core.api.perf_helpers import (
+    value_of as _value_of,
+)
+from wattwise_core.api.problems import precondition_unmet, range_reversed
 
 router = APIRouter(prefix="/v1/performance", tags=["performance"])
 
@@ -52,23 +79,17 @@ _HRV_KEYS: tuple[str, ...] = (
 
 def require_read_scope() -> None:
     """Gate on the ``read`` scope (AUTH-R11); the app factory overrides it (fail-closed)."""
-    raise HTTPException(  # pragma: no cover - replaced by the app factory
-        status_code=status.HTTP_403_FORBIDDEN, detail="insufficient-scope"
-    )
+    raise ProblemError("insufficient-scope")  # pragma: no cover - replaced by the app factory
 
 
 def current_athlete_id() -> str:
     """Server-derived acting athlete id (AUTH-R3); app factory overrides it (fail-closed)."""
-    raise HTTPException(  # pragma: no cover - replaced by the app factory
-        status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthenticated"
-    )
+    raise ProblemError("unauthenticated")  # pragma: no cover - replaced by the app factory
 
 
 def analytics_service() -> AnalyticsService:
     """Provide the request-scoped :class:`AnalyticsService`; app factory overrides it."""
-    raise HTTPException(  # pragma: no cover - replaced by the app factory
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="internal-error"
-    )
+    raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
 
 
 _Read = Depends(require_read_scope)
@@ -76,128 +97,27 @@ AthleteId = Annotated[str, Depends(current_athlete_id)]
 Service = Annotated[AnalyticsService, Depends(analytics_service)]
 
 
-# --- wire shapes (SCHEMA-R8 / SCHEMA-R9) ----------------------------------------
+# --- wire shapes + coverage/label helpers — see chart_schemas / perf_helpers ------
 
 
-class CoverageDescriptor(BaseModel):
-    """Source-agnostic per-point/scalar coverage descriptor (SCHEMA-R9; no source name)."""
+def _precondition_unmet(code: str, detail: str) -> ProblemError:
+    """A ``422 analytics-precondition-unmet`` carrying the machine code (ERR-R9).
 
-    present: bool
-    fidelity: str
-    gap_fraction: float = 0.0
-    disputed: bool = False
-    provisional: bool = False
-    substitution: dict[str, Any] | None = None
-
-
-class SeriesPoint(BaseModel):
-    """One chart point (SCHEMA-R8): an X-axis key, ``label``, named values, coverage.
-
-    The per-activity variant also carries ``activity_id`` so two activities on the
-    same calendar day are uniquely addressable (Coggan/W'balance/decoupling/TRIMP).
+    Raised as a catalog :class:`ProblemError` (NOT a framework ``HTTPException`` whose
+    structured detail the status-only handler discards) so the slug AND the machine
+    ``errors[].code`` reach the client to branch on the fail-closed analytics contract.
     """
-
-    local_date: _dt.date | None = None
-    duration_s: int | None = None
-    activity_id: str | None = None
-    label: str
-    values: dict[str, float | None]
-    coverage: CoverageDescriptor
-
-
-class ChartSeries(BaseModel):
-    """Chart-ready time-series envelope (API-R31): items + precomputed ``summary``."""
-
-    items: list[SeriesPoint]
-    x_axis: str
-    method: str
-    summary: dict[str, Any]
-    coverage: CoverageDescriptor
-    computed_at: _dt.datetime
-
-
-def _present_coverage(quality: Any) -> CoverageDescriptor:
-    """Map a computed metric's ``QualityReport`` to a present coverage (PMC-R6 provisional)."""
-    extra = getattr(quality, "extra", {}) or {}
-    fidelity = str(extra.get("fidelity", "raw_stream"))
-    return CoverageDescriptor(
-        present=True,
-        fidelity=fidelity,
-        gap_fraction=1.0 - float(getattr(quality, "coverage_fraction", 1.0)),
-        provisional=bool(extra.get("provisional", False)),
-    )
-
-
-_FAILED_REASONS = frozenset({
-    UnavailableReason.MISSING_DEPENDENCY,
-    UnavailableReason.POOR_FIT,
-    UnavailableReason.OUT_OF_DOMAIN,
-})
-
-
-def _absent_coverage(result: Unavailable) -> CoverageDescriptor:
-    """Map a typed :class:`Unavailable` to typed-absence coverage (ANL-R4; no reason leak)."""
-    fidelity = "absent_failed" if result.reason in _FAILED_REASONS else "absent_true"
-    return CoverageDescriptor(present=False, fidelity=fidelity, gap_fraction=1.0)
-
-
-def _coverage_for(result: MetricResult[Any]) -> CoverageDescriptor:
-    """Coverage for either branch of a :class:`MetricResult`."""
-    return _present_coverage(result.quality) if is_computed(result) else _absent_coverage(result)
-
-
-def _value_of(result: MetricResult[float]) -> float | None:
-    """The scalar value of a numeric result, or typed ``null`` (never ``0``)."""
-    return float(result.value) if is_computed(result) else None
-
-
-def _opt_float(value: Any) -> float | None:
-    """Coerce a finite numeric (e.g. a quality ``extra`` stat) to ``float | None``."""
-    return float(value) if isinstance(value, int | float) and math.isfinite(value) else None
-
-
-def _precondition_unmet(code: str, detail: str) -> HTTPException:
-    """A ``422 analytics-precondition-unmet`` with a machine code (ERR-R9)."""
-    return HTTPException(
-        status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-        detail={
-            "type": "analytics-precondition-unmet",
-            "errors": [{"code": code, "detail": detail}],
-        },
-    )
+    return precondition_unmet(code, detail)
 
 
 def date_range(
     frm: Annotated[_dt.date, Query(alias="from", description="Inclusive local start date.")],
     to: Annotated[_dt.date, Query(description="Inclusive local end date.")],
 ) -> tuple[_dt.date, _dt.date]:
-    """Typed ``(from, to)`` range dependency; ``from > to`` → ``422`` (PAGE-R8)."""
+    """Typed ``(from, to)`` range dependency; ``from > to`` → ``422`` (PAGE-R8/ERR-R6)."""
     if frm > to:
-        raise HTTPException(
-            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-            detail={"type": "validation-error", "errors": [{"parameter": "from"}]},
-        )
+        raise range_reversed("from")
     return frm, to
-
-
-def _now() -> _dt.datetime:
-    """Server timestamp for the precomputed ``computed_at`` (wall-clock at edge)."""
-    return _dt.datetime.now(tz=_dt.UTC)
-
-
-def _day_label(day: _dt.date) -> str:
-    """Jargon-free X-tick label for a calendar day (API-R21)."""
-    return day.strftime("%b ") + str(day.day)
-
-
-def _duration_label(seconds: int) -> str:
-    """Jargon-free X-tick label for a power-duration grid point (API-R21)."""
-    return f"{seconds // 60} min" if seconds % 60 == 0 else f"{seconds} sec"
-
-
-def _empty_coverage() -> CoverageDescriptor:
-    """The summary-level coverage descriptor for a present series (SCHEMA-R9)."""
-    return CoverageDescriptor(present=True, fidelity="raw_stream")
 
 
 Range = Annotated[tuple[_dt.date, _dt.date], Depends(date_range)]
@@ -206,7 +126,12 @@ Range = Annotated[tuple[_dt.date, _dt.date], Depends(date_range)]
 # --- §1 PMC: load vs. capacity --------------------------------------------------
 
 
-@router.get("/load-fitness", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/load-fitness",
+    response_model=ChartSeries,
+    operation_id="getLoadFitness",
+    dependencies=[_Read],
+)
 async def load_fitness(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """PMC fitness/fatigue/form over time (PMC-R1) → chart-ready ``PMCSeries``."""
     frm, to = rng
@@ -252,7 +177,12 @@ def _pmc_summary(last: MetricResult[Any] | None) -> dict[str, Any]:
 # --- §2 daily load vs. stress ---------------------------------------------------
 
 
-@router.get("/load-metrics", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/load-metrics",
+    response_model=ChartSeries,
+    operation_id="getLoadMetrics",
+    dependencies=[_Read],
+)
 async def load_metrics(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Canonical daily training load vs. stress signals (LOAD-R1) → ``LoadMetrics``."""
     frm, to = rng
@@ -280,7 +210,12 @@ def _load_point(day: _dt.date, value: float | None) -> SeriesPoint:
 # --- §3 critical power ----------------------------------------------------------
 
 
-@router.get("/critical-power", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/critical-power",
+    response_model=ChartSeries,
+    operation_id="getCriticalPower",
+    dependencies=[_Read],
+)
 async def critical_power(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Fitted CP/W' over the observed MMP curve (CP-R1) → ``CriticalPowerFit``."""
     frm, to = rng
@@ -317,7 +252,12 @@ def _cp_point(d: int, observed: MetricResult[Any] | None, fit: Computed[Any]) ->
 # --- §4 power-duration curve ----------------------------------------------------
 
 
-@router.get("/power-curve", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/power-curve",
+    response_model=ChartSeries,
+    operation_id="getPowerCurve",
+    dependencies=[_Read],
+)
 async def power_curve(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Mean-maximal power per duration (MMP-R1) → ``PowerCurve`` (non-increasing)."""
     frm, to = rng
@@ -341,7 +281,12 @@ def _mmp_point(d: int, res: MetricResult[Any]) -> SeriesPoint:
 # --- §6 Coggan NP/IF/TSS --------------------------------------------------------
 
 
-@router.get("/coggan", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/coggan",
+    response_model=ChartSeries,
+    operation_id="getCogganMetrics",
+    dependencies=[_Read],
+)
 async def coggan(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Per-activity NP/IF/TSS over time (NP-R1/IF-R1/TSS-R1) → ``CogganMetrics``."""
     frm, to = rng
@@ -374,7 +319,12 @@ def _coggan_point(activity_id: str, day: _dt.date, res: MetricResult[Any]) -> Se
 # --- §7 W'balance ---------------------------------------------------------------
 
 
-@router.get("/w-balance", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/w-balance",
+    response_model=ChartSeries,
+    operation_id="getWBalance",
+    dependencies=[_Read],
+)
 async def w_balance(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Per-activity anaerobic W' balance over time (WBAL-R1) → ``WBalanceSeries``."""
     frm, to = rng
@@ -410,7 +360,12 @@ def _wbal_point(activity_id: str, day: _dt.date, res: MetricResult[Any]) -> Seri
 # --- §8 HRV ---------------------------------------------------------------------
 
 
-@router.get("/hrv", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/hrv",
+    response_model=ChartSeries,
+    operation_id="getHrv",
+    dependencies=[_Read],
+)
 async def hrv(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Time-domain HRV trend over time (HRV-R0/R3) → ``HRVMetrics`` (never zeros)."""
     frm, to = rng
@@ -443,7 +398,12 @@ def _hrv_point(day: _dt.date, res: MetricResult[Any]) -> SeriesPoint:
 # --- §9 aerobic decoupling ------------------------------------------------------
 
 
-@router.get("/aerobic-decoupling", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/aerobic-decoupling",
+    response_model=ChartSeries,
+    operation_id="getAerobicDecoupling",
+    dependencies=[_Read],
+)
 async def aerobic_decoupling(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Per-activity aerobic decoupling over time (DEC-R1) → ``AerobicDecoupling``."""
     frm, to = rng
@@ -475,7 +435,12 @@ def _dec_point(activity_id: str, day: _dt.date, res: MetricResult[float]) -> Ser
 # --- §10 TRIMP ------------------------------------------------------------------
 
 
-@router.get("/trimp", response_model=ChartSeries, dependencies=[_Read])
+@router.get(
+    "/trimp",
+    response_model=ChartSeries,
+    operation_id="getTrimp",
+    dependencies=[_Read],
+)
 async def trimp(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     """Per-activity TRIMP over time (TRIMP-R1) → ``TrimpSeries`` (Banister-HRR)."""
     frm, to = rng

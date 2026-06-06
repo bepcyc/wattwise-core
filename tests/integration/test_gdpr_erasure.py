@@ -172,12 +172,14 @@ async def _erase_athlete(
         store.delete(ref)
 
     # 2. delete every athlete-scoped canonical row (covers activity_file, source_candidate,
-    #    memory_item, activity, ... — all athlete_id-bearing tables).
+    #    activity, ... — all athlete_id-bearing canonical tables).
     for table_name in _ATHLETE_SCOPED_TABLES:
         table = Base.metadata.tables[table_name]
         await session.execute(delete(table).where(table.c.athlete_id == athlete_id))
 
-    # 3. delete the agent-state checkpoints/writes/threads for the athlete.
+    # 3. delete the agent-state store rows (checkpoints/writes/threads + durable memory)
+    #    for the athlete — a SEPARATE store from canonical (MEM-R3/ARCH-R13, CKPT-R8).
+    await session.execute(delete(MemoryItem).where(MemoryItem.athlete_id == athlete_id))
     await session.execute(delete(AgentCheckpoint).where(AgentCheckpoint.athlete_id == athlete_id))
     await session.execute(delete(AgentThread).where(AgentThread.athlete_id == athlete_id))
 
@@ -190,6 +192,12 @@ async def _count(session: AsyncSession, table_name: str, athlete_id: uuid.UUID) 
     """Count rows for an athlete in a canonical athlete-scoped table."""
     table = Base.metadata.tables[table_name]
     stmt = select(func.count()).select_from(table).where(table.c.athlete_id == athlete_id)
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def _count_memory(session: AsyncSession, athlete_id: uuid.UUID) -> int:
+    """Count durable memory rows for an athlete in the agent-state store (MEM-R3)."""
+    stmt = select(func.count()).select_from(MemoryItem).where(MemoryItem.athlete_id == athlete_id)
     return int((await session.execute(stmt)).scalar_one())
 
 
@@ -207,7 +215,7 @@ async def test_erasure_removes_all_personal_rows_and_objects(
         assert await _count(session, "activity", athlete_id) == 1
         assert await _count(session, "activity_file", athlete_id) == 1
         assert await _count(session, "source_candidate", athlete_id) == 1
-        assert await _count(session, "memory_item", athlete_id) == 1
+        assert await _count_memory(session, athlete_id) == 1
         assert store.get(object_ref) == b"FIT-bytes-1"
 
     async with factory() as session:
@@ -261,13 +269,13 @@ async def test_erasure_is_scoped_to_the_one_athlete(
     async with factory() as session:
         # the kept athlete is fully intact.
         assert await _count(session, "activity", keeper_id) == 1
-        assert await _count(session, "memory_item", keeper_id) == 1
+        assert await _count_memory(session, keeper_id) == 1
         store_async = OssMemoryStore(session)
         kept = await store_async.fetch_relevant(athlete_id=str(keeper_id), query="knee")
         assert len(kept) == 1
         # the erased athlete is gone everywhere.
         assert await _count(session, "activity", victim_id) == 0
-        assert await _count(session, "memory_item", victim_id) == 0
+        assert await _count_memory(session, victim_id) == 0
 
     # the keeper's object survives; the victim's object is deleted.
     assert store.get(keeper_ref) == b"keeper-bytes"

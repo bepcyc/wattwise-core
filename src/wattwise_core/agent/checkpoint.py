@@ -154,6 +154,29 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
                 "stored checkpoint schema version is incompatible; refusing to load"
             )
 
+    async def resolve_idempotent(self, thread_id: str) -> str | None:
+        """Return the latest checkpoint id for an EXISTING in-window run, else ``None`` (CKPT-R4).
+
+        Idempotency is keyed by the durable thread — a thread_id is the stable
+        ``(athlete_id, conversation_id)`` identifier (CKPT-R3), and a re-submission of the
+        SAME request turn maps to the SAME thread_id (the engine derives it from the turn's
+        idempotency key). So a non-``None`` return means a run already exists for this turn:
+        the caller MUST resume/return it rather than starting a duplicate. Cross-identity
+        ownership is refused here too (CKPT-R3). ``None`` means start a fresh run.
+        """
+        async with self._sessions() as session:
+            thread = await self._resolve_thread(session, thread_id)
+            if thread is None:
+                return None
+            stmt = (
+                select(AgentCheckpoint)
+                .where(AgentCheckpoint.thread_id == thread_id)
+                .order_by(AgentCheckpoint.created_at.desc())
+                .limit(1)
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return row.checkpoint_id if row is not None else None
+
     # --- read ------------------------------------------------------------------------
 
     def _to_tuple(

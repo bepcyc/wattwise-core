@@ -192,7 +192,13 @@ def leads_with_state(html_or_text: str) -> bool:
 
 
 def _build_inputs(
-    *, athlete_id: str, trigger: Trigger, locale: str, request_text: str | None
+    *,
+    athlete_id: str,
+    trigger: Trigger,
+    locale: str,
+    request_text: str | None,
+    response_length: ResponseLength = "standard",
+    conversation_id: str | None = None,
 ) -> AgentState:
     """Assemble the write-once immutable graph inputs for a run (STATE-R2/-R4).
 
@@ -200,12 +206,21 @@ def _build_inputs(
     NEVER taken from any model/tool output. ``request_text`` is present iff the trigger
     is ``user_turn`` (the STATE-R2 discriminated union); a scheduled digest carries
     none, and its intent is fixed by the trigger (GRAPH-R2.1) with no intent model call.
+    The durable ``thread_id`` is the stable ``(athlete_id, conversation_id)`` identifier
+    the checkpointer keys on (CKPT-R3); ``idempotency_key`` is the per-turn dedup key
+    (CKPT-R4) — a distinct concept carried separately so the outcome can address both.
+    ``response_length`` governs verbosity/number-foregrounding (VOICE-R8), never truth.
     """
+    convo = conversation_id or f"{trigger}:{request_text or ''}"
+    thread_id = f"{athlete_id}:{convo}"
     state: AgentState = {
         "athlete_id": athlete_id,
         "trigger": trigger,
         "request_text": request_text,
         "locale": locale,
+        "thread_id": thread_id,
+        "idempotency_key": thread_id,
+        "response_length": response_length,
     }
     return state
 
@@ -289,7 +304,9 @@ def _outputs(final: AgentState) -> tuple[str, str, RunStatus, str]:
     text = text or html
     status = final.get("status")
     status = status if isinstance(status, RunStatus) else RunStatus.DEGRADED
-    thread_id = _opt_str(final.get("idempotency_key")) or ""
+    # The durable thread_id is the (athlete_id, conversation_id)-scoped checkpointer id
+    # (CKPT-R3/OUTCOME-R2), NOT the per-turn idempotency key (CKPT-R4).
+    thread_id = _opt_str(final.get("thread_id")) or _opt_str(final.get("idempotency_key")) or ""
     return html, text, status, thread_id
 
 
@@ -316,10 +333,16 @@ async def answer_question(
     never truth (VOICE-R8). No un-grounded text is ever surfaced.
     """
     inputs = _build_inputs(
-        athlete_id=athlete_id, trigger="user_turn", locale=locale, request_text=question
+        athlete_id=athlete_id,
+        trigger="user_turn",
+        locale=locale,
+        request_text=question,
+        response_length=response_length,
     )
     final = await graph.run(inputs)
     html, text, status, thread_id = _outputs(final)
+    cap = number_cap(response_length)
+    html, text = _enforce_number_cap(html, text, cap)
     observations = _project_observations(_as_seq(final.get("observations")))
     return AgentAnswer(
         status=status,
@@ -345,10 +368,15 @@ async def weekly_digest(graph: CoachGraph, athlete_id: str, week_end: str) -> Di
     the athlete's persisted preference where present (LANG-R2).
     """
     inputs = _build_inputs(
-        athlete_id=athlete_id, trigger="scheduled_digest", locale="en", request_text=None
+        athlete_id=athlete_id,
+        trigger="scheduled_digest",
+        locale="en",
+        request_text=None,
+        conversation_id=f"digest:{week_end}",
     )
     final = await graph.run(inputs)
     html, text, status, thread_id = _outputs(final)
+    html, text = _enforce_number_cap(html, text, number_cap("standard"))
     observations = _project_observations(_as_seq(final.get("observations")))
     return Digest(
         status=status,
@@ -373,6 +401,32 @@ def _as_seq(raw: Any) -> Sequence[Mapping[str, Any]]:
 def number_cap(response_length: ResponseLength) -> int:
     """Return the foregrounded-number ceiling for a response length (VOICE-R7 default)."""
     return _NUMBER_CAP[response_length]
+
+
+def _enforce_number_cap(html: str, text: str, cap: int) -> tuple[str, str]:
+    """Deterministically hold the body to the foregrounded-number cap (VOICE-R7).
+
+    If the projected body foregrounds more explicit numbers than the per-length ceiling,
+    the surplus foregrounded numbers (keeping the first ``cap``) are demoted to a plain
+    "(value omitted)" token so the cap is ENFORCED on what ships — not merely test-asserted
+    (EVAL-R5b.1). The grounded numbers themselves remain available via the citations /
+    reveal-numbers follow-up; only the in-prose density is bounded.
+    """
+    if count_foregrounded_numbers(text) <= cap:
+        return html, text
+    return _demote_numbers(html, cap), _demote_numbers(text, cap)
+
+
+def _demote_numbers(body: str, cap: int) -> str:
+    """Keep the first ``cap`` foregrounded numbers; replace the rest with a token."""
+    seen = 0
+
+    def _sub(match: re.Match[str]) -> str:
+        nonlocal seen
+        seen += 1
+        return match.group(0) if seen <= cap else "(value omitted)"
+
+    return _NUMBER_RE.sub(_sub, body)
 
 
 __all__ = [

@@ -4,13 +4,16 @@ Covers: write/recall roundtrip + athlete scoping (MEM-R3/R4); recency + keyword
 ranking (MEM-R4); the closed ``memory_item_kind`` enum (MEM-R5); untrusted content
 cannot write memory (MEM-R3/INJECT-R3); and the central MEM-R1 obligation that memory
 NEVER stores or substitutes a canonical analytic number (proven structurally — there
-is no numeric field on the row or the recall record). Runs on in-memory SQLite (the
-portable agent-state substrate, GBO-R8b).
+is no numeric field on the row or the recall record). Memory lives in the DEDICATED
+agent-state store (``AgentStateBase``), never the canonical GBO store (MEM-R3/ARCH-R13),
+so the schema is created from ``AgentStateBase.metadata`` and no canonical ``Athlete``
+row is needed. Runs on in-memory SQLite (the portable agent-state substrate, GBO-R8b).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from collections.abc import AsyncIterator
 
 import pytest
@@ -24,15 +27,16 @@ from wattwise_core.agent.memory import (
     RecalledItem,
     UntrustedMemoryWriteError,
 )
-from wattwise_core.persistence.models import Athlete, Base
+from wattwise_core.agent.state_store import AgentStateBase
+from wattwise_core.persistence.base import Base
 
 
 @pytest_asyncio.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    """A session over a fresh in-memory agent-state schema (memory_item included)."""
+    """A session over a fresh in-memory AGENT-STATE schema (agent_memory_item included)."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(AgentStateBase.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with factory() as s:
         yield s
@@ -40,11 +44,8 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 async def _athlete(session: AsyncSession) -> str:
-    """Seed one athlete (FK target for memory_item.athlete_id) and return its id."""
-    athlete = Athlete(sex="male", reference_timezone="UTC")
-    session.add(athlete)
-    await session.flush()
-    return str(athlete.athlete_id)
+    """Return a fresh athlete scope id (an agent-state-side scope, no canonical FK)."""
+    return str(uuid.uuid4())
 
 
 @pytest.mark.unit
@@ -162,6 +163,23 @@ async def test_erase_removes_only_that_athlete(session: AsyncSession) -> None:
     assert removed == 1
     assert await store.fetch_relevant(athlete_id=mine, query="climb") == []
     assert len(await store.fetch_relevant(athlete_id=other, query="sprint")) == 1
+
+
+@pytest.mark.unit
+def test_memory_lives_in_agent_state_store_not_canonical() -> None:
+    """MEM-R3/ARCH-R13: durable memory is on AgentStateBase, never the canonical store.
+
+    The table is registered on the agent-state metadata with the ``agent_`` prefix and is
+    ABSENT from the canonical ``Base`` metadata; its ``athlete_id`` is a plain scope column
+    with no foreign key into the canonical ``athlete`` table (defence-in-depth scoping).
+    """
+    assert MemoryItem.__tablename__ == "agent_memory_item"
+    assert "agent_memory_item" in AgentStateBase.metadata.tables
+    assert "agent_memory_item" not in Base.metadata.tables
+    assert "memory_item" not in Base.metadata.tables
+    # No FK into the canonical athlete table (no cross-store coupling).
+    fks = MemoryItem.__table__.c["athlete_id"].foreign_keys
+    assert not fks
 
 
 @pytest.mark.unit

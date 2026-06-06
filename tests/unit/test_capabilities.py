@@ -205,41 +205,50 @@ async def test_gather_keys_results_by_canonical_capability_id() -> None:
         RetrievalRequest("weekly_load", {"from_date": _DAY, "to_date": _DAY}),
         RetrievalRequest("trimp", {"activity_id": "act-1"}),
     ]
-    out = await gather(svc, _ATHLETE, reqs)
+    out = (await gather(svc, _ATHLETE, reqs)).records
     assert set(out) == {"weekly_load", "trimp"}
     assert out["trimp"].value == 88.0  # canonical Computed envelope, verbatim
 
 
-async def test_gather_scopes_athlete_from_arg_not_from_request() -> None:
-    """PLAN-R5: an athlete-shaped key inside params is ignored; the ARG is authoritative."""
+async def test_gather_ignores_scope_override_and_emits_anomaly() -> None:
+    """PLAN-R5/AGT-OBS-R5a: an athlete-shaped key in params is IGNORED + flagged.
+
+    The smuggled ``athlete_id`` is stripped before validation (so the request still
+    resolves under the authenticated scope), and a typed anomaly event records the
+    attempt, the ignored override, and the authenticated scope used — never adopting it.
+    """
     svc = _svc()
-    # The request params try to smuggle a different athlete; the closed schema drops it,
-    # and gather only ever passes the ARGUMENT athlete to the service.
     reqs = [
         RetrievalRequest(
             "weekly_load",
             {"from_date": _DAY, "to_date": _DAY, "athlete_id": _OTHER_ATHLETE},
         )
     ]
-    out = await gather(svc, _ATHLETE, reqs)
-    # The smuggled athlete made the params invalid (extra='forbid') -> typed gap, and the
-    # service was NEVER called for the other athlete.
-    assert out["weekly_load"]["available"] is False
-    assert out["weekly_load"]["reason"] == "invalid_params"
+    result = await gather(svc, _ATHLETE, reqs)
+    # The request resolved under the AUTHENTICATED athlete; the other was never called.
     assert _OTHER_ATHLETE not in svc.athlete_calls
+    assert svc.athlete_calls == [_ATHLETE]
+    # The override was detected, ignored, and recorded (AGT-OBS-R5a).
+    assert len(result.anomalies) == 1
+    anomaly = result.anomalies[0]
+    assert anomaly.kind == "scope_override_ignored"
+    assert anomaly.attempted_keys == ("athlete_id",)
+    assert anomaly.ignored_override == {"athlete_id": _OTHER_ATHLETE}
+    assert anomaly.authenticated_scope == _ATHLETE
 
 
 async def test_gather_uses_only_the_argument_athlete_for_valid_requests() -> None:
     svc = _svc()
     reqs = [RetrievalRequest("hrv", {"local_date": _DAY})]
-    await gather(svc, _ATHLETE, reqs)
+    result = await gather(svc, _ATHLETE, reqs)
     assert svc.athlete_calls == [_ATHLETE]
+    assert result.anomalies == ()
 
 
 async def test_gather_records_gap_for_unknown_capability_not_fabrication() -> None:
     """TOOL-R5: an out-of-registry capability is a typed gap, never a crash or success."""
     svc = _svc()
-    out = await gather(svc, _ATHLETE, [RetrievalRequest("does_not_exist", {})])
+    out = (await gather(svc, _ATHLETE, [RetrievalRequest("does_not_exist", {})])).records
     gap = out["does_not_exist"]
     assert gap["available"] is False
     assert gap["reason"] == "unknown_capability"
@@ -247,7 +256,7 @@ async def test_gather_records_gap_for_unknown_capability_not_fabrication() -> No
 
 async def test_gather_records_gap_for_invalid_params() -> None:
     svc = _svc()
-    out = await gather(svc, _ATHLETE, [RetrievalRequest("load_metrics", {})])
+    out = (await gather(svc, _ATHLETE, [RetrievalRequest("load_metrics", {})])).records
     assert out["load_metrics"]["available"] is False
     assert out["load_metrics"]["reason"] == "invalid_params"
 
@@ -255,7 +264,9 @@ async def test_gather_records_gap_for_invalid_params() -> None:
 async def test_gather_passes_through_unavailable_canonical_result() -> None:
     """TOOL-R5: an Unavailable canonical computation is surfaced verbatim, never faked."""
     svc = _svc(missing=True)
-    out = await gather(svc, _ATHLETE, [RetrievalRequest("load_metrics", {"activity_id": "act-1"})])
+    out = (
+        await gather(svc, _ATHLETE, [RetrievalRequest("load_metrics", {"activity_id": "act-1"})])
+    ).records
     result = out["load_metrics"]
     assert isinstance(result, Unavailable)
     assert result.reason is UnavailableReason.MISSING_REQUIRED_INPUT
@@ -263,7 +274,9 @@ async def test_gather_passes_through_unavailable_canonical_result() -> None:
 
 async def test_gather_routes_activity_capabilities_by_activity_id() -> None:
     svc = _svc()
-    out = await gather(svc, _ATHLETE, [RetrievalRequest("decoupling", {"activity_id": "act-9"})])
+    out = (
+        await gather(svc, _ATHLETE, [RetrievalRequest("decoupling", {"activity_id": "act-9"})])
+    ).records
     assert svc.activity_calls == ["act-9"]
     assert out["decoupling"].value == 4.2
 

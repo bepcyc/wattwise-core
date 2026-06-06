@@ -281,10 +281,15 @@ def test_openapi_document_is_public() -> None:
     assert f"{API_PREFIX}/system/status" in doc["paths"]
 
 
-def test_token_issuance_returns_auth_tokens_shape() -> None:
-    """POST /v1/auth/token (public) issues an AuthTokens body usable for auth (API-R23)."""
+def test_token_issuance_requires_first_party_credential() -> None:
+    """POST /v1/auth/token mints a token only for a valid owner secret (API-R23).
+
+    The endpoint is public (pre-token, AUTH-R10) but NOT fail-open: it exchanges the
+    first-party owner credential (the configured signing secret) for an access token,
+    and the issued token authenticates against a protected route.
+    """
     client = _app_with_probe_routes()
-    resp = client.post(f"{API_PREFIX}/auth/token")
+    resp = client.post(f"{API_PREFIX}/auth/token", json={"owner_secret": _SIGNING_KEY})
     assert resp.status_code == 200
     body = resp.json()
     assert body["token_type"] == "bearer"
@@ -296,3 +301,14 @@ def test_token_issuance_returns_auth_tokens_shape() -> None:
         headers={"Authorization": f"Bearer {body['access_token']}"},
     )
     assert authed.status_code == 200
+
+
+def test_token_issuance_rejects_bad_credential_401() -> None:
+    """An invalid/absent owner secret is rejected 401, never a fail-open token (API-R23)."""
+    client = _app_with_probe_routes()
+    bad = client.post(f"{API_PREFIX}/auth/token", json={"owner_secret": "wrong"})
+    assert bad.status_code == 401
+    assert bad.headers["www-authenticate"] == "Bearer"
+    assert bad.json()["type"] == f"{PROBLEM_BASE_URI}unauthenticated"
+    missing = client.post(f"{API_PREFIX}/auth/token", json={})
+    assert missing.status_code == 422  # SCHEMA-R4: owner_secret is required

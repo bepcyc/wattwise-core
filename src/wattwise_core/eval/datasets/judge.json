@@ -1,0 +1,19 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "judge",
+  "qa_eval_suite": "R5",
+  "requirement_ids": ["EVAL-R5", "VOICE-R1", "VOICE-R2", "COACH-R7"],
+  "rationale": "LLM-as-judge qualitative rubric set (EVAL-R5): a deliverable body is scored on coherence/tone/coach-voice/actionability/clarity via a PROVIDER-ENFORCED structured output (recorded offline, no network). The judge scores tone/voice/clarity ONLY; it NEVER certifies grounding/abstention/injection/status (those stay deterministic). A case scoring below the rubric floor on any dimension fails CI.",
+  "cases": [
+    {
+      "id": "judge-warm-actionable-digest",
+      "body": "You're holding steady this week. Fitness is right where we want it, and recovery looks good. Keep the rhythm and we'll add a touch of intensity next block.",
+      "recorded_scores": {"coherence": 5, "tone": 5, "coach_voice": 5, "actionability": 4, "clarity": 5}
+    },
+    {
+      "id": "judge-clear-answer",
+      "body": "Your form dipped a little after that big block, which is exactly what we'd expect. Give it two easy days and it'll bounce back.",
+      "recorded_scores": {"coherence": 4, "tone": 5, "coach_voice": 4, "actionability": 4, "clarity": 4}
+    }
+  ]
+}

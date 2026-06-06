@@ -14,8 +14,12 @@ Asserted behaviours:
   exactly ``MAX_REFLECTIONS`` times and the run **degrades** (not loops, not errors).
 * GRAPH-R3 redraft cycle is bounded: a grounder that always asks to REGENERATE spends
   the redraft budget exactly ``MAX_REDRAFTS`` times then settles, never looping forever.
-* The approval gate (between ground and finalize) yields ``AWAITING_APPROVAL`` on an
-  abstaining grounding decision.
+* GROUND-R9/OUTCOME-R1: a grounder ABSTAIN finalizes ``DEGRADED`` (never
+  ``AWAITING_APPROVAL``); ``awaiting_approval`` is emitted ONLY by ``interrupt_gate`` for
+  an approval-gated PLAN paused at a durable langgraph interrupt (CKPT-R5).
+* GRAPH-R5: a node-visit-ceiling breach routes to a ``DEGRADED`` finalize, never raising.
+* STATE-R4: a changed write to a write-once identity field is rejected at the reducer.
+* COST-R4: a refused cost-admission gate finalizes ``BUDGET_EXCEEDED``.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from typing import Any
 import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 from pydantic import BaseModel
 
 from wattwise_core.agent.contracts import (
@@ -36,8 +41,11 @@ from wattwise_core.agent.contracts import (
     GroundedClaim,
     GroundingResult,
     GroundVerdict,
+    ReflectDecision,
+    ReflectVerdict,
     RetrievalRequest,
     RunStatus,
+    _write_once,
 )
 from wattwise_core.agent.graph import (
     MAX_REDRAFTS,
@@ -53,13 +61,23 @@ pytestmark = pytest.mark.unit
 
 
 class FakeModel:
-    """Deterministic ``ChatModel`` stub: counts compose calls, returns a fixed draft."""
+    """Deterministic ``ChatModel`` stub: counts compose calls, scripts reflect verdicts.
 
-    def __init__(self) -> None:
+    ``structured`` returns the scripted :class:`ReflectDecision` so the reflect node's
+    REFLECT-R2 verdict is provider-shaped in tests; the default verdict is ``replan`` so
+    the bounded recovery cycles still exercise to their budget.
+    """
+
+    def __init__(self, *, reflect_verdict: ReflectVerdict = ReflectVerdict.REPLAN) -> None:
         self.compose_calls = 0
+        self.structured_calls = 0
+        self._reflect_verdict = reflect_verdict
 
     async def structured[M: BaseModel](self, *, system: str, data: str, schema: type[M]) -> M:
-        raise NotImplementedError("graph nodes under test do not call structured()")
+        self.structured_calls += 1
+        if schema is ReflectDecision:
+            return ReflectDecision(verdict=self._reflect_verdict)  # type: ignore[return-value]
+        raise NotImplementedError(f"no scripted structured output for {schema.__name__}")
 
     async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:
         self.compose_calls += 1
@@ -122,8 +140,13 @@ class FakeGrounder:
         )
 
 
-def _services(*, gaps: set[str], decision: GroundDecision) -> tuple[FakeModel, AgentServices]:
-    model = FakeModel()
+def _services(
+    *,
+    gaps: set[str],
+    decision: GroundDecision,
+    reflect_verdict: ReflectVerdict = ReflectVerdict.REPLAN,
+) -> tuple[FakeModel, AgentServices]:
+    model = FakeModel(reflect_verdict=reflect_verdict)
     svc = AgentServices(
         planner=FakePlanner(),
         gateway=FakeGateway(),
@@ -180,8 +203,9 @@ async def test_coverage_exhaustion_degrades() -> None:
     assert out["status"] is RunStatus.DEGRADED
     # reflection budget spent exactly to the bound, not beyond.
     assert out["reflection_count"] == MAX_REFLECTIONS
-    # the unresolved gap is surfaced as a caveat for the athlete-facing layer.
-    assert out["coverage_caveat"] == {"open_gaps": ["missing_ftp"]}
+    # the unresolved gap is surfaced as a TYPED coverage caveat (OUTCOME-R4 structured).
+    assert list(out["coverage_caveat"]["missing"]) == ["missing_ftp"]
+    assert out["coverage_caveat"]["fidelity"] == "partial"
 
 
 async def test_redraft_cycle_is_bounded() -> None:
@@ -210,14 +234,23 @@ async def test_replan_cycle_is_bounded() -> None:
     assert out["status"] is RunStatus.DEGRADED
 
 
-async def test_abstain_awaits_approval() -> None:
-    """An abstaining grounding decision routes through the gate to AWAITING_APPROVAL."""
+async def test_abstain_degrades_not_awaiting_approval() -> None:
+    """A grounder ABSTAIN finalizes DEGRADED with a caveat, never AWAITING_APPROVAL.
+
+    GROUND-R9 / OUTCOME-R1 / OUTCOME-R3: abstain is a fail-closed grounding outcome that
+    ships a typed limitation deliverable (degraded), not a plan awaiting human approval.
+    awaiting_approval is reserved strictly for an approval-gated PLAN at interrupt_gate.
+    """
     model, svc = _services(gaps=set(), decision=GroundDecision.ABSTAIN)
     graph = build_graph(model, svc, InMemorySaver())
 
     out = await graph.ainvoke(_input(), config=_config("abstain"))
 
-    assert out["status"] is RunStatus.AWAITING_APPROVAL
+    assert out["status"] is RunStatus.DEGRADED
+    assert out["status"] is not RunStatus.AWAITING_APPROVAL
+    # the degraded outcome carries a typed coverage caveat (OUTCOME-R4).
+    assert out["coverage_caveat"] is not None
+    assert out["coverage_caveat"]["fidelity"] == "degraded"
 
 
 async def test_server_derived_identity_flows_not_client() -> None:
@@ -241,16 +274,110 @@ async def test_missing_identity_fails_closed() -> None:
         await graph.ainvoke(bad, config=_config("noident"))
 
 
-async def test_interrupt_before_finalize_pauses_run() -> None:
-    """With approval interrupts on, the graph pauses before the single sink (GRAPH-R2)."""
+async def test_phase1_run_never_awaits_approval() -> None:
+    """Phase-1 ships no approval-gated plan, so awaiting_approval never fires (CKPT-R5)."""
     model, svc = _services(gaps=set(), decision=GroundDecision.PROCEED)
-    graph = build_graph(model, svc, InMemorySaver(), interrupt_on_approval=True)
-    cfg = _config("pause")
+    graph = build_graph(model, svc, InMemorySaver())
 
-    paused = await graph.ainvoke(_input(), config=cfg)
-    # no terminal status yet: the run is held at the gate, before finalize.
-    assert "status" not in paused or paused.get("status") is None
+    out = await graph.ainvoke(_input(), config=_config("noplan"))
 
-    # resuming (None input) runs finalize to a single COMPLETED outcome.
-    resumed = await graph.ainvoke(None, config=cfg)
+    assert out["status"] is RunStatus.COMPLETED
+    assert out["status"] is not RunStatus.AWAITING_APPROVAL
+
+
+async def test_approval_gated_plan_pauses_at_durable_interrupt() -> None:
+    """An approval-gated PLAN deliverable PAUSES at interrupt_gate with a durable interrupt.
+
+    CKPT-R5: the pause yields ``awaiting_approval`` carrying the grounded plan + a unique
+    interrupt_id, and the run does NOT reach finalize until a matching approve decision
+    resumes it — at which point finalize emits COMPLETED.
+    """
+    model, svc = _services(gaps=set(), decision=GroundDecision.PROCEED)
+    graph = build_graph(model, svc, InMemorySaver())
+    cfg = _config("approval-plan")
+
+    state = _input()
+    # Mark the run's grounded deliverable as an approval-gated plan (product policy).
+    state["messages"] = [{"role": "system", "kind": "plan_deliverable", "requires_approval": True}]
+    paused = await graph.ainvoke(state, config=cfg)
+
+    # The run is HELD at the durable interrupt: no terminal status yet.
+    assert paused.get("status") is None or "status" not in paused
+    interrupts = paused["__interrupt__"]
+    assert interrupts, "interrupt_gate must yield a durable interrupt"
+    payload = interrupts[0].value
+    assert payload["status"] == RunStatus.AWAITING_APPROVAL.value
+    assert payload["interrupt_id"]
+
+    # Resuming with an approve decision runs finalize to a single COMPLETED outcome.
+    resumed = await graph.ainvoke(Command(resume={"approved": True}), config=cfg)
     assert resumed["status"] is RunStatus.COMPLETED
+
+
+async def test_write_once_identity_overwrite_is_rejected() -> None:
+    """A second write of a DIFFERENT athlete_id is rejected at the reducer (STATE-R4)."""
+    assert _write_once("", "athlete-1") == "athlete-1"
+    assert _write_once("athlete-1", "athlete-1") == "athlete-1"
+    with pytest.raises(ValueError, match="write-once"):
+        _write_once("athlete-1", "attacker-2")
+
+
+async def test_node_visit_ceiling_degrades_never_raises() -> None:
+    """A run that would exceed the configured node-visit ceiling degrades, never errors.
+
+    GRAPH-R5 / OUTCOME-R3: with a tiny ceiling the run terminates at finalize with a
+    DEGRADED status instead of raising GraphRecursionError or looping.
+    """
+    model, svc = _services(gaps={"never_closes"}, decision=GroundDecision.PROCEED)
+    # A ceiling far below the longest legal path forces an early ceiling-degrade.
+    graph = build_graph(model, svc, InMemorySaver(), node_visit_ceiling=3)
+
+    out = await graph.ainvoke(_input(), config=_config("ceiling"))
+
+    assert out["status"] is RunStatus.DEGRADED
+    assert out["cost_rollup"]["node_visits"] >= 3
+
+
+async def test_budget_exceeded_when_admission_refused() -> None:
+    """A cost-admission gate that refuses finalizes BUDGET_EXCEEDED (COST-R4)."""
+
+    class _RefusingGate:
+        async def admit(self, *, athlete_id: str, state: AgentState) -> bool:
+            return False
+
+        async def settle(self, *, athlete_id: str, state: AgentState) -> None:
+            return None
+
+    model = FakeModel()
+    svc = AgentServices(
+        planner=FakePlanner(),
+        gateway=FakeGateway(),
+        coverage=FakeCoverage(set()),
+        grounder=FakeGrounder(GroundDecision.PROCEED),
+        cost_gate=_RefusingGate(),
+    )
+    graph = build_graph(model, svc, InMemorySaver())
+
+    out = await graph.ainvoke(_input(), config=_config("budget"))
+
+    assert out["status"] is RunStatus.BUDGET_EXCEEDED
+    # the run short-circuited: it never composed a draft.
+    assert model.compose_calls == 0
+
+
+async def test_reflect_emits_structured_verdict_and_routes() -> None:
+    """reflect emits a structured §6 verdict; give_up_gracefully terminates (REFLECT-R2)."""
+    model, svc = _services(
+        gaps={"missing"},
+        decision=GroundDecision.PROCEED,
+        reflect_verdict=ReflectVerdict.GIVE_UP_GRACEFULLY,
+    )
+    graph = build_graph(model, svc, InMemorySaver())
+
+    out = await graph.ainvoke(_input(), config=_config("reflect-verdict"))
+
+    # the structured verdict was obtained at least once ...
+    assert model.structured_calls >= 1
+    # ... and give_up_gracefully routed straight to a degraded finalize (no full budget).
+    assert out["status"] is RunStatus.DEGRADED
+    assert out["reflection_count"] == 1

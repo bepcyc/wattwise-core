@@ -24,16 +24,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import ActivityFileFormat, Fidelity
+from wattwise_core.ingestion._canonical import field_candidates
+from wattwise_core.ingestion.dedup import resolve_field
 from wattwise_core.ingestion.ingest import IngestService, OriginalFile
 from wattwise_core.persistence.models import (
     Activity,
     ActivityFile,
+    ActivityStreamSet,
     Athlete,
     Base,
     DailyWellness,
     SourceCandidate,
     SourceDescriptor,
     Sport,
+    StreamChannel,
 )
 from wattwise_core.storage import LocalObjectStore, content_hash
 
@@ -287,3 +291,112 @@ async def test_direct_api_source_creates_no_activity_file(session: AsyncSession)
     await ingest.ingest(athlete_id, api_src, [cand])  # no original_files
     await session.commit()
     assert (await session.execute(select(ActivityFile))).scalars().all() == []
+
+
+# ------------------------------------------------ CONF-R2 step-4: completeness tiebreak
+
+
+def test_completeness_breaks_tie_stream_over_summary() -> None:
+    """At the same tier/confidence/recency, a stream-backed scalar wins (CONF-R2 step 4).
+
+    The stream-backed contributor is given the LEXICALLY-GREATER source id so it would
+    LOSE the final stable tiebreak — it can only win via the completeness step, proving
+    completeness is actually applied (was inert when every candidate defaulted to 1.0).
+    """
+
+    def _candidate(sid: str, value: float, *, streamed: bool) -> SourceCandidate:
+        payload: dict[str, object] = {"avg_power_w": value}
+        if streamed:
+            payload["streams"] = {"power_w": {"values": [value]}}
+        return SourceCandidate(
+            athlete_id=None, source_descriptor_id=sid, source_native_id=sid,
+            content_hash=sid, trust_profile={"tier": Fidelity.PLATFORM_COMPUTED.value},
+            payload=payload, confidence=1.0,
+        )
+
+    def _tier_of(c: SourceCandidate) -> Fidelity:
+        return Fidelity(str(c.trust_profile["tier"]))
+
+    streamed = _candidate("zzz", 300.0, streamed=True)  # greater id -> loses stable tiebreak
+    summary = _candidate("aaa", 210.0, streamed=False)  # lower id -> would win the tiebreak
+    contributors = field_candidates([streamed, summary], "avg_power_w", _tier_of)
+    winner = resolve_field(contributors)
+    assert winner is not None
+    assert winner.value == 300.0  # completeness wins despite the worse stable tiebreak
+
+
+# ---------------------------------------------------- ING-UPS-R5: per-channel streams
+
+
+def _ride_channels(
+    *, native_id: str, channels: dict[str, list[float]], tier: Fidelity
+) -> GboCandidate:
+    streams = {
+        name: {"values": vals, "sample_basis": "time", "sample_rate_hz": 1.0}
+        for name, vals in channels.items()
+    }
+    payload = {
+        "start_time": _START,
+        "sport": "cycling",
+        "elapsed_time_s": 3600,
+        "moving_time_s": 3600,
+        "streams": streams,
+    }
+    return GboCandidate(
+        gbo_type="activity",
+        source_descriptor_id="placeholder",
+        source_native_id=native_id,
+        content_hash=content_hash(f"{native_id}:{sorted(channels)}".encode()),
+        payload=payload,
+        trust_tier=tier,
+        fetched_at=_dt.datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+    )
+
+
+async def test_streams_resolved_per_channel_across_sources(session: AsyncSession) -> None:
+    """A channel a higher-trust source lacks is filled from a lower-trust one (CONF-R3)."""
+    athlete_id, file_src, api_src = await _seed(session)
+    ingest = IngestService(session)
+    # Higher-trust source has only power; lower-trust source has only HR.
+    hi = _ride_channels(
+        native_id="hi", channels={"power_w": [200.0] * 5}, tier=Fidelity.RAW_STREAM
+    )
+    lo = _ride_channels(
+        native_id="lo", channels={"hr_bpm": [140.0] * 5}, tier=Fidelity.SUMMARY_ONLY
+    )
+    await ingest.ingest(athlete_id, file_src, [hi])
+    await ingest.ingest(athlete_id, api_src, [lo])
+    await session.commit()
+    ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
+    chans = (
+        await session.execute(
+            select(StreamChannel).where(StreamChannel.stream_set_id == ss.stream_set_id)
+        )
+    ).scalars().all()
+    by_name = {c.channel.value: c for c in chans}
+    # Both channels present — the HR channel was filled from the lower-trust source.
+    assert "power_w" in by_name and "hr_bpm" in by_name
+
+
+async def test_lower_trust_stream_never_overwrites_higher_trust(session: AsyncSession) -> None:
+    """A later lower-trust power stream never clobbers the stored higher-trust one (ING-UPS-R5)."""
+    athlete_id, file_src, api_src = await _seed(session)
+    ingest = IngestService(session)
+    hi = _ride_channels(native_id="hi", channels={"power_w": [200.0] * 5}, tier=Fidelity.RAW_STREAM)
+    lo = _ride_channels(
+        native_id="lo", channels={"power_w": [999.0] * 5}, tier=Fidelity.SUMMARY_ONLY
+    )
+    await ingest.ingest(athlete_id, file_src, [hi])
+    await ingest.ingest(athlete_id, api_src, [lo])
+    await session.commit()
+    ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
+    power = (
+        await session.execute(
+            select(StreamChannel).where(
+                StreamChannel.stream_set_id == ss.stream_set_id,
+                StreamChannel.channel == "power_w",
+            )
+        )
+    ).scalars().one()
+    # The higher-trust raw_stream power survives the lower-trust write.
+    assert power.values == [200.0] * 5

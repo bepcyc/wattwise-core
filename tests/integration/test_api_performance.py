@@ -32,6 +32,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.api.errors import install_error_handlers
 from wattwise_core.api.routers import activities as act_router
 from wattwise_core.api.routers import performance as perf_router
 from wattwise_core.domain.enums import (
@@ -84,8 +85,15 @@ async def seeded() -> AsyncIterator[Env]:
 
 
 def _build_app(session: AsyncSession, athlete_id: str) -> FastAPI:
-    """Mount both routers and override the identity/scope/service/session seams."""
+    """Mount both routers and override the identity/scope/service/session/cursor seams.
+
+    Installs the uniform RFC 9457 error handlers so a raised :class:`ProblemError`
+    renders as the same ``application/problem+json`` document production emits (ERR-R1),
+    and wires the deterministic cursor signing key the activities cursor signs with
+    (PAGE-R5).
+    """
     app = FastAPI()
+    install_error_handlers(app)
     app.include_router(perf_router.router)
     app.include_router(act_router.router)
     overrides = {
@@ -93,6 +101,7 @@ def _build_app(session: AsyncSession, athlete_id: str) -> FastAPI:
         perf_router.current_athlete_id: lambda: athlete_id,
         perf_router.analytics_service: lambda: AnalyticsService(session),
         act_router.current_session: lambda: session,
+        act_router.cursor_signing_key: lambda: "perf-test-cursor-key",
     }
     app.dependency_overrides.update(overrides)
     return app
@@ -206,9 +215,11 @@ async def test_critical_power_fails_closed_when_underdetermined(
     client = seeded.client
     resp = await client.get("/v1/performance/critical-power", params=_range())
     assert resp.status_code == 422
-    detail = resp.json()["detail"]
-    assert detail["type"] == "analytics-precondition-unmet"
-    assert detail["errors"][0]["code"] == "cp_insufficient_points"
+    body = resp.json()
+    # ERR-R9: the closed-catalog type + machine errors[].code reach the wire (not a
+    # framework-discarded detail dict).
+    assert body["type"].endswith("/analytics-precondition-unmet")
+    assert body["errors"][0]["code"] == "cp_insufficient_points"
 
 
 @pytest.mark.integration
@@ -369,3 +380,69 @@ async def test_read_scope_required(seeded: Env) -> None:
         assert resp.status_code == 403
     finally:
         seeded.app.dependency_overrides[perf_router.require_read_scope] = lambda: None
+
+
+# --- convergence regressions (PAGE-R5/R6, API-R48 base_values, sort) --------------
+
+
+@pytest.mark.integration
+async def test_tampered_cursor_is_400_invalid_cursor(seeded: Env) -> None:
+    """A forged/garbage cursor yields 400 invalid-cursor, not a remapped 422 (PAGE-R5)."""
+    resp = await seeded.client.get("/v1/activities", params={"cursor": "not-a-signed-cursor"})
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["type"].endswith("/invalid-cursor")
+    assert body["status"] == 400
+
+
+@pytest.mark.integration
+async def test_cursor_mismatched_filters_is_cursor_parameter_mismatch(seeded: Env) -> None:
+    """A cursor replayed against changed filters -> 400 cursor-parameter-mismatch (PAGE-R6)."""
+    first = await seeded.client.get("/v1/activities", params={"sport": "cycling", "limit": 1})
+    assert first.status_code == 200
+    # Force a next page by seeding a second ride so the first page reports a cursor.
+    await _seed_no_gps_activity(seeded.session, seeded.athlete_id)
+    page = await seeded.client.get("/v1/activities", params={"limit": 1})
+    cursor = page.json()["page"]["next_cursor"]
+    assert cursor is not None
+    # Reuse the cursor but with a different filter fingerprint than it was issued for.
+    resp = await seeded.client.get(
+        "/v1/activities", params={"limit": 1, "sport": "running", "cursor": cursor}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["type"].endswith("/cursor-parameter-mismatch")
+
+
+@pytest.mark.integration
+async def test_streams_base_values_are_seconds_not_indices(seeded: Env) -> None:
+    """``base=time`` base_values are seconds from start (API-R48), index-aligned to channels."""
+    resp = await seeded.client.get(
+        f"/v1/activities/{seeded.activity_id}/streams",
+        params={"channels": "power_w", "base": "time", "max_points": 10},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    base = body["base_values"]
+    assert body["base"] == "time"
+    assert base[0] == 0.0  # seconds from start_time, not a bare sample index offset
+    assert base == sorted(base)
+    assert len(base) == len(body["channels"]["power_w"]["values"])
+
+
+@pytest.mark.integration
+async def test_streams_latlng_channel_is_rejected_422(seeded: Env) -> None:
+    """A latlng request on /streams is a 422 (pair shape can't ride a scalar column, API-R48)."""
+    resp = await seeded.client.get(
+        f"/v1/activities/{seeded.activity_id}/streams", params={"channels": "latlng"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["type"].endswith("/validation-error")
+
+
+@pytest.mark.integration
+async def test_activities_sort_by_duration_is_accepted(seeded: Env) -> None:
+    """The PAGE-R2 sort allow-list (start_time|duration|tss) is accepted and applied."""
+    resp = await seeded.client.get("/v1/activities", params={"sort": "duration", "order": "asc"})
+    assert resp.status_code == 200
+    bad = await seeded.client.get("/v1/activities", params={"sort": "bogus"})
+    assert bad.status_code == 422  # outside the allow-list

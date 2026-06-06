@@ -1,0 +1,34 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "intent_plan",
+  "qa_eval_suite": "R3",
+  "requirement_ids": ["EVAL-R3", "PLAN-R1", "PLAN-R2", "PLAN-R3"],
+  "rationale": "Intent / retrieval-plan accuracy set (EVAL-R3): a labelled request -> expected capability-key set, scored micro-averaged for precision AND recall (>= 0.9 gate) over the planner's emitted requests. Keys are verbatim CAPABILITIES registry keys (PLAN-R3).",
+  "cases": [
+    {
+      "id": "intent-weekly-load",
+      "request_text": "How is my fitness trending this week?",
+      "expected_capabilities": ["weekly_load"]
+    },
+    {
+      "id": "intent-critical-power",
+      "request_text": "What is my critical power / threshold right now?",
+      "expected_capabilities": ["critical_power"]
+    },
+    {
+      "id": "intent-hrv-readiness",
+      "request_text": "How is my HRV and morning recovery readiness?",
+      "expected_capabilities": ["hrv"]
+    },
+    {
+      "id": "intent-decoupling",
+      "request_text": "Was there aerobic decoupling / drift on that ride?",
+      "expected_capabilities": ["decoupling"]
+    },
+    {
+      "id": "intent-load-and-form",
+      "request_text": "Give me my weekly load trend and current form.",
+      "expected_capabilities": ["weekly_load"]
+    }
+  ]
+}

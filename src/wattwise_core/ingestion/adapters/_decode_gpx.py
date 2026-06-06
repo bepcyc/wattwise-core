@@ -29,7 +29,16 @@ _EXT_SPEED = ("speed",)
 
 
 def decode_gpx(data: bytes) -> ActivityAsbo:
-    """Decode verbatim GPX bytes into an :class:`ActivityAsbo` (impure I/O)."""
+    """Decode verbatim GPX bytes into an :class:`ActivityAsbo` (impure I/O).
+
+    Hardened against XXE / entity-expansion (CLI-R2/ING-R7, TIER-R5): a DTD or entity
+    declaration is rejected before parsing — a valid GPX never carries one, and refusing
+    them closes the external-entity / billion-laughs vector independent of which XML
+    backend ``gpxpy`` selects (a fail-closed guard, not a reliance on a safe default).
+    """
+    head = data[:4096].lstrip().lower()
+    if b"<!doctype" in head or b"<!entity" in data[:65536].lower():
+        raise FileDecodeError("GPX with a DTD/entity declaration is rejected (XXE guard)")
     try:
         gpx = gpxpy.parse(data.decode("utf-8", errors="strict"))
     except FileDecodeError:

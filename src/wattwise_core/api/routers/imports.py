@@ -35,10 +35,10 @@ from fastapi import APIRouter, Depends, File, UploadFile, status
 from pydantic import BaseModel
 
 from wattwise_core.api.auth import Scope, require_scopes
-from wattwise_core.api.deps import AppSettings, CurrentPrincipal
+from wattwise_core.api.deps import AppSettings, CurrentPrincipal, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 
-router = APIRouter(prefix="/v1/imports", tags=["imports"])
+router = APIRouter(prefix="/v1/imports", tags=["imports"], dependencies=[RateLimit])
 
 
 #: The activity-file extensions the OSS importer accepts (API-R33). A double

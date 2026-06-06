@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,7 @@ from wattwise_core.domain.enums import (
     SampleBasis,
     StreamChannelName,
     StreamSetKind,
+    trust_rank,
 )
 from wattwise_core.ingestion.dedup import resolve_field
 from wattwise_core.persistence.models import (
@@ -117,10 +118,34 @@ def field_candidates(
     return out
 
 
+def resolve_streams(
+    candidates: list[SourceCandidate], tier_of: Any
+) -> dict[str, dict[str, Any]]:
+    """Resolve each stream channel across candidates by the trust order (CONF-R3/PRV-R6).
+
+    Per-channel (not per-record): a channel is taken from its HIGHEST-trust contributor,
+    so a channel a higher-trust source lacks is filled from a lower-trust one rather than
+    dropped, and a higher-trust channel is never regressed. Each winning channel carries
+    its contributor's ``_fidelity`` so the channel write can trust-guard the overwrite
+    (ING-UPS-R5). Ties break on the stable source_descriptor_id (deterministic, CONF-R4).
+    """
+    ordered = sorted(
+        candidates, key=lambda c: (trust_rank(tier_of(c)), str(c.source_descriptor_id))
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for c in ordered:  # highest-trust first; first writer per channel wins, never overwritten
+        streams = cast("dict[str, Any]", c.payload.get("streams") or {})
+        fidelity = tier_of(c)
+        for name, chan in streams.items():
+            if name not in out:
+                out[name] = {**chan, "_fidelity": fidelity.value}
+    return out
+
+
 async def upsert_stream_set(
     session: AsyncSession, activity_id: uuid.UUID, streams: dict[str, Any]
 ) -> None:
-    """Get-or-create the activity stream set and upsert each channel."""
+    """Get-or-create the activity stream set and upsert each channel (trust-guarded)."""
     stmt = select(ActivityStreamSet).where(ActivityStreamSet.activity_id == activity_id)
     stream_set = (await session.execute(stmt)).scalar_one_or_none()
     if stream_set is None:
@@ -138,6 +163,17 @@ async def upsert_stream_set(
         await _upsert_channel(session, stream_set.stream_set_id, name, chan)
 
 
+def _channel_rank(coverage: dict[str, object] | None) -> int:
+    """The trust rank persisted on a channel's coverage (worst if absent)."""
+    fid = (coverage or {}).get("fidelity")
+    if not isinstance(fid, str):
+        return trust_rank(Fidelity.SUMMARY_ONLY) + 1
+    try:
+        return trust_rank(Fidelity(fid))
+    except ValueError:
+        return trust_rank(Fidelity.SUMMARY_ONLY) + 1
+
+
 async def _upsert_channel(
     session: AsyncSession, stream_set_id: uuid.UUID, name: str, chan: dict[str, Any]
 ) -> None:
@@ -147,6 +183,8 @@ async def _upsert_channel(
     )
     existing = (await session.execute(stmt)).scalar_one_or_none()
     values = chan.get("values", [])
+    fidelity = chan.get("_fidelity", Fidelity.SUMMARY_ONLY.value)
+    coverage = {"present": True, "fidelity": fidelity}
     if existing is None:
         session.add(
             StreamChannel(
@@ -155,11 +193,15 @@ async def _upsert_channel(
                 channel=StreamChannelName(name),
                 sample_basis=SampleBasis(chan.get("sample_basis", "time")),
                 values=values,
-                coverage={},
+                coverage=coverage,
             )
         )
-    else:
+        return
+    # ING-UPS-R5: never overwrite a higher-trust stored channel with a lower-trust one.
+    incoming_rank = _channel_rank(coverage)
+    if incoming_rank <= _channel_rank(existing.coverage):
         existing.values = values
+        existing.coverage = coverage
 
 
 async def upsert_laps(
@@ -268,6 +310,7 @@ __all__ = [
     "create_activity_file",
     "dispute_tolerance",
     "field_candidates",
+    "resolve_streams",
     "upsert_laps",
     "upsert_stream_set",
     "write_wellness_canonical",

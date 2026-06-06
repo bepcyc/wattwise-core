@@ -37,11 +37,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.api.auth import Scope, require_scopes
-from wattwise_core.api.deps import CurrentPrincipal, DbSession
+from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.persistence.models import Connection, SourceDescriptor
 
-router = APIRouter(prefix="/v1/sync", tags=["sync"])
+router = APIRouter(prefix="/v1/sync", tags=["sync"], dependencies=[RateLimit])
 
 
 # --------------------------------------------------------- sync-orchestrator seam

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -178,7 +179,7 @@ async def _r_trimp(svc: AnalyticsService, athlete_id: str, p: BaseModel) -> Any:
     return await svc.trimp(cast(ActivityParams, p).activity_id)
 
 
-_RESOLVERS: Mapping[str, _Resolver] = {
+RESOLVERS: Mapping[str, _Resolver] = {
     "weekly_load": _r_weekly_load,
     "critical_power": _r_critical_power,
     "power_curve": _r_power_curve,
@@ -188,25 +189,59 @@ _RESOLVERS: Mapping[str, _Resolver] = {
     "trimp": _r_trimp,
 }
 
+# Identity/scope-shaped keys a model-selected request is structurally forbidden from
+# carrying: scope is the engine-injected ``athlete_id`` only (PLAN-R5/AGT-SEC-R1). A key
+# of this shape in ``req.params`` is an attempted scope override — ignored, and recorded
+# as an AGT-OBS-R5a anomaly correlated to the run trace.
+_SCOPE_SHAPED_KEYS: frozenset[str] = frozenset(
+    {"athlete_id", "athlete", "tenant_id", "tenant", "user_id", "scope", "as_athlete"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AnomalyEvent:
+    """A typed injection/anomaly event for an attempted scope override (AGT-OBS-R5a)."""
+
+    kind: str
+    capability: str
+    attempted_keys: tuple[str, ...]
+    ignored_override: dict[str, Any]
+    authenticated_scope: str
+
+
+@dataclass(frozen=True, slots=True)
+class GatherResult:
+    """The deterministic gather output: records keyed by capability + any anomalies."""
+
+    records: dict[str, Any]
+    anomalies: tuple[AnomalyEvent, ...] = ()
+
 
 def _gap(reason: str, detail: str = "") -> dict[str, Any]:
     """A recorded coverage GAP (TOOL-R5): an explicit absence, never a fabricated value."""
     return {"available": False, "reason": reason, "detail": detail}
 
 
+def _scope_override_keys(params: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return any scope-shaped keys a model-selected request carried (PLAN-R5)."""
+    return tuple(k for k in params if k.casefold() in _SCOPE_SHAPED_KEYS)
+
+
 async def gather(
     svc: AnalyticsService,
     athlete_id: str,
     requests: list[RetrievalRequest],
-) -> dict[str, Any]:
+) -> GatherResult:
     """Deterministically execute planner-selected capability requests (PLAN-R3/R5).
 
     Each request resolves to exactly ONE canonical :class:`AnalyticsService` call (the
     SAME call the MCP tool layer makes), scoped to ``athlete_id`` — the engine-injected,
     server-derived identity — NEVER to any athlete-shaped value inside the request
-    (PLAN-R5). The result dict is keyed by canonical capability id; an unknown capability
-    or invalid params records a typed coverage GAP (TOOL-R5), never a fabricated success,
-    and never raises out of the gather.
+    (PLAN-R5). If a request's params carry an athlete/scope-shaped key, that override is
+    IGNORED and an :class:`AnomalyEvent` is emitted (the attempt, the ignored override,
+    and the authenticated scope used) for correlation to the run trace (AGT-OBS-R5a). An
+    unknown capability or invalid params records a typed coverage GAP (TOOL-R5), never a
+    fabricated success, and never raises out of the gather.
 
     Args:
         svc: the one canonical analytics service (single data path).
@@ -214,23 +249,41 @@ async def gather(
         requests: planner-selected capability requests with typed params.
 
     Returns:
-        A mapping from capability key to its canonical result envelope, or a typed gap
-        marker for any request that could not be served.
+        A :class:`GatherResult` carrying the capability->record mapping plus any
+        scope-override anomaly events.
     """
     out: dict[str, Any] = {}
+    anomalies: list[AnomalyEvent] = []
     for req in requests:
+        override_keys = _scope_override_keys(req.params)
+        if override_keys:
+            anomalies.append(
+                AnomalyEvent(
+                    kind="scope_override_ignored",
+                    capability=req.capability,
+                    attempted_keys=override_keys,
+                    ignored_override={k: req.params[k] for k in override_keys},
+                    authenticated_scope=athlete_id,
+                )
+            )
         out[req.capability] = await _resolve_one(svc, athlete_id, req)
-    return out
+    return GatherResult(records=out, anomalies=tuple(anomalies))
 
 
 async def _resolve_one(svc: AnalyticsService, athlete_id: str, req: RetrievalRequest) -> Any:
-    """Resolve one request fail-closed: unknown capability / bad params -> typed gap."""
+    """Resolve one request fail-closed: unknown capability / bad params -> typed gap.
+
+    Scope-shaped keys are stripped from the params before validation so a model-supplied
+    ``athlete_id`` can never reach the capability schema; identity is ``athlete_id`` only
+    (PLAN-R5). The detection + anomaly emission happens in :func:`gather`.
+    """
     capability = CAPABILITY_BY_KEY.get(req.capability)
-    resolver = _RESOLVERS.get(req.capability)
+    resolver = RESOLVERS.get(req.capability)
     if capability is None or resolver is None:
         return _gap("unknown_capability", req.capability)
+    clean_params = {k: v for k, v in req.params.items() if k.casefold() not in _SCOPE_SHAPED_KEYS}
     try:
-        params = capability.param_schema.model_validate(req.params)
+        params = capability.param_schema.model_validate(clean_params)
     except ValueError as exc:
         return _gap("invalid_params", type(exc).__name__)
     return await resolver(svc, athlete_id, params)
@@ -342,9 +395,12 @@ class CanonicalEvidence:
 __all__ = [
     "CAPABILITIES",
     "CAPABILITY_BY_KEY",
+    "RESOLVERS",
     "ActivityParams",
+    "AnomalyEvent",
     "CanonicalEvidence",
     "DateRangeParams",
+    "GatherResult",
     "MetricName",
     "WellnessDayParams",
     "gather",

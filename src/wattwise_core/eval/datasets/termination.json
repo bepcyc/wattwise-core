@@ -1,0 +1,19 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "termination",
+  "qa_eval_suite": "R7",
+  "requirement_ids": ["EVAL-R7", "REFLECT-R4", "OUTCOME-R3", "GRAPH-R5"],
+  "rationale": "Termination set (EVAL-R7): two fixtures driving the PRODUCTION graph. A perpetually-insufficient-coverage run MUST terminate at the reflection_count bound; a perpetually-failing-to-ground (always-regenerate) run MUST terminate at the redraft_count bound. Both end DEGRADED — never an unbounded loop, never an error/budget_exceeded.",
+  "cases": [
+    {
+      "id": "terminate-coverage-reflection-bound",
+      "bound": "reflection_count",
+      "rationale": "Gaps never close -> the reflection budget is spent to MAX_REFLECTIONS then the run degrades."
+    },
+    {
+      "id": "terminate-ground-redraft-bound",
+      "bound": "redraft_count",
+      "rationale": "The grounder always asks to REGENERATE -> the redraft budget is spent to MAX_REDRAFTS then the run degrades."
+    }
+  ]
+}

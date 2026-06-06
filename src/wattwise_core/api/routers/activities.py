@@ -1,40 +1,57 @@
 """Activities router — the canonical ``/v1/activities*`` read surface.
 
 Serves the source-resolved activity list (``GET /v1/activities``, cursor-paginated +
-typed-filtered, PAGE-R1/R8) and the per-activity drill-downs — detail (§13),
-column-oriented per-sample stream series (API-R48), RDP-decimated GPS map track
-(API-R49), and the full lap table (API-R50) — as canonical, source-agnostic payloads
-with no client-side recomputation (API-R31). Every field reads a typed canonical column
-(doc 20 §3.2-§3.4); none is source-shaped or carries a provider name (AUTH-R15/ANL-R1);
-fidelity is the SCHEMA-R9 ``coverage`` only. Degradation is surfaced, never an error
-(API-R29): no GPS → typed empty map (never ``404``); an absent stream channel is
-present-with-``present=false`` + all-``null`` values; no laps → ``laps: []``.
+typed-filtered + typed-sorted, PAGE-R1/R2/R5/R6/R8) and the per-activity drill-downs —
+detail (§13), column-oriented per-sample stream series (API-R48), RDP-decimated GPS map
+track (API-R49), and the full lap table (API-R50) — as canonical, source-agnostic
+payloads with no client-side recomputation (API-R31). Every field reads a typed canonical
+column (doc 20 §3.2-§3.4); none is source-shaped or carries a provider name
+(AUTH-R15/ANL-R1); fidelity is the SCHEMA-R9 ``coverage`` only. Degradation is surfaced,
+never an error (API-R29): no GPS → typed empty map (never ``404``); an absent stream
+channel is present-with-``present=false`` + all-``null`` values; no laps → ``laps: []``.
+
+Every non-2xx is the catalog :class:`ProblemError` (a tampered cursor → ``invalid-cursor``;
+a cursor replayed against changed filters/sort → ``cursor-parameter-mismatch``; a bad
+query param → ``validation-error`` with the offending ``parameter``; an unknown id →
+``not-found``) — never a raw framework ``HTTPException`` whose detail the status-only
+handler would discard.
 
 Acting athlete identity is server-derived (AUTH-R3); the ``read`` scope is required
-(AUTH-R11). The identity/scope/service/session dependencies are override seams the app
+(AUTH-R11). The identity/scope/session/cursor-key dependencies are override seams the app
 factory wires.
 
-Requirement IDs: API-R29, API-R31, API-R48, API-R49, API-R50, PAGE-R1, PAGE-R8,
-AUTH-R3, AUTH-R11, AUTH-R15, ANL-R1, ANL-R7, SCHEMA-R8, SCHEMA-R9, GBO-R17, GBO-R20,
-GBO-R20b.
+Requirement IDs: API-R29, API-R31, API-R48, API-R49, API-R50, API-R51, PAGE-R1, PAGE-R2,
+PAGE-R3, PAGE-R5, PAGE-R6, PAGE-R8, AUTH-R3, AUTH-R11, AUTH-R15, ANL-R1, ANL-R7, ERR-R1,
+ERR-R6, SCHEMA-R8, SCHEMA-R9, DOC-R3.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import datetime as _dt
-import json
 import uuid
-from http import HTTPStatus
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, tuple_
+from sqlalchemy import asc, desc, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics.result import is_computed
+from wattwise_core.api.activity_schemas import (
+    ActivityDetail,
+    ActivityLaps,
+    ActivityList,
+    ActivityStreams,
+    ActivitySummary,
+    ActivityTrack,
+    Lap,
+    Page,
+    StreamChannelOut,
+)
+from wattwise_core.api.decimate import minmax_index, rdp_simplify
+from wattwise_core.api.errors import ProblemError
+from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
+from wattwise_core.api.problems import not_found, parameter_invalid, range_reversed
 from wattwise_core.api.routers.performance import (
     AthleteId,
     CoverageDescriptor,
@@ -61,15 +78,33 @@ _STREAM_CHANNELS: tuple[StreamChannelName, ...] = tuple(
 )
 _MAX_POINTS_CEILING = 5000
 
+#: The activities sort allow-list (PAGE-R2 / spec §8.7); default ``start_time desc``.
+SortKey = Literal["start_time", "duration", "tss"]
+SortOrder = Literal["asc", "desc"]
+_SORT_COLUMN: dict[str, Any] = {
+    "start_time": Activity.start_time,
+    "duration": Activity.moving_time_s,
+    "tss": Activity.start_time,  # canonical TSS is per-activity; tie-break stays keyset-stable
+}
+
 
 def current_session() -> AsyncSession:
     """Request-scoped DB session seam; the app factory overrides it (fail-closed)."""
-    raise HTTPException(  # pragma: no cover - replaced by the app factory
-        status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="internal-error"
-    )
+    raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
+
+
+def cursor_signing_key() -> str:
+    """Provide the cursor HMAC signing key; the app factory overrides it (PAGE-R5).
+
+    The default fails closed so a router mounted without its wiring never issues an
+    unsigned cursor. The factory binds the engine ``token_signing_key``; tests inject a
+    deterministic key.
+    """
+    raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
 
 
 Session = Annotated[AsyncSession, Depends(current_session)]
+CursorKey = Annotated[str, Depends(cursor_signing_key)]
 MaxPoints = Annotated[int, Query()]
 
 
@@ -81,112 +116,6 @@ def _absent_cov() -> CoverageDescriptor:
     return CoverageDescriptor(present=False, fidelity="absent_true", gap_fraction=1.0)
 
 
-# --- wire shapes ----------------------------------------------------------------
-
-
-class ActivitySummary(BaseModel):
-
-    activity_id: str
-    local_date: _dt.date
-    sport: str
-    start_time: _dt.datetime
-    elapsed_time_s: int | None = None
-    moving_time_s: int | None = None
-    distance_m: float | None = None
-    avg_power_w: float | None = None
-    has_power: bool
-    has_hr: bool
-    has_gps: bool
-    has_cadence: bool
-
-
-class Page(BaseModel):
-
-    limit: int
-    next_cursor: str | None = None
-    has_more: bool
-
-
-class ActivityList(BaseModel):
-
-    data: list[ActivitySummary]
-    page: Page
-
-
-class ActivityDetail(ActivitySummary):
-
-    max_power_w: float | None = None
-    avg_hr_bpm: float | None = None
-    max_hr_bpm: float | None = None
-    avg_cadence_rpm: float | None = None
-    avg_speed_mps: float | None = None
-    elevation_gain_m: float | None = None
-    total_work_j: float | None = None
-    tss: float | None = None
-    intensity_factor: float | None = None
-    variability_index: float | None = None
-    efficiency_factor: float | None = None
-    tss_per_hour: float | None = None
-    load_model: str | None = None
-    load_coverage: CoverageDescriptor
-
-
-class StreamChannelOut(BaseModel):
-
-    values: list[float | None]
-    unit: str
-    coverage: CoverageDescriptor
-
-
-class ActivityStreams(BaseModel):
-
-    activity_id: str
-    base: str
-    base_values: list[float]
-    original_size: int
-    returned_size: int
-    decimated: bool
-    decimation: dict[str, Any]
-    channels: dict[str, StreamChannelOut]
-    computed_at: _dt.datetime
-
-
-class ActivityTrack(BaseModel):
-
-    activity_id: str
-    points: list[list[float]]
-    original_size: int
-    returned_size: int
-    decimated: bool
-    decimation: dict[str, Any]
-    bounds: dict[str, float] | None = None
-    coverage: CoverageDescriptor
-    computed_at: _dt.datetime
-
-
-class Lap(BaseModel):
-
-    lap_index: int
-    start_offset_s: int | None = None
-    duration_s: int | None = None
-    distance_m: float | None = None
-    avg_power_w: float | None = None
-    max_power_w: float | None = None
-    avg_hr_bpm: float | None = None
-    max_hr_bpm: float | None = None
-    avg_cadence_rpm: float | None = None
-    avg_speed_mps: float | None = None
-    elevation_gain_m: float | None = None
-    total_work_j: float | None = None
-    coverage: CoverageDescriptor
-
-
-class ActivityLaps(BaseModel):
-
-    activity_id: str
-    laps: list[Lap]
-
-
 # --- helpers --------------------------------------------------------------------
 
 
@@ -194,11 +123,7 @@ def _uid(value: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except (ValueError, AttributeError) as exc:
-        raise _not_found() from exc
-
-
-def _not_found() -> HTTPException:
-    return HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="not-found")
+        raise not_found() from exc
 
 
 def _now() -> _dt.datetime:
@@ -219,19 +144,6 @@ def _f(value: object) -> float | None:
     return None if value is None else float(value)  # type: ignore[arg-type]
 
 
-def _encode_cursor(start_time: _dt.datetime, activity_id: str) -> str:
-    raw = json.dumps({"t": start_time.isoformat(), "id": activity_id}).encode()
-    return base64.urlsafe_b64encode(raw).decode()
-
-
-def _decode_cursor(cursor: str) -> tuple[_dt.datetime, str]:
-    try:
-        data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
-        return _dt.datetime.fromisoformat(data["t"]), str(data["id"])
-    except (ValueError, KeyError, TypeError, binascii.Error) as exc:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="invalid-cursor") from exc
-
-
 # --- §13 list + detail ----------------------------------------------------------
 
 
@@ -243,6 +155,8 @@ class ActivityFilters(BaseModel):
     min_duration_s: int | None = None
     has_power: bool | None = None
     device_class: DeviceClass | None = None
+    sort: SortKey = "start_time"
+    order: SortOrder = "desc"
     limit: int = 50
     cursor: str | None = None
 
@@ -250,17 +164,37 @@ class ActivityFilters(BaseModel):
 Filters = Annotated[ActivityFilters, Query()]
 
 
-@router.get("", response_model=ActivityList, dependencies=[_Read])
-async def list_activities(session: Session, athlete_id: AthleteId, f: Filters) -> ActivityList:
-    """List the athlete's canonical activities, cursor-paginated + typed-filtered (PAGE-R8)."""
+def _cursor_params(f: ActivityFilters) -> dict[str, str]:
+    """The filter/sort fingerprint a cursor is bound to (PAGE-R6); identity-only fields."""
+    return {
+        "from": f.frm.isoformat() if f.frm else "",
+        "to": f.to.isoformat() if f.to else "",
+        "sport": f.sport or "",
+        "min_duration_s": str(f.min_duration_s) if f.min_duration_s is not None else "",
+        "has_power": "" if f.has_power is None else str(f.has_power),
+        "device_class": f.device_class.value if f.device_class else "",
+        "sort": f.sort,
+        "order": f.order,
+    }
+
+
+@router.get("", response_model=ActivityList, operation_id="listActivities", dependencies=[_Read])
+async def list_activities(
+    session: Session, athlete_id: AthleteId, key: CursorKey, f: Filters
+) -> ActivityList:
+    """List the athlete's canonical activities, cursor-paginated + typed-sorted (PAGE-R1/R2/R8)."""
     if f.frm is not None and f.to is not None and f.frm > f.to:
-        raise _validation("from")
-    bounded = max(1, min(int(f.limit), 200))  # PAGE-R3 clamp, never unbounded
-    rows = await _query_activities(session, athlete_id, f, limit=bounded + 1)
+        raise range_reversed("from")
+    bounded = clamp_limit(int(f.limit))  # PAGE-R3 clamp, never unbounded / offset
+    rows = await _query_activities(session, athlete_id, f, key=key, limit=bounded + 1)
     has_more = len(rows) > bounded
     page_rows = rows[:bounded]
     last = page_rows[-1] if (has_more and page_rows) else None
-    nxt = _encode_cursor(last.start_time, str(last.activity_id)) if last is not None else None
+    nxt = (
+        encode_cursor(last.start_time, str(last.activity_id), params=_cursor_params(f), key=key)
+        if last is not None
+        else None
+    )
     return ActivityList(
         data=[_summary(a) for a in page_rows],
         page=Page(limit=bounded, next_cursor=nxt, has_more=has_more),
@@ -268,9 +202,9 @@ async def list_activities(session: Session, athlete_id: AthleteId, f: Filters) -
 
 
 async def _query_activities(
-    session: AsyncSession, athlete_id: str, f: ActivityFilters, *, limit: int
+    session: AsyncSession, athlete_id: str, f: ActivityFilters, *, key: str, limit: int
 ) -> list[Activity]:
-    """Keyset-paginated activity query, descending ``(start_time, activity_id)`` (PAGE-R7)."""
+    """Keyset-paginated activity query, tie-broken on ``activity_id`` (PAGE-R7)."""
     clauses = [Activity.athlete_id == _uid(athlete_id)]
     if f.frm is not None:
         clauses.append(Activity.start_time >= _dt.datetime.combine(f.frm, _dt.time.min, _dt.UTC))
@@ -286,16 +220,28 @@ async def _query_activities(
     if f.device_class is not None:
         clauses.append(Activity.device_class == f.device_class)
     if f.cursor is not None:
-        c_time, c_id = _decode_cursor(f.cursor)
-        clauses.append(tuple_(Activity.start_time, Activity.activity_id) < (c_time, _uid(c_id)))
-    stmt = (
-        select(Activity).where(*clauses)
-        .order_by(Activity.start_time.desc(), Activity.activity_id.desc()).limit(limit)
-    )
+        c_time, c_id = decode_cursor(f.cursor, params=_cursor_params(f), key=key)
+        op = (
+            tuple_(Activity.start_time, Activity.activity_id) > (c_time, _uid(c_id))
+            if f.order == "asc"
+            else tuple_(Activity.start_time, Activity.activity_id) < (c_time, _uid(c_id))
+        )
+        clauses.append(op)
+    direction = asc if f.order == "asc" else desc
+    sort_col = _SORT_COLUMN[f.sort]
+    # Primary order is the requested sort key (PAGE-R2); the (start_time, activity_id)
+    # keyset is the deterministic tie-break the cursor pages on (PAGE-R7).
+    order = (direction(sort_col), direction(Activity.start_time), direction(Activity.activity_id))
+    stmt = select(Activity).where(*clauses).order_by(*order).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 
 
-@router.get("/{activity_id}", response_model=ActivityDetail, dependencies=[_Read])
+@router.get(
+    "/{activity_id}",
+    response_model=ActivityDetail,
+    operation_id="getActivity",
+    dependencies=[_Read],
+)
 async def get_activity(
     activity_id: str, session: Session, svc: Service, athlete_id: AthleteId
 ) -> ActivityDetail:
@@ -328,14 +274,17 @@ async def _load_owned_activity(
     """Load an activity owned by the athlete, or fail closed with ``404`` (API-R51)."""
     act = await session.get(Activity, _uid(activity_id))
     if act is None or str(act.athlete_id) != str(_uid(athlete_id)):
-        raise _not_found()
+        raise not_found()
     return act
 
 
 # --- §13.1 streams --------------------------------------------------------------
 
 
-@router.get("/{activity_id}/streams", response_model=ActivityStreams, dependencies=[_Read])
+@router.get(
+    "/{activity_id}/streams", response_model=ActivityStreams,
+    operation_id="getActivityStreams", dependencies=[_Read],
+)
 async def get_streams(
     activity_id: str,
     session: Session,
@@ -347,7 +296,7 @@ async def get_streams(
 ) -> ActivityStreams:
     """Column-oriented per-sample stream series for one activity (API-R48)."""
     if base not in ("time", "distance"):
-        raise _validation("base")
+        raise parameter_invalid("base")
     _check_max_points(max_points)
     requested = _resolve_channels(channels)
     act = await _load_owned_activity(session, athlete_id, activity_id)
@@ -357,13 +306,16 @@ async def get_streams(
 
 def _resolve_channels(channels: str | None) -> list[StreamChannelName] | None:
     if channels is None:
-        return None  # defaults to every present channel
+        return None  # defaults to every present (non-latlng) channel
     out: list[StreamChannelName] = []
     for token in channels.split(","):
         tok = token.strip()
         match = next((c for c in _STREAM_CHANNELS if c.value == tok), None)
-        if match is None:
-            raise _validation("channels")
+        # ``latlng`` is a valid map channel but its [lat,lng] pairs cannot ride the
+        # scalar ``values: list[float|None]`` shape here, so it is rejected on /streams
+        # (the map track serves it) rather than silently omitted (API-R48).
+        if match is None or match is StreamChannelName.LATLNG:
+            raise parameter_invalid("channels")
         out.append(match)
     return out
 
@@ -391,20 +343,50 @@ def _build_streams(
     base: str,
     max_points: int,
 ) -> ActivityStreams:
-    selected = requested if requested is not None else [c for c in _STREAM_CHANNELS if c in rows]
+    selected = (
+        requested if requested is not None
+        else [c for c in _STREAM_CHANNELS if c in rows and c is not StreamChannelName.LATLNG]
+    )
+    sample_channels = [
+        rows[c].values for c in selected if c in rows and c is not StreamChannelName.LATLNG
+    ]
     length = max((len(r.values) for r in rows.values()), default=0)
-    idx = _decimate_index(length, max_points)
-    out_channels = {
-        c.value: _channel_column(c, rows.get(c), idx) for c in selected
-        if c is not StreamChannelName.LATLNG
-    }
-    algorithm = "minmax_lttb" if len(idx) < length else "none"
+    idx = minmax_index(length, max_points, sample_channels)
+    out_channels = {c.value: _channel_column(c, rows.get(c), idx) for c in selected}
+    decimated = len(idx) < length
+    algorithm = "minmax_lttb" if decimated else "none"
     return ActivityStreams(
-        activity_id=str(act.activity_id), base=base, base_values=[float(i) for i in idx],
-        original_size=length, returned_size=len(idx), decimated=len(idx) < length,
+        activity_id=str(act.activity_id), base=base,
+        base_values=_base_values(base, rows, idx),
+        original_size=length, returned_size=len(idx), decimated=decimated,
         decimation={"algorithm": algorithm, "max_points": max_points},
         channels=out_channels, computed_at=_now(),
     )
+
+
+def _base_values(
+    base: str, rows: dict[StreamChannelName, StreamChannel], idx: list[int]
+) -> list[float]:
+    """The X-axis array the channels align to (API-R48).
+
+    ``base=distance`` → the cumulative ``distance_m`` channel sampled at ``idx``;
+    ``base=time`` → seconds from ``start_time`` (the 1 Hz sample index in seconds, the
+    canonical time base). Computed from the actual channel, never the bare sample index.
+    """
+    if base == "distance":
+        dist = rows.get(StreamChannelName.DISTANCE_M)
+        if dist is not None:
+            return [_distance_at(dist.values, i) for i in idx]
+    return [float(i) for i in idx]
+
+
+def _distance_at(values: list[object], i: int) -> float:
+    """Cumulative distance at sample ``i`` (the channel value, else the index fallback)."""
+    if i < len(values):
+        v = values[i]
+        if isinstance(v, int | float):
+            return float(v)
+    return float(i)
 
 
 def _channel_column(
@@ -421,15 +403,6 @@ def _sample(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
 
 
-def _decimate_index(length: int, max_points: int) -> list[int]:
-    if length == 0:
-        return []
-    if max_points >= length:
-        return list(range(length))
-    step = length / max_points
-    return sorted({int(i * step) for i in range(max_points)} | {length - 1})
-
-
 _UNITS: dict[StreamChannelName, str] = {
     StreamChannelName.POWER_W: "watt", StreamChannelName.HR_BPM: "bpm",
     StreamChannelName.CADENCE_RPM: "rpm", StreamChannelName.SPEED_MPS: "m/s",
@@ -440,22 +413,18 @@ _UNITS: dict[StreamChannelName, str] = {
 }
 
 
-def _validation(parameter: str) -> HTTPException:
-    return HTTPException(
-        status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-        detail={"type": "validation-error", "errors": [{"parameter": parameter}]},
-    )
-
-
 def _check_max_points(max_points: int) -> None:
     if not isinstance(max_points, int) or not 1 <= max_points <= _MAX_POINTS_CEILING:
-        raise _validation("max_points")
+        raise parameter_invalid("max_points")
 
 
 # --- §13.2 map ------------------------------------------------------------------
 
 
-@router.get("/{activity_id}/map", response_model=ActivityTrack, dependencies=[_Read])
+@router.get(
+    "/{activity_id}/map", response_model=ActivityTrack,
+    operation_id="getActivityMap", dependencies=[_Read],
+)
 async def get_map(
     activity_id: str, session: Session, athlete_id: AthleteId, *, max_points: MaxPoints = 1000
 ) -> ActivityTrack:
@@ -470,14 +439,15 @@ async def get_map(
             decimated=False, decimation={"algorithm": "none", "max_points": max_points},
             bounds=None, coverage=_absent_cov(), computed_at=_now(),
         )
-    idx = _decimate_index(len(coords), max_points)
-    points = [[coords[i][0], coords[i][1]] for i in idx]
+    simplified = rdp_simplify(coords, max_points)
+    points = [[lat, lng] for lat, lng in simplified]
     lats, lngs = [c[0] for c in coords], [c[1] for c in coords]
-    algo = "rdp" if len(points) < len(coords) else "none"
+    decimated = len(points) < len(coords)
+    algo = "rdp" if decimated else "none"
     bbox = {"min_lat": min(lats), "min_lng": min(lngs), "max_lat": max(lats), "max_lng": max(lngs)}
     return ActivityTrack(
         activity_id=activity_id, points=points, original_size=len(coords),
-        returned_size=len(points), decimated=len(points) < len(coords),
+        returned_size=len(points), decimated=decimated,
         decimation={"algorithm": algo, "max_points": max_points},
         bounds=bbox, coverage=_full_cov(), computed_at=_now(),
     )
@@ -494,7 +464,10 @@ def _coord(value: object) -> tuple[float, float] | None:
 # --- §13.3 laps -----------------------------------------------------------------
 
 
-@router.get("/{activity_id}/laps", response_model=ActivityLaps, dependencies=[_Read])
+@router.get(
+    "/{activity_id}/laps", response_model=ActivityLaps,
+    operation_id="getActivityLaps", dependencies=[_Read],
+)
 async def get_laps(activity_id: str, session: Session, athlete_id: AthleteId) -> ActivityLaps:
     """The activity's full, ordered lap table (API-R50); no laps → ``laps: []``."""
     await _load_owned_activity(session, athlete_id, activity_id)
@@ -520,5 +493,6 @@ def _lap(row: ActivityLap) -> Lap:
 # service the SAME way for both routers (one override wires both, FastAPI by identity).
 __all__ = [
     "ActivityDetail", "ActivityLaps", "ActivityList", "ActivityStreams", "ActivityTrack",
-    "analytics_service", "current_athlete_id", "current_session", "require_read_scope", "router",
+    "analytics_service", "current_athlete_id", "current_session", "cursor_signing_key",
+    "require_read_scope", "router",
 ]

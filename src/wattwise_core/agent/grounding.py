@@ -218,16 +218,21 @@ def _scrubbed(claim: Claim, verdict: GroundVerdict) -> _Outcome:
 def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
     """Aggregate per-claim verdicts into a bounded recovery decision (GROUND-R9).
 
-    - ``replan`` when a checkable claim is ``contradicted`` — canonical evidence exists
-      but conflicts with the draft, so the correct evidence is re-fetched. ``contradicted``
-      carries the STRONGEST penalty (GROUND-R9): its presence forces ``replan`` even if it
-      is the only claim and even if others grounded (never ``proceed``).
+    - ``regenerate`` when a checkable claim is ``contradicted`` — the canonical value EXISTS
+      and was already substituted in place by :func:`_verify_number` (GROUND-R3/R7), so the
+      correct move is a bounded re-draft with the corrected value, NOT a coverage re-plan.
+      ``contradicted`` still carries the strongest penalty: it is NEVER published (already
+      enforced) and never yields ``proceed``.
     - ``abstain`` when nothing publishable survives and there is nothing to recover (every
       claim ``ungrounded``/scrubbed, no grounded survivor) — cannot answer (GROUND-R6).
     - ``regenerate`` when a claim is ``ungrounded`` but at least one grounded claim
       survives — re-draft with the offending span removed/corrected.
     - ``proceed`` when every claim is publishable (``grounded`` or a publishable
       ``complementary``) — publish.
+
+    ``replan`` is reserved for contradictions that the in-place canonical substitution
+    cannot resolve (none arise here, since every contradicted number is replaced verbatim);
+    a future kind of unrecoverable contradiction would route to ``replan``.
     """
     verdicts = [c.verdict for c in claims]
     has_grounded = any(v is GroundVerdict.GROUNDED for v in verdicts)
@@ -235,7 +240,9 @@ def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
     has_contradicted = any(v is GroundVerdict.CONTRADICTED for v in verdicts)
     has_ungrounded = any(v is GroundVerdict.UNGROUNDED for v in verdicts)
     if has_contradicted:
-        return GroundDecision.REPLAN
+        # The contradicted number was replaced by the canonical value in place; re-draft
+        # with the corrected text rather than re-planning for different evidence.
+        return GroundDecision.REGENERATE
     if not has_publishable:
         return GroundDecision.ABSTAIN
     if has_ungrounded:

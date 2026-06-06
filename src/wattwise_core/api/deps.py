@@ -22,13 +22,17 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.api.auth import Principal, Scope, authenticate, require_scopes
 from wattwise_core.api.errors import ProblemError
+from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.config import Settings
 from wattwise_core.persistence import Database
+
+#: The HTTP methods that debit the mutating bucket; all others debit read (LIMIT-R2).
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 def get_settings(request: Request) -> Settings:
@@ -74,6 +78,39 @@ def require_scope(*scopes: Scope) -> object:
     return require_scopes(*scopes)
 
 
+def get_rate_limiter(request: Request) -> RateLimiter:
+    """Return the process-wide :class:`RateLimiter` bound to the app (LIMIT-R1).
+
+    The factory installs one limiter on app state at startup; its absence means the app
+    was assembled incorrectly and surfaces fail-closed as a generic internal error.
+    """
+    limiter = getattr(request.app.state, "rate_limiter", None)
+    if not isinstance(limiter, RateLimiter):
+        raise ProblemError("internal-error")
+    return limiter
+
+
+def enforce_rate_limit(
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(authenticate)],
+    limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+) -> None:
+    """Debit the per-athlete read/mutating bucket for this request (LIMIT-R1/R2/R3).
+
+    Classifies the route by HTTP method (``POST``/``PUT``/``PATCH``/``DELETE`` ->
+    ``mutating`` ``30/min``; otherwise ``read`` ``120/min``) and debits the bucket keyed
+    on the SERVER-DERIVED athlete id (AUTH-R3) — never a client header (LIMIT-R6). On
+    success the ``RateLimit-*`` headers are attached; an exhausted bucket raises ``429``
+    ``rate-limited`` with ``Retry-After`` + ``RateLimit-*`` (LIMIT-R3).
+    """
+    limit_class = (
+        LimitClass.MUTATING if request.method.upper() in _MUTATING_METHODS else LimitClass.READ
+    )
+    headers = limiter.check(principal.athlete_id, limit_class)
+    response.headers.update(headers.to_dict())
+
+
 #: A typed annotation routes can reuse for the authenticated principal (AUTH-R3).
 CurrentPrincipal = Annotated[Principal, Depends(authenticate)]
 
@@ -83,13 +120,19 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 #: A typed annotation routes can reuse for the resolved settings.
 AppSettings = Annotated[Settings, Depends(get_settings)]
 
+#: A router-level dependency that debits the per-athlete read/mutating bucket (LIMIT-R1).
+RateLimit = Depends(enforce_rate_limit)
+
 
 __all__ = [
     "AppSettings",
     "CurrentPrincipal",
     "DbSession",
+    "RateLimit",
+    "enforce_rate_limit",
     "get_database",
     "get_db",
+    "get_rate_limiter",
     "get_settings",
     "require_scope",
 ]

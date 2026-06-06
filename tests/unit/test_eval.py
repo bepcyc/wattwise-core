@@ -14,8 +14,12 @@ the reference pipeline with the offline :class:`FakeModel` only.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from wattwise_core.eval.__main__ import main as cli_main
 from wattwise_core.eval.grading import (
     ABSTENTION_MIN_RATE,
     GROUNDING_MIN_FAITHFULNESS,
@@ -28,9 +32,11 @@ from wattwise_core.eval.runner import (
     EvalMode,
     EvalRunner,
     RunnerOutcome,
+    list_suites,
     load_dataset,
     run_suite,
 )
+from wattwise_core.eval.suites import grade_intent_plan, grade_judge, grade_termination
 
 pytestmark = pytest.mark.unit
 
@@ -81,17 +87,23 @@ async def test_grounding_scrubs_every_planted_hallucination() -> None:
 
 
 async def test_grounding_memory_non_substitution_cites_live_value() -> None:
-    # EVAL-R2a / MEM-R3: a stale memory value MUST NOT substitute for the live canonical
-    # number; the surfaced number must equal the live evidence value, not memory.
+    # EVAL-R2a / MEM-R3: a STALE memory value is fed into the pipeline as a competing
+    # candidate; the PRODUCTION grounder must surface the LIVE canonical value and scrub
+    # the memory value (proven through the pipeline, not by literal JSON checks).
     dataset = load_dataset("grounding")
     case = next(c for c in dataset.cases if c["id"] == "grounding-memory-non-substitution")
     runner = EvalRunner()
     outcome = await runner.run_case(case, tolerance=dataset.tolerance)
+    # No fabricated/non-canonical number leaked: the memory value (55.0) did NOT survive.
     assert outcome.every_surfaced_number_canonical
+    assert not outcome.published_non_canonical
     expectation = case["expected"]["must_cite_live_not_memory"]
     live = case["evidence"]["metrics"][expectation["metric"]]
     assert live == expectation["live_value"]
     assert expectation["live_value"] != expectation["memory_value"]
+    # The memory metric was actually scrubbed by the production grounder (memory@value).
+    memory_key = f"{expectation['metric']}@{float(expectation['memory_value'])}"
+    assert memory_key in outcome.actually_scrubbed
 
 
 def test_grounding_grader_flags_a_fabricated_leak() -> None:
@@ -132,6 +144,23 @@ async def test_abstention_never_publishes_a_number_when_data_absent() -> None:
         outcome = await runner.run_case(case, tolerance=dataset.tolerance)
         assert outcome.abstained, f"{case['id']} MUST abstain (QA-EVAL-R2.2)"
         assert not outcome.published_non_canonical, f"{case['id']} fabricated a number"
+
+
+async def test_unavailable_metric_is_never_surfaced_as_a_number() -> None:
+    # GROUND-R7: a metric whose canonical computation is marked ``unavailable`` MUST be
+    # stated as unavailable (a placeholder/zero is forbidden). The production grounder
+    # surfaces NO number for any unavailable metric in the abstention dataset.
+    dataset = load_dataset("abstention")
+    runner = EvalRunner()
+    for case in dataset.cases:
+        unavailable = set((case.get("evidence", {}) or {}).get("unavailable", {}))
+        if not unavailable:
+            continue
+        outcome = await runner.run_case(case, tolerance=dataset.tolerance)
+        # No unavailable metric leaked a (non-canonical) number, and the run abstained.
+        assert outcome.every_surfaced_number_canonical, case["id"]
+        assert not outcome.published_non_canonical, case["id"]
+        assert outcome.abstained, case["id"]
 
 
 def test_abstention_grader_trips_on_single_fabrication() -> None:
@@ -203,3 +232,90 @@ async def test_runner_is_deterministic_across_runs() -> None:
     first = (await run_suite("grounding")).to_jsonable()
     second = (await run_suite("grounding")).to_jsonable()
     assert first == second
+
+
+# --------------------------------------------------------------------------- #
+# Production-grounder gate (EVAL-R4 / GROUND-R8) + 100% faithfulness floor     #
+# --------------------------------------------------------------------------- #
+
+
+def test_grounding_threshold_is_absolute_100_percent() -> None:
+    # EVAL-R4 (corrected): the grounding faithfulness gate is the binding 100% mandate,
+    # not a 99% band — any planted-hallucination leak OR dropped-valid claim fails CI.
+    assert GROUNDING_MIN_FAITHFULNESS == 1.0
+
+
+async def test_grounding_suite_runs_the_production_grounder() -> None:
+    # GROUND-R8 / EVAL-R4: the gate exercises the SHIPPED grounder, not a re-implementation.
+    # A 99.x% (single-leak) suite must now FAIL the absolute gate.
+    card = await run_suite("grounding")
+    assert card.grades.grounding.passed
+    assert card.grades.grounding.faithfulness == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# New CI-gated suites: termination, intent_plan, multilingual, judge          #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("name", ["termination", "intent_plan", "multilingual", "judge"])
+async def test_engine_suite_passes_and_is_listed(name: str) -> None:
+    assert name in list_suites()
+    card = await run_suite(name)
+    assert card.passed, f"{name} suite MUST clear its gate"
+    assert card.to_jsonable()["passed"] is True
+
+
+async def test_termination_suite_drives_both_bounds() -> None:
+    # EVAL-R7 / REFLECT-R4: both the reflection_count and redraft_count bounds terminate
+    # the production graph at a DEGRADED outcome (no unbounded loop, no error).
+    grade = await grade_termination()
+    assert grade.total == 2
+    assert grade.passed
+    assert grade.failures == ()
+
+
+async def test_intent_plan_gate_at_least_point_nine() -> None:
+    # EVAL-R3: the planner's emitted capability requests gate at precision AND recall >= 0.9.
+    grade = grade_intent_plan()
+    assert grade.precision >= 0.9
+    assert grade.recall >= 0.9
+    assert grade.passed
+
+
+def test_intent_plan_gate_fails_below_threshold() -> None:
+    # A planner that mis-plans every case must FAIL the >= 0.9 gate (no silent pass).
+    grade = grade_intent_plan(predicted={})  # planner emitted nothing -> recall 0
+    assert not grade.passed
+
+
+async def test_judge_never_certifies_grounding() -> None:
+    # EVAL-R5: the judge is a qualitative rubric (structured output, recorded offline); it
+    # scores tone/voice/clarity only and never gates grounding/abstention/injection/status.
+    grade = await grade_judge()
+    assert grade.total == 2
+    assert grade.passed
+
+
+def test_full_scorecard_lists_every_gated_suite() -> None:
+    assert set(list_suites()) == {
+        "grounding",
+        "abstention",
+        "injection",
+        "termination",
+        "intent_plan",
+        "multilingual",
+        "judge",
+    }
+
+
+def test_eval_cli_run_gates_green(tmp_path: Path) -> None:
+    # EVAL-R1: `python -m wattwise_core.eval run` returns 0 when every suite clears its gate
+    # and writes the machine-readable scorecard artifact (EVAL-R9). Synchronous: the CLI
+    # owns its own event loop via asyncio.run.
+    out = tmp_path / "scorecard.json"
+    code = cli_main(["run", "--mode=recorded", f"--scorecard={out}"])
+    assert code == 0
+    blob = json.loads(out.read_text())
+    assert blob["passed"] is True
+    assert {s["suite"] for s in blob["suites"]} >= {"termination", "intent_plan", "judge"}

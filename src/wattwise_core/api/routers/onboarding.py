@@ -29,11 +29,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.api.auth import Scope, require_scopes
-from wattwise_core.api.deps import CurrentPrincipal, DbSession
+from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus
 from wattwise_core.persistence.models import Activity, Connection, SourceDescriptor
 
-router = APIRouter(prefix="/v1/onboarding", tags=["onboarding"])
+router = APIRouter(prefix="/v1/onboarding", tags=["onboarding"], dependencies=[RateLimit])
 
 
 #: Closed first-sync progress vocabulary (SCHEMA-R3 ``first_sync_state``).

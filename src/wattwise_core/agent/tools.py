@@ -20,12 +20,12 @@ path here.
 
 from __future__ import annotations
 
-import datetime as _dt
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from wattwise_core.analytics.result import MetricResult, is_computed
+from wattwise_core.agent.capabilities import CAPABILITIES, CAPABILITY_BY_KEY, RESOLVERS
+from wattwise_core.agent.contracts import Capability
 from wattwise_core.analytics.service import AnalyticsService
 
 # Argument keys a model is structurally forbidden from supplying: identity/scope is
@@ -80,6 +80,11 @@ class Tool:
     handler: _Handler
 
 
+def _scope_keys_present(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return any identity/scope keys a model tried to supply (TOOL-R3/PLAN-R5)."""
+    return tuple(k for k in raw if k.casefold() in _SCOPE_KEYS)
+
+
 def _scrub_scope_args(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Drop any identity/scope key a model tried to supply (TOOL-R3/PLAN-R5/INJECT-R3).
 
@@ -90,97 +95,72 @@ def _scrub_scope_args(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in raw.items() if k.casefold() not in _SCOPE_KEYS}
 
 
-def _wrap_metric(capability: str, result: MetricResult[Any]) -> ToolResult:
-    """Wrap a canonical :data:`MetricResult` as an untrusted tool result (TOOL-R2/R5)."""
-    if is_computed(result):
-        return ToolResult(capability=capability, available=True, payload=result.to_jsonable())
-    return ToolResult(
-        capability=capability,
-        available=False,
-        payload=result.to_jsonable(),
-        reason=result.reason.value,
-    )
+def _wrap_result(capability: str, result: Any) -> ToolResult:
+    """Wrap a canonical resolver result as an untrusted tool result (TOOL-R2/R5).
 
-
-def _date(value: Any) -> _dt.date:
-    """Coerce a tool argument to a date (ISO string or date); typed-input contract."""
-    if isinstance(value, _dt.date):
-        return value
-    return _dt.date.fromisoformat(str(value))
-
-
-# --- per-capability handlers (each = ONE AnalyticsService call, TOOL-R1) ---
-
-
-async def _pmc(ctx: ToolContext, svc: AnalyticsService, args: Mapping[str, Any]) -> ToolResult:
-    a = _scrub_scope_args(args)
-    series = await svc.pmc(ctx.athlete_id, _date(a["from_date"]), _date(a["to_date"]))
-    last = series[-1] if series else None
-    if last is None or not is_computed(last):
+    The resolvers (shared with ``gather``) return the canonical analytics envelope, a gap
+    marker (``{"available": False, ...}``), or a series/mapping. A gap marker becomes an
+    ``available=False`` result; anything else is surfaced as available untrusted data.
+    """
+    if isinstance(result, Mapping) and result.get("available") is False:
         return ToolResult(
-            capability="training_load_window",
+            capability=capability,
             available=False,
-            payload={"available": False},
-            reason="insufficient_data",
+            payload=dict(result),
+            reason=str(result.get("reason", "unavailable")),
         )
-    return _wrap_metric("training_load_window", last)
+    payload = _to_payload(result)
+    return ToolResult(capability=capability, available=True, payload=payload)
 
 
-async def _power_curve(
-    ctx: ToolContext, svc: AnalyticsService, args: Mapping[str, Any]
-) -> ToolResult:
-    a = _scrub_scope_args(args)
-    curve = await svc.power_curve(ctx.athlete_id, _date(a["from_date"]), _date(a["to_date"]))
-    payload = {
-        str(d): res.to_jsonable() for d, res in curve.items() if is_computed(res)
-    }
-    return ToolResult(
-        capability="power_curve",
-        available=bool(payload),
-        payload={"windows": payload},
-        reason=None if payload else "insufficient_data",
-    )
+def _to_payload(result: Any) -> dict[str, Any]:
+    """Normalise a resolver result into a jsonable tool payload (TOOL-R2)."""
+    to_jsonable = getattr(result, "to_jsonable", None)
+    if callable(to_jsonable):
+        out = to_jsonable()
+        return out if isinstance(out, dict) else {"value": out}
+    if isinstance(result, Mapping):
+        return dict(result)
+    if isinstance(result, (list, tuple)):
+        return {"items": [_to_payload(r) for r in result]}
+    return {"value": result}
 
 
-async def _critical_power(
-    ctx: ToolContext, svc: AnalyticsService, args: Mapping[str, Any]
-) -> ToolResult:
-    a = _scrub_scope_args(args)
-    fit = await svc.critical_power(ctx.athlete_id, _date(a["from_date"]), _date(a["to_date"]))
-    return _wrap_metric("critical_power_fit", fit)
+def _make_handler(capability: Capability) -> _Handler:
+    """Build a tool handler that calls the SAME registry resolver as ``gather`` (TOOL-R1).
+
+    The model's arguments are scrubbed of scope keys (TOOL-R3) and validated against the
+    capability's ``param_schema`` (PLAN-R2); dispatch is the single ``RESOLVERS`` entry
+    keyed verbatim by ``capability.key`` — there is no second data path.
+    """
+    resolver = RESOLVERS[capability.key]
+
+    async def handler(
+        ctx: ToolContext, svc: AnalyticsService, args: Mapping[str, Any]
+    ) -> ToolResult:
+        scrubbed = _scrub_scope_args(args)
+        try:
+            params = capability.param_schema.model_validate(scrubbed)
+        except ValueError as exc:
+            return ToolResult(
+                capability=capability.key,
+                available=False,
+                payload={"available": False},
+                reason=f"invalid_params:{type(exc).__name__}",
+            )
+        result = await resolver(svc, ctx.athlete_id, params)
+        return _wrap_result(capability.key, result)
+
+    return handler
 
 
-async def _hrv(ctx: ToolContext, svc: AnalyticsService, args: Mapping[str, Any]) -> ToolResult:
-    a = _scrub_scope_args(args)
-    result = await svc.hrv(ctx.athlete_id, _date(a["local_date"]))
-    return _wrap_metric("readiness_hrv", result)
+# --- the in-process tool registry (TOOL-R1b: no subprocess), DERIVED from CAPABILITIES ---
 
-
-async def _activity_load(
-    ctx: ToolContext, svc: AnalyticsService, args: Mapping[str, Any]
-) -> ToolResult:
-    a = _scrub_scope_args(args)
-    result = await svc.coggan(str(a["activity_id"]))
-    return _wrap_metric("activity_load_metrics", result)
-
-
-async def _decoupling(
-    ctx: ToolContext, svc: AnalyticsService, args: Mapping[str, Any]
-) -> ToolResult:
-    a = _scrub_scope_args(args)
-    result = await svc.aerobic_decoupling(str(a["activity_id"]))
-    return _wrap_metric("activity_decoupling", result)
-
-
-# --- the in-process tool registry (TOOL-R1b: no subprocess) ---
-
-_TOOLS: tuple[Tool, ...] = (
-    Tool("training_load_window", "Recent training-load state (CTL/ATL/form).", _pmc),
-    Tool("power_curve", "Mean-maximal power curve over a window.", _power_curve),
-    Tool("critical_power_fit", "Critical-power / W' model fit.", _critical_power),
-    Tool("readiness_hrv", "Time-domain HRV for a wellness day.", _hrv),
-    Tool("activity_load_metrics", "NP/IF/TSS load metrics for one activity.", _activity_load),
-    Tool("activity_decoupling", "Aerobic decoupling for one activity.", _decoupling),
+# ONE registry, two surfaces (PLAN-R3/TOOL-R1): every MCP tool is built FROM the single
+# CAPABILITIES tuple so a tool key == a capability key VERBATIM and both resolve the SAME
+# canonical service call. There is no hand-authored parallel key set.
+_TOOLS: tuple[Tool, ...] = tuple(
+    Tool(c.key, c.description, _make_handler(c)) for c in CAPABILITIES
 )
 
 
@@ -189,9 +169,11 @@ class ToolRegistry:
 
     No per-request subprocess spawn, no stdio/JSON-RPC transport: a tool call is a
     direct in-process ``await`` into :class:`AnalyticsService` (the SAME code the
-    deterministic ``gather`` calls). The registry is the model's ONLY I/O surface
-    (TOOL-R4); every call is scoped by the engine-injected :class:`ToolContext`
-    (TOOL-R3), individually returnable as traced/untrusted output.
+    deterministic ``gather`` calls). The registry is built FROM the single CAPABILITIES
+    registry so tool keys match the planner's capability keys verbatim (PLAN-R3/TOOL-R1).
+    The registry is the model's ONLY I/O surface (TOOL-R4); every call is scoped by the
+    engine-injected :class:`ToolContext` (TOOL-R3), individually returnable as
+    traced/untrusted output.
     """
 
     def __init__(self, tools: tuple[Tool, ...] = _TOOLS) -> None:
@@ -216,8 +198,16 @@ class ToolRegistry:
         caller re-plans, PLAN-R3), never a crash. The model's ``arguments`` never
         carry identity: scope comes from ``context`` (TOOL-R3); any scope-shaped key
         is scrubbed inside the handler. The result is always wrapped as untrusted data
-        (TOOL-R2/INJECT-R5).
+        (TOOL-R2/INJECT-R5). A scope-shaped argument is detectable via
+        :func:`scope_override_attempted` so the engine can emit an AGT-OBS-R5a anomaly.
         """
+        if capability not in CAPABILITY_BY_KEY:
+            return ToolResult(
+                capability=capability,
+                available=False,
+                payload={"available": False},
+                reason="unknown_capability",
+            )
         tool = self._tools.get(capability)
         if tool is None:
             return ToolResult(
@@ -229,9 +219,15 @@ class ToolRegistry:
         return await tool.handler(context, service, arguments or {})
 
 
+def scope_override_attempted(arguments: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Return the scope-shaped keys a model supplied (for AGT-OBS-R5a anomaly emission)."""
+    return _scope_keys_present(arguments or {})
+
+
 __all__ = [
     "Tool",
     "ToolContext",
     "ToolRegistry",
     "ToolResult",
+    "scope_override_attempted",
 ]

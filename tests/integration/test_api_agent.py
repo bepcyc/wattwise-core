@@ -26,17 +26,26 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import AgentAnswer, Citation, Observation
+from wattwise_core.api.agent_stream import problem_event
 from wattwise_core.api.app import create_app
 from wattwise_core.api.auth import Scope, issue_access_token
+from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.redaction import contains_pii, redact_payload, redact_text
 from wattwise_core.api.routers import agent_routes
 from wattwise_core.api.sanitize import is_inert, sanitize_html
 from wattwise_core.config import Environment, load_settings
+
+
+def _fake_request(path: str = "/v1/agent/ask") -> Request:
+    """A minimal Starlette request for unit-testing the SSE problem renderer."""
+    scope = {"type": "http", "path": path, "headers": [], "query_string": b""}
+    return Request(scope)
 
 pytestmark = pytest.mark.integration
 
@@ -258,15 +267,105 @@ def test_missing_question_without_follow_up_is_422() -> None:
     assert resp.json()["type"].endswith("/validation-error")
 
 
+def test_stream_emits_id_lines_for_resume() -> None:
+    """SSE frames carry ``id:`` lines so a client can resume with Last-Event-ID (API-R22a)."""
+    app, _ = _build_app(_grounded_answer())
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/ask", json={"question": "Ready?", "stream": True}, headers=_auth(app)
+        )
+        body = resp.text
+    ids = [line.split(":", 1)[1].strip() for line in body.splitlines() if line.startswith("id:")]
+    assert "0" in ids and "done" in ids  # the status frame and the terminal frame are addressable
+
+
+def test_stream_reconnect_at_done_emits_restart_first() -> None:
+    """A reconnect already at the terminal ``done`` gets a ``restart`` first event (API-R22a)."""
+    app, _ = _build_app(_grounded_answer())
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/ask",
+            json={"question": "Ready?", "stream": True},
+            headers={**_auth(app), "Last-Event-ID": "done"},
+        )
+        body = resp.text
+    events = _sse_events(body)
+    assert events[0] == "restart"
+    assert events[-1] == "done"
+
+
+def test_degraded_reason_is_localized_by_accept_language() -> None:
+    """A degraded answer's reason_text is in the selected language (API-R11a / API-R37)."""
+    answer = AgentAnswer(
+        status=RunStatus.DEGRADED,
+        thread_id="01T",
+        answer_html="<p>x</p>",
+        answer_text="x",
+        coverage_caveat={"inputs": []},
+    )
+    app, _ = _build_app(answer)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/ask",
+            json={"question": "Wie geht's?"},
+            headers={**_auth(app), "Accept-Language": "de-DE,de;q=0.9"},
+        )
+    reason = resp.json()["degraded"]["reason_text"]
+    assert "vorhandenen Daten" in reason  # the German localization, not the English constant
+
+
+def test_body_language_overrides_accept_language() -> None:
+    """The body ``language`` field takes precedence over Accept-Language (API-R37)."""
+    answer = AgentAnswer(
+        status=RunStatus.DEGRADED, thread_id="01T", answer_html="<p>x</p>",
+        answer_text="x", coverage_caveat={"inputs": []},
+    )
+    app, _ = _build_app(answer)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/ask",
+            json={"question": "?", "language": "ru"},
+            headers={**_auth(app), "Accept-Language": "de"},
+        )
+    assert "источник" in resp.json()["degraded"]["reason_text"]  # ru wins over the de header
+
+
+def test_streamed_error_includes_field_errors() -> None:
+    """The streamed RFC 9457 ``error`` body carries ``errors[]`` like the sync path (API-R16)."""
+    exc = ProblemError(
+        "validation-error",
+        errors=[FieldError(code="question_required", message="", pointer="/question")],
+    )
+    body = problem_event(exc, _fake_request())
+    assert body["type"].endswith("/validation-error")
+    assert body["errors"][0]["code"] == "question_required"
+    assert body["errors"][0]["pointer"] == "/question"
+
+
 def test_identity_is_server_derived_not_client_supplied() -> None:
-    """The engine sees the server-derived athlete id, never a client value (AUTH-R3)."""
+    """A forged caller-identity body field is rejected before the engine (AUTH-R3 / SCHEMA-R4).
+
+    ``AgentAskRequest`` is ``additionalProperties:false``, so a client-supplied
+    ``athlete_id`` is a ``422`` validation error — it never reaches the engine and can
+    never widen the acting subject (the engine is keyed only on the server-derived id).
+    """
     app, engine = _build_app(_grounded_answer())
     with TestClient(app) as client:
-        client.post(
+        resp = client.post(
             "/v1/agent/ask",
             json={"question": "Ready?", "athlete_id": "attacker"},
             headers=_auth(app),
         )
+    assert resp.status_code == 422
+    assert resp.json()["type"].endswith("/validation-error")
+    assert engine.seen_athlete_id is None  # the forged field never reached the engine
+
+
+def test_server_derived_identity_passed_to_engine() -> None:
+    """A clean request passes the server-derived athlete id to the engine (AUTH-R3)."""
+    app, engine = _build_app(_grounded_answer())
+    with TestClient(app) as client:
+        client.post("/v1/agent/ask", json={"question": "Ready?"}, headers=_auth(app))
     assert engine.seen_athlete_id == "owner"
 
 

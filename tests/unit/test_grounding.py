@@ -129,7 +129,10 @@ def test_planted_hallucinated_number_is_contradicted_and_replaced() -> None:
     # contradicted number NEVER published as stated; replaced by the canonical value.
     assert "99" not in result.scrubbed_text
     assert "84" in result.scrubbed_text
-    assert result.decision is GroundDecision.REPLAN
+    # GROUND-R9 (corrected): a contradicted number replaced IN PLACE by the canonical
+    # value is a bounded re-draft (regenerate), NOT a coverage re-plan — the corrected
+    # value already exists, so no different evidence needs fetching.
+    assert result.decision is GroundDecision.REGENERATE
 
 
 def test_unavailable_metric_number_is_scrubbed_not_placeholder() -> None:
@@ -292,12 +295,17 @@ def test_regenerate_when_some_ground_and_some_ungrounded() -> None:
     assert "84" in result.scrubbed_text
 
 
-def test_contradicted_forces_replan_even_with_grounded_survivor() -> None:
-    """A contradicted number forces replan despite a grounded survivor (GROUND-R9 penalty)."""
+def test_contradicted_regenerates_with_canonical_value_not_replan() -> None:
+    """A contradicted number regenerates with the canonical value, never published (GROUND-R9).
+
+    Corrected GROUND-R9: a contradicted number is replaced in place by the canonical value
+    and routes to a bounded re-draft (``regenerate``), NOT a coverage re-plan — the right
+    value already exists. The contradicted value is still never published.
+    """
     evidence = _FakeEvidence(metrics={"ctl": 84.0, "atl": 70.0})
     claims = [_number("84", "ctl", 84.0), _number("120", "atl", 120.0)]
     result = ground("CTL 84, ATL 120", claims, evidence, [])
-    assert result.decision is GroundDecision.REPLAN
+    assert result.decision is GroundDecision.REGENERATE
     assert "120" not in result.scrubbed_text
     assert "70" in result.scrubbed_text
 

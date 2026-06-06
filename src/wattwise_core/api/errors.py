@@ -34,9 +34,10 @@ clear of orphan user-literals (doc 80 QUAL-R13(c)).
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from typing import Any, Final
 
@@ -45,6 +46,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
+from wattwise_core.api.redaction import redact_text
 from wattwise_core.observability.logging import get_logger
 
 _logger = get_logger("wattwise_core.api.errors")
@@ -88,6 +90,7 @@ def _catalog() -> dict[str, ProblemType]:
     """
     entries = (
         ProblemType("validation-error", 422, "Check those details and try again"),
+        ProblemType("bad-request", 400, "We couldn't read that request"),
         ProblemType("invalid-cursor", 400, "That page link expired"),
         ProblemType("cursor-parameter-mismatch", 400, "That page link no longer matches"),
         ProblemType("unauthenticated", 401, "Please sign in to continue"),
@@ -193,20 +196,41 @@ class _Problem:
     instance: str
     trace_id: str
     errors: tuple[FieldError, ...] = field(default_factory=tuple)
+    status_override: int | None = None
+
+    @property
+    def status(self) -> int:
+        """The HTTP status for this occurrence (the framework override, else catalog)."""
+        if self.status_override is not None:
+            return self.status_override
+        return self.problem_type.status
 
     def to_body(self) -> dict[str, Any]:
-        """Render the RFC 9457 body (ERR-R2): the six required members + errors[]."""
+        """Render the RFC 9457 body (ERR-R2): the six required members + errors[].
+
+        Every free-text member that could echo caller/adapter-supplied text — ``detail``
+        and each ``errors[].message`` — is passed through :func:`redact_text` so a
+        secret/token/email shape never leaves the process in a problem document
+        (ERR-R5 / API-R19). The catalog ``title`` and machine ``code``/locators are
+        controlled values and are emitted verbatim.
+        """
         body: dict[str, Any] = {
             "type": self.problem_type.uri,
             "title": self.problem_type.title,
-            "status": self.problem_type.status,
-            "detail": self.detail,
+            "status": self.status,
+            "detail": redact_text(self.detail),
             "instance": self.instance,
             "trace_id": self.trace_id,
         }
         if self.errors:
-            body["errors"] = [err.to_dict() for err in self.errors]
+            body["errors"] = [
+                replace(err, message=redact_text(err.message)).to_dict() for err in self.errors
+            ]
         return body
+
+    def to_json_bytes(self) -> bytes:
+        """Serialize the redacted RFC 9457 body to UTF-8 JSON bytes (for ASGI middleware)."""
+        return json.dumps(self.to_body()).encode()
 
 
 def _assemble(
@@ -215,6 +239,7 @@ def _assemble(
     *,
     detail: str | None,
     errors: tuple[FieldError, ...],
+    status_override: int | None = None,
 ) -> _Problem:
     """Bind a problem type to this occurrence (path + trace), defaulting detail."""
     return _Problem(
@@ -223,6 +248,7 @@ def _assemble(
         instance=request.url.path,
         trace_id=resolve_trace_id(request),
         errors=errors,
+        status_override=status_override,
     )
 
 
@@ -230,7 +256,7 @@ def _render(problem: _Problem, headers: Mapping[str, str] | None = None) -> JSON
     """Serialize a problem to a ``problem+json`` response (ERR-R1/R4)."""
     response_headers = {TRACE_HEADER: problem.trace_id, **dict(headers or {})}
     return JSONResponse(
-        status_code=problem.problem_type.status,
+        status_code=problem.status,
         content=problem.to_body(),
         media_type=PROBLEM_MEDIA_TYPE,
         headers=response_headers,
@@ -250,12 +276,21 @@ async def _on_http_exception(
 
     A few statuses framework code raises directly (e.g. ``404`` for an unmatched
     route, ``405``) are normalized to the closed catalog so even framework-origin
-    errors emit the uniform document — never a default HTML/JSON shape.
+    errors emit the uniform document — never a default HTML/JSON shape. The
+    ORIGINATING HTTP status is preserved on the response line and the body ``status``
+    (ERR-R7/ERR-R4): a framework ``400`` stays a ``400`` (it is NOT silently rewritten
+    to the ``422`` ``validation-error`` type), and a ``405`` stays a ``405``. Routers
+    raise :class:`ProblemError` for domain errors, so the status-only path here only
+    ever sees framework-origin (unmatched route / wrong method / malformed) errors.
     """
     slug = _STATUS_TO_SLUG.get(exc.status_code, "internal-error")
     problem_type = CATALOG[slug]
     # Never echo a framework-supplied detail verbatim (ERR-R5): use catalog copy.
-    problem = _assemble(request, problem_type, detail=None, errors=())
+    # Pin the body+line status to the originating exception status so the framework
+    # status table is not collapsed into the catalog type's default status (ERR-R7).
+    problem = _assemble(
+        request, problem_type, detail=None, errors=(), status_override=exc.status_code
+    )
     headers = exc.headers or {}
     return _render(problem, headers=headers)
 
@@ -332,11 +367,11 @@ def _safe_validation_message(raw: Mapping[str, Any]) -> str:
 
 
 _STATUS_TO_SLUG: Final[Mapping[int, str]] = {
-    HTTPStatus.BAD_REQUEST: "validation-error",
+    HTTPStatus.BAD_REQUEST: "bad-request",
     HTTPStatus.UNAUTHORIZED: "unauthenticated",
     HTTPStatus.FORBIDDEN: "insufficient-scope",
     HTTPStatus.NOT_FOUND: "not-found",
-    HTTPStatus.METHOD_NOT_ALLOWED: "not-found",
+    HTTPStatus.METHOD_NOT_ALLOWED: "bad-request",
     HTTPStatus.CONFLICT: "conflict",
     HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "payload-too-large",
     HTTPStatus.UNSUPPORTED_MEDIA_TYPE: "unsupported-media-type",
@@ -344,6 +379,17 @@ _STATUS_TO_SLUG: Final[Mapping[int, str]] = {
     HTTPStatus.TOO_MANY_REQUESTS: "rate-limited",
     HTTPStatus.INTERNAL_SERVER_ERROR: "internal-error",
 }
+
+
+def render_problem_bytes(slug: str, request: Request) -> bytes:
+    """Render a catalog problem to redacted ``problem+json`` bytes (for ASGI middleware).
+
+    Used where a problem must be emitted OUTSIDE the FastAPI exception path (an ASGI
+    middleware that rejects a request before routing); produces the same RFC 9457 body
+    the handlers do (ERR-R1), with ``detail``/``errors[]`` redaction applied (ERR-R5).
+    """
+    problem = _assemble(request, CATALOG[slug], detail=None, errors=())
+    return problem.to_json_bytes()
 
 
 def install_error_handlers(app: FastAPI) -> None:

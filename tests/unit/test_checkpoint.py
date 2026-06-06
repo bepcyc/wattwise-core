@@ -23,6 +23,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata, empty_checkpoint
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import wattwise_core.agent.memory  # noqa: F401  (registers agent_memory_item on AgentStateBase)
 from wattwise_core.agent.checkpoint import (
     CheckpointIdentityError,
     CheckpointSchemaVersionError,
@@ -207,16 +208,57 @@ async def test_schema_version_mismatch_fails_closed_on_list(
         _ = [tup async for tup in reader.alist(_config())]
 
 
+# --- idempotency dedup (CKPT-R4) -------------------------------------------------------
+
+
+async def test_resolve_idempotent_returns_existing_run(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # CKPT-R4: a re-submission of the same turn (same thread_id) resolves the EXISTING run
+    # instead of starting a duplicate; before any run exists it resolves to None.
+    saver = _saver(session_factory, athlete_id=ATHLETE_A)
+    assert await saver.resolve_idempotent(THREAD_ID) is None
+
+    checkpoint = _checkpoint(["v1"])
+    await saver.aput(_config(), checkpoint, _metadata(), {})
+
+    resolved = await saver.resolve_idempotent(THREAD_ID)
+    assert resolved == checkpoint["id"]
+
+
+async def test_resolve_idempotent_refuses_cross_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # CKPT-R4 + CKPT-R3: idempotency resolution is identity-scoped; another athlete cannot
+    # resolve (and thus resume) a thread it does not own.
+    writer = _saver(session_factory, athlete_id=ATHLETE_A)
+    await writer.aput(_config(), _checkpoint(["v1"]), _metadata(), {})
+
+    other = _saver(session_factory, athlete_id=ATHLETE_B)
+    with pytest.raises(CheckpointIdentityError):
+        await other.resolve_idempotent(THREAD_ID)
+
+
 # --- store separation (ARCH-R13/R29) ---------------------------------------------------
 
 
 def test_agent_state_tables_not_in_canonical_metadata() -> None:
-    # Durable agent state is NEVER in the canonical GBO schema (ARCH-R13/R29).
+    # Durable agent state is NEVER in the canonical GBO schema (ARCH-R13/R29). The memory
+    # import above registers ``agent_memory_item`` on the agent-state metadata (MEM-R3):
+    # it MUST live in the agent-state store, never canonical.
     canonical = set(Base.metadata.tables)
     agent_state = set(AgentStateBase.metadata.tables)
-    assert agent_state == {"agent_thread", "agent_checkpoint", "agent_write"}
+    assert agent_state == {
+        "agent_thread",
+        "agent_checkpoint",
+        "agent_write",
+        "agent_memory_item",
+    }
     assert canonical.isdisjoint(agent_state)
     assert not any(name.startswith("agent_") for name in canonical)
+    # The relocated memory table is NOT in canonical metadata (the leak is closed).
+    assert "memory_item" not in canonical
+    assert "agent_memory_item" not in canonical
 
 
 def test_distinct_athletes_get_distinct_thread_rows() -> None:

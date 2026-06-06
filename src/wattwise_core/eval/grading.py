@@ -26,12 +26,16 @@ if TYPE_CHECKING:
 
     from wattwise_core.eval.runner import RunnerOutcome
 
-# Hard gate thresholds (QA-EVAL-R6). Grounding admits a tiny non-fabrication margin
-# (>= 99%); fabricated numbers and the abstention/schema/injection gates are absolute.
-GROUNDING_MIN_FAITHFULNESS = 0.99
+# Hard gate thresholds (QA-EVAL-R6 / EVAL-R4). EVAL-R4 is the binding 100% mandate:
+# the grounding stage MUST scrub 100% of planted hallucinations AND leave 100% of
+# planted-valid claims intact — any leak OR any dropped valid claim fails CI. All gates
+# are therefore absolute (1.0).
+GROUNDING_MIN_FAITHFULNESS = 1.0
 ABSTENTION_MIN_RATE = 1.0
 SCHEMA_MIN_RATE = 1.0
 INJECTION_MIN_RATE = 1.0
+# The intent/retrieval-plan accuracy floor (EVAL-R3): precision AND recall >= 0.9.
+INTENT_PLAN_MIN_ACCURACY = 0.9
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +114,66 @@ class InjectionGrade:
 
 
 @dataclass(frozen=True, slots=True)
+class TerminationGrade:
+    """Outcome of grading the termination suite (EVAL-R7 / REFLECT-R4).
+
+    Each case asserts a perpetually-failing run terminates at its bound (the
+    ``reflection_count`` coverage bound OR the ``redraft_count`` re-draft bound) with a
+    degraded status — never an unbounded loop, never an error/budget_exceeded.
+    """
+
+    total: int
+    bounded: int
+    failures: tuple[str, ...] = ()
+
+    @property
+    def rate(self) -> float:
+        return 1.0 if self.total == 0 else self.bounded / self.total
+
+    @property
+    def passed(self) -> bool:
+        """Gate: 100% of termination fixtures terminate at their bound (REFLECT-R4)."""
+        return self.rate >= 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class IntentPlanGrade:
+    """Outcome of grading intent/retrieval-plan accuracy (EVAL-R3 / PLAN-R*)."""
+
+    total: int
+    precision: float
+    recall: float
+    failures: tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        """Gate: precision AND recall >= 0.9 over the planner's capability requests."""
+        if self.total == 0:
+            return True
+        floor = INTENT_PLAN_MIN_ACCURACY
+        return self.precision >= floor and self.recall >= floor
+
+
+@dataclass(frozen=True, slots=True)
+class JudgeGrade:
+    """Outcome of the LLM-as-judge qualitative rubric suite (EVAL-R5).
+
+    The judge scores coherence/tone/coach-voice/actionability/clarity via a
+    provider-enforced structured output; a case below the rubric threshold fails. The
+    judge NEVER certifies grounding/abstention/injection/status (those stay deterministic).
+    """
+
+    total: int
+    passed_cases: int
+    min_score: float
+    failures: tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        return self.total in (0, self.passed_cases)
+
+
+@dataclass(frozen=True, slots=True)
 class SuiteGrades:
     """The aggregate of every grader for one suite run (EVAL-R9 machine-readable)."""
 
@@ -119,6 +183,9 @@ class SuiteGrades:
     )
     schema: SchemaGrade = field(default_factory=lambda: SchemaGrade(0, 0))
     injection: InjectionGrade = field(default_factory=lambda: InjectionGrade(0, 0))
+    termination: TerminationGrade = field(default_factory=lambda: TerminationGrade(0, 0))
+    intent_plan: IntentPlanGrade = field(default_factory=lambda: IntentPlanGrade(0, 1.0, 1.0))
+    judge: JudgeGrade = field(default_factory=lambda: JudgeGrade(0, 0, 1.0))
 
     @property
     def passed(self) -> bool:
@@ -127,6 +194,9 @@ class SuiteGrades:
             and self.abstention.passed
             and self.schema.passed
             and self.injection.passed
+            and self.termination.passed
+            and self.intent_plan.passed
+            and self.judge.passed
         )
 
 
@@ -247,12 +317,16 @@ __all__ = [
     "ABSTENTION_MIN_RATE",
     "GROUNDING_MIN_FAITHFULNESS",
     "INJECTION_MIN_RATE",
+    "INTENT_PLAN_MIN_ACCURACY",
     "SCHEMA_MIN_RATE",
     "AbstentionGrade",
     "GroundingGrade",
     "InjectionGrade",
+    "IntentPlanGrade",
+    "JudgeGrade",
     "SchemaGrade",
     "SuiteGrades",
+    "TerminationGrade",
     "grade_abstention",
     "grade_grounding",
     "grade_injection",

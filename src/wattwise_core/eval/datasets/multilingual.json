@@ -1,0 +1,29 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "multilingual",
+  "qa_eval_suite": "R7a",
+  "requirement_ids": ["EVAL-R7a", "LANG-R2", "LANG-R4", "VOICE-R1"],
+  "rationale": "Multilingual rendering set (EVAL-R7a): the SAME grounded fixture rendered EN/DE/RU MUST carry identical numeric values and citations, stay jargon-free, and leak no untranslated internal token. Numbers are locale-stable (decimal point kept) so a downstream consumer reads the same canonical value in every language.",
+  "cases": [
+    {
+      "id": "render-weekly-load-parity",
+      "expected_citations": ["ctl-2026-06-01"],
+      "citations": ["ctl-2026-06-01"],
+      "renders": {
+        "en": "Your fitness is holding steady at 72.4, with form a touch negative at -7.7.",
+        "de": "Deine Fitness liegt stabil bei 72.4, die Form leicht negativ bei -7.7.",
+        "ru": "Твоя форма держится на уровне 72.4, свежесть немного в минусе: -7.7."
+      }
+    },
+    {
+      "id": "render-readiness-parity",
+      "expected_citations": ["hrv-2026-06-02"],
+      "citations": ["hrv-2026-06-02"],
+      "renders": {
+        "en": "Recovery looks solid this morning, around 58 today.",
+        "de": "Die Erholung sieht heute Morgen gut aus, rund 58 heute.",
+        "ru": "Восстановление этим утром хорошее, около 58 сегодня."
+      }
+    }
+  ]
+}

@@ -38,9 +38,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Final, Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path
 from pydantic import BaseModel, ConfigDict, Field
@@ -48,61 +47,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.api.auth import Scope, require_scopes
-from wattwise_core.api.deps import CurrentPrincipal, DbSession
+from wattwise_core.api.connection_catalog import (
+    ACCEPTED_FILE_FORMATS,
+    CATALOG_BY_SOURCE,
+    FILE_IMPORT_SOURCE_KEY,
+    INTERVALS_SOURCE_KEY,
+    OSS_CATALOG,
+    CatalogEntry,
+)
+from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus
 from wattwise_core.persistence.models import Connection, SourceDescriptor
 
-router = APIRouter(prefix="/v1/connections", tags=["connections"])
-
-
-# --------------------------------------------------------------------------- catalog
-
-
-#: The single ``api_key`` source key the OSS catalog connects (Intervals.icu, doc 30).
-INTERVALS_SOURCE_KEY: Final = "intervals_icu"
-
-#: The built-in connectionless file-upload source key (LIN-R1.1, doc 30).
-FILE_IMPORT_SOURCE_KEY: Final = "file_import"
-
-#: The activity-file formats the OSS importer accepts (API-R33; routes to imports).
-ACCEPTED_FILE_FORMATS: Final[tuple[str, ...]] = (".fit", ".fit.gz", ".gpx", ".tcx")
-
-
-@dataclass(frozen=True, slots=True)
-class _CatalogEntry:
-    """One connectable source in the OSS catalog (API-R42).
-
-    ``source`` is the machine key (the AUTH-R15 source-name exception applies on this
-    surface). ``connect_hint`` is short athlete-facing copy (API-R21) telling the
-    athlete what connecting this source does — never a URL and never jargon.
-    """
-
-    source: str
-    display_name: str
-    auth_archetype: AuthArchetype
-    connect_hint: str
-
-
-#: The fixed OSS catalog (API-R42): a ``file_upload`` importer + one ``api_key`` source.
-#: OAuth-redirect connectors are commercial (COMM-R18) and are not present here.
-_OSS_CATALOG: Final[tuple[_CatalogEntry, ...]] = (
-    _CatalogEntry(
-        source=FILE_IMPORT_SOURCE_KEY,
-        display_name="Activity files",
-        auth_archetype=AuthArchetype.FILE_UPLOAD,
-        connect_hint="Upload a ride or run file from your watch or another app.",
-    ),
-    _CatalogEntry(
-        source=INTERVALS_SOURCE_KEY,
-        display_name="Intervals.icu",
-        auth_archetype=AuthArchetype.API_KEY,
-        connect_hint="Connect with your Intervals.icu key to bring your training in.",
-    ),
-)
-
-#: Catalog index by source key for O(1) lookup on initiate/complete.
-_CATALOG_BY_SOURCE: Final[dict[str, _CatalogEntry]] = {e.source: e for e in _OSS_CATALOG}
+router = APIRouter(prefix="/v1/connections", tags=["connections"], dependencies=[RateLimit])
 
 
 # --------------------------------------------------------- credential-probe seam
@@ -210,6 +168,13 @@ class FileUploadNextStep(BaseModel):
     accepted_formats: list[str]
 
 
+#: The archetype-discriminated next-step union (SCHEMA-R10): a typed client branches on
+#: ``kind`` (the OpenAPI ``discriminator``) without guessing the union member.
+ConnectionNextStep = Annotated[
+    ApiKeyNextStep | FileUploadNextStep, Field(discriminator="kind")
+]
+
+
 class ApiKeyCompleteRequest(BaseModel):
     """Body for completing an ``api_key`` connection (API-R44).
 
@@ -263,15 +228,16 @@ async def list_available() -> ConnectionCatalog:
                 auth_archetype=e.auth_archetype,
                 connect_hint=e.connect_hint,
             )
-            for e in _OSS_CATALOG
+            for e in OSS_CATALOG
         ]
     )
 
 
 @router.post(
     "/{source}/initiate",
+    response_model=ConnectionNextStep,
     operation_id="initiateConnection",
-    dependencies=[Depends(require_scopes(Scope.READ, Scope.WRITE))],
+    dependencies=[Depends(require_scopes(Scope.WRITE))],
 )
 async def initiate(source: SourcePath) -> ApiKeyNextStep | FileUploadNextStep:
     """Return the archetype-discriminated next step for connecting ``source`` (API-R43).
@@ -293,7 +259,7 @@ async def initiate(source: SourcePath) -> ApiKeyNextStep | FileUploadNextStep:
     "/{source}/complete",
     response_model=ConnectionResult,
     operation_id="completeConnection",
-    dependencies=[Depends(require_scopes(Scope.READ, Scope.WRITE))],
+    dependencies=[Depends(require_scopes(Scope.WRITE))],
 )
 async def complete(
     source: SourcePath,
@@ -321,12 +287,51 @@ async def complete(
     return _to_result(connection, entry)
 
 
+@router.post(
+    "/{connection_id}/reconnect",
+    response_model=ConnectionResult,
+    operation_id="reconnectConnection",
+    dependencies=[Depends(require_scopes(Scope.WRITE))],
+)
+async def reconnect(
+    connection_id: Annotated[str, Path(description="An existing api_key connection id.")],
+    body: ApiKeyCompleteRequest,
+    principal: CurrentPrincipal,
+    session: DbSession,
+    probe: ProbeDep,
+    sink: SinkDep,
+) -> ConnectionResult:
+    """Re-authenticate a stuck/errored ``api_key`` connection (API-R45).
+
+    The recovery path for a ``reauth_required``/``error`` connection: the MANDATORY
+    read-only probe runs FIRST against the new raw key; only on success is the key
+    envelope-encrypted into a fresh ``credential_ref`` (the raw value discarded,
+    AUTH-R16), the ref atomically replaced, and the status flipped back to ``connected``
+    (AUTH-R17) while the row's history is preserved. A failed probe → ``422
+    credential-invalid`` leaving the existing row untouched. An unknown/foreign
+    connection → ``404`` (API-R51).
+    """
+    athlete_uuid = uuid.UUID(principal.athlete_id)
+    connection = await _owned_connection(session, athlete_uuid, connection_id)
+    entry = CATALOG_BY_SOURCE.get(
+        await _source_key_for(session, connection.source_descriptor_id)
+    )
+    if entry is None or entry.auth_archetype is not AuthArchetype.API_KEY:
+        raise _wrong_archetype(connection.auth_archetype)
+    await _run_probe(probe, entry.source, body.api_key)
+    connection.credential_ref = sink.store(body.api_key)
+    connection.status = ConnectionStatus.CONNECTED
+    connection.connected_at = datetime.now(UTC)
+    await session.flush()
+    return _to_result(connection, entry)
+
+
 # --------------------------------------------------------------------------- helpers
 
 
-def _require_catalog_entry(source: str) -> _CatalogEntry:
+def _require_catalog_entry(source: str) -> CatalogEntry:
     """Look up a catalog entry by source key; unknown → ``404`` (API-R51)."""
-    entry = _CATALOG_BY_SOURCE.get(source)
+    entry = CATALOG_BY_SOURCE.get(source)
     if entry is None:
         raise ProblemError("not-found")
     return entry
@@ -357,7 +362,7 @@ async def _run_probe(probe: CredentialProbe, source: str, secret: str) -> None:
 async def _persist_connected(
     session: AsyncSession,
     athlete_id: str,
-    entry: _CatalogEntry,
+    entry: CatalogEntry,
     credential_ref: str,
 ) -> Connection:
     """Create-or-update the ``connected`` connection for this athlete+source (API-R44).
@@ -416,7 +421,33 @@ async def _existing_connection(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-def _to_result(connection: Connection, entry: _CatalogEntry) -> ConnectionResult:
+async def _owned_connection(
+    session: AsyncSession, athlete_id: uuid.UUID, connection_id: str
+) -> Connection:
+    """Fetch the owner's connection by id; unknown/malformed/foreign → ``404`` (API-R51)."""
+    try:
+        target_id = uuid.UUID(connection_id)
+    except ValueError as exc:
+        raise ProblemError("not-found") from exc
+    stmt = select(Connection).where(
+        Connection.connection_id == target_id,
+        Connection.athlete_id == athlete_id,
+    )
+    connection = (await session.execute(stmt)).scalar_one_or_none()
+    if connection is None:
+        raise ProblemError("not-found")
+    return connection
+
+
+async def _source_key_for(session: AsyncSession, descriptor_id: uuid.UUID) -> str:
+    """Resolve the catalog source key for a connection's descriptor (reconnect lookup)."""
+    descriptor = await session.get(SourceDescriptor, descriptor_id)
+    if descriptor is None:
+        raise ProblemError("internal-error")
+    return descriptor.source_key
+
+
+def _to_result(connection: Connection, entry: CatalogEntry) -> ConnectionResult:
     """Render a persisted connection to the completion result (API-R44/R47)."""
     return ConnectionResult(
         connection_id=str(connection.connection_id),

@@ -35,36 +35,42 @@ AUTH-R13, SCHEMA-R7, LIMIT-R2, PERF-R10(b), ERR-R8, ERR-R9.
 
 from __future__ import annotations
 
-import json
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, Final, Literal, Protocol, runtime_checkable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import AgentAnswer
+from wattwise_core.api.agent_stream import (
+    SSE_HEADERS,
+    SSE_TERMINAL_DONE,
+    SSE_TERMINAL_ERROR,
+    heartbeat_until,
+    problem_event,
+    sse_event,
+)
 from wattwise_core.api.errors import FieldError, ProblemError, resolve_trace_id
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.sanitize import sanitize_html
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
 
-#: SSE event names (the API-R22 closed ``sse_event`` discriminator, SCHEMA-R3). The
-#: terminal members are ``done``/``error``; one of them is ALWAYS emitted last.
-SSE_TERMINAL_DONE: Final = "done"
-SSE_TERMINAL_ERROR: Final = "error"
-
-#: Externalized athlete-facing copy for this surface (QUAL-R13: user copy is a named
-#: catalog value, never an inline literal in logic). The warm human translation of a
-#: degraded outcome's typed coverage caveat (API-R11a / API-R21); the structured
-#: ``coverage_caveat`` carries the machine-readable basis a client badges on.
-_DEGRADED_REASON_TEXT: Final = "I built this with what we have — a source is offline."
-
 #: The athlete-facing answer-length enum (API-R11f); default ``standard``.
 ResponseLength = Literal["short", "standard", "detailed"]
 FollowUpKind = Literal["expand", "drill", "reveal_numbers"]
+
+#: The per-language warm reason_text for a degraded outcome (API-R11a / API-R37). The
+#: structured ``coverage_caveat`` carries the machine basis; this is its human gloss in
+#: the athlete's selected language (en/de/ru), externalized as catalog copy (QUAL-R13).
+_DEGRADED_REASON_BY_LOCALE: Final[dict[str, str]] = {
+    "en": "I built this with what we have — a source is offline.",
+    "de": "Ich habe das mit den vorhandenen Daten erstellt — eine Quelle ist offline.",
+    "ru": "Я собрал это из того, что есть — один источник недоступен.",
+}
 
 
 # --- engine seam (injected; reached only through this Protocol, ARCH-R21) --------
@@ -143,7 +149,13 @@ Limiter = Annotated[RateLimiter, Depends(rate_limiter)]
 
 
 class FollowUp(BaseModel):
-    """Typed conversational follow-up over the durable thread (API-R11e)."""
+    """Typed conversational follow-up over the durable thread (API-R11e).
+
+    ``additionalProperties:false`` (SCHEMA-R4) rejects any unknown nested property so a
+    forged/misnamed field can never be silently accepted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     kind: FollowUpKind
     target_ref: str | None = None
@@ -154,12 +166,18 @@ class AgentAskRequest(BaseModel):
 
     ``question`` is required UNLESS a ``follow_up`` is present (API-R11e); it is bounded
     to 2000 chars (LIMIT-R5). Identity is NOT a field here — it is server-derived
-    (AUTH-R3); a client cannot name the athlete it acts as.
+    (AUTH-R3); a client cannot name the athlete it acts as. ``additionalProperties:false``
+    (SCHEMA-R4) rejects any unknown body property (e.g. a forged ``athlete_id``) with a
+    ``422`` rather than silently dropping it. ``response_length`` is optional: when
+    omitted the engine applies the athlete's persisted preference, else ``standard``
+    (API-R11f).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     question: str | None = Field(default=None, min_length=1, max_length=2000)
     thread_id: str | None = None
-    response_length: ResponseLength = "standard"
+    response_length: ResponseLength | None = None
     follow_up: FollowUp | None = None
     language: Literal["en", "de", "ru"] | None = None
     stream: bool = False
@@ -276,25 +294,28 @@ def _followups_out(answer: AgentAnswer) -> list[SuggestedFollowupOut]:
     ]
 
 
-def _degraded_out(answer: AgentAnswer) -> DegradedOut | None:
-    """Build the ``degraded`` member payload, else ``None`` (API-R11a).
+def _degraded_out(answer: AgentAnswer, locale: str) -> DegradedOut | None:
+    """Build the ``degraded`` member payload, else ``None`` (API-R11a / API-R37).
 
-    Present only for a ``degraded`` outcome: the human ``reason_text`` plus the typed
-    ``coverage_caveat`` (source-agnostic missing/substituted/stale state). The caveat is
-    the engine's typed structure; we pass it through without inventing a number.
+    Present only for a ``degraded`` outcome: the human ``reason_text`` in the athlete's
+    selected language (en/de/ru, API-R37) plus the typed ``coverage_caveat``
+    (source-agnostic missing/substituted/stale state). The caveat is the engine's typed
+    structure; we pass it through without inventing a number.
     """
     if answer.status is not RunStatus.DEGRADED:
         return None
     caveat = dict(answer.coverage_caveat) if answer.coverage_caveat is not None else None
-    return DegradedOut(reason_text=_DEGRADED_REASON_TEXT, coverage_caveat=caveat)
+    reason = _DEGRADED_REASON_BY_LOCALE.get(locale, _DEGRADED_REASON_BY_LOCALE["en"])
+    return DegradedOut(reason_text=reason, coverage_caveat=caveat)
 
 
-def _render_response(answer: AgentAnswer, trace_id: str) -> AgentAskResponse:
+def _render_response(answer: AgentAnswer, trace_id: str, locale: str) -> AgentAskResponse:
     """Render a grounded :class:`AgentAnswer` into the sanitized response union.
 
     ``answer_html`` is sanitized HERE (API-R13 / SCHEMA-R7) before it leaves the API —
     the client is never trusted to sanitize. Maps the OSS terminal status to the
-    union's closed member; only ``completed``/``degraded`` are reachable in OSS.
+    union's closed member; only ``completed``/``degraded`` are reachable in OSS. The
+    degraded human caveat is localized to ``locale`` (API-R37).
     """
     member: Literal["completed", "degraded"] = (
         "degraded" if answer.status is RunStatus.DEGRADED else "completed"
@@ -308,7 +329,7 @@ def _render_response(answer: AgentAnswer, trace_id: str) -> AgentAskResponse:
         observations=_observations_out(answer),
         grounding=GroundingOut(grounded=True, citations=_citations_out(answer)),
         suggested_followups=_followups_out(answer),
-        degraded=_degraded_out(answer),
+        degraded=_degraded_out(answer, locale),
     )
 
 
@@ -327,52 +348,61 @@ def _validate_request(body: AgentAskRequest) -> None:
         )
 
 
-async def _run_engine(engine: AgentEngine, athlete_id: str, body: AgentAskRequest) -> AgentAnswer:
+#: The languages this surface localizes athlete-facing copy into (API-R37).
+_SUPPORTED_LOCALES: Final[frozenset[str]] = frozenset({"en", "de", "ru"})
+
+
+def resolve_locale(body: AgentAskRequest, accept_language: str | None) -> str:
+    """Resolve the response language: body ``language`` -> Accept-Language -> ``en`` (API-R37).
+
+    The body ``language`` field takes precedence over the ``Accept-Language`` header when
+    both are present; otherwise the first supported language tag in the header is used,
+    falling back to the default ``en``. (OSS has no persisted per-athlete language
+    setting; the commercial layer inserts it between the header and the default.)
+    """
+    if body.language is not None:
+        return body.language
+    if accept_language:
+        for part in accept_language.split(","):
+            tag = part.split(";", 1)[0].strip().lower()[:2]
+            if tag in _SUPPORTED_LOCALES:
+                return tag
+    return "en"
+
+
+def _resolve_response_length(body: AgentAskRequest) -> ResponseLength:
+    """Apply the persisted response-length default when omitted, else ``standard`` (API-R11f).
+
+    OSS has no persisted per-athlete response-length store, so an omitted value resolves
+    to ``standard``; the commercial layer resolves the athlete's saved preference here.
+    """
+    return body.response_length or "standard"
+
+
+async def _run_engine(
+    engine: AgentEngine, athlete_id: str, body: AgentAskRequest, locale: str
+) -> AgentAnswer:
     """Drive the injected engine for ``body`` and enforce fail-closed grounding (API-R12).
 
-    Passes the server-derived ``athlete_id`` (AUTH-R3) — never a client value. A
-    terminal outcome that is not grounded raises ``422`` ``agent-grounding-failed``
-    (API-R12 / ERR-R9): the API never returns a ``completed`` answer with
-    ``grounding.grounded == false``.
+    Passes the server-derived ``athlete_id`` (AUTH-R3) — never a client value — and the
+    resolved ``locale`` (API-R37) and ``response_length`` (API-R11f). A terminal outcome
+    that is not grounded raises ``422`` ``agent-grounding-failed`` (API-R12 / ERR-R9):
+    the API never returns a ``completed`` answer with ``grounding.grounded == false``.
     """
     answer = await engine.answer(
         athlete_id=athlete_id,
         question=body.question,
         thread_id=body.thread_id,
-        response_length=body.response_length,
+        response_length=_resolve_response_length(body),
         follow_up=body.follow_up.model_dump() if body.follow_up else None,
-        locale=body.language or "en",
+        locale=locale,
     )
     if not _grounded_flag(answer):
         raise ProblemError("agent-grounding-failed")
     return answer
 
 
-# --- SSE streaming (API-R22) -----------------------------------------------------
-
-
-def _sse_event(event: str, data: dict[str, Any], *, event_id: str | None = None) -> str:
-    """Encode one SSE frame: the typed ``event:`` name + a JSON ``data:`` line (API-R22).
-
-    The ``event`` is the closed ``sse_event`` discriminator carried on the wire
-    ``event:`` line (the client dispatches on it). An optional ``id:`` makes the event
-    resumable (API-R22a). The frame ends with the blank line SSE requires.
-    """
-    lines = []
-    if event_id is not None:
-        lines.append(f"id: {event_id}")
-    lines.append(f"event: {event}")
-    lines.append(f"data: {json.dumps(data, separators=(',', ':'))}")
-    return "\n".join(lines) + "\n\n"
-
-
-def _terminal_envelope(response: AgentAskResponse) -> dict[str, Any]:
-    """The streamed ``done`` envelope: the SAME athlete-facing union as non-streamed.
-
-    Carries the identical status-discriminated payload (API-R11a/R17) — including the
-    stable observation/citation handles — and NO billing/model machinery (API-R11c).
-    """
-    return response.model_dump()
+# --- SSE streaming (API-R22 / API-R22a) — framing lives in api.agent_stream -------
 
 
 async def _stream_answer(
@@ -381,88 +411,80 @@ async def _stream_answer(
     athlete_id: str,
     body: AgentAskRequest,
     trace_id: str,
+    locale: str,
+    last_event_id: str | None,
 ) -> AsyncIterator[str]:
-    """Yield the SSE event sequence for one agent run (API-R22), terminal-safe.
+    """Yield the SSE event sequence for one agent run (API-R22/R22a), terminal-safe.
 
-    Emits a ``status`` start frame, then the terminal ``done`` (grounded) or ``error``
-    (grounding failed / engine error) frame — a terminal frame is ALWAYS emitted so a
-    client deterministically detects stream end (API-R22). Cancellation-safe per
-    PERF-R10(b): a client disconnect mid-run raises ``CancelledError`` here, which
-    propagates to cancel the awaited engine coroutine cleanly — no busy-loop, no foreign
-    cancellation injected into a shared tool session, no leaked run.
+    Emits a ``status`` start frame, interleaves periodic ``:``-comment heartbeats while
+    awaiting the engine (~15s, so idle connections survive proxies, API-R22a), then the
+    terminal ``done`` (grounded) or ``error`` (grounding failed / engine error) frame —
+    a terminal frame is ALWAYS emitted so a client deterministically detects stream end
+    (API-R22). On reconnect with a ``Last-Event-ID`` already at the terminal ``done``, a
+    ``restart`` first event tells the client the prior run is gone and a fresh one began
+    (API-R22a resume). Cancellation-safe per PERF-R10(b): a client disconnect mid-run
+    cancels the awaited engine coroutine cleanly — no busy-loop, no foreign cancellation
+    into a shared tool session, no leaked run.
     """
-    yield _sse_event("status", {"status": "working"}, event_id="0")
+    if last_event_id == SSE_TERMINAL_DONE:
+        yield sse_event("restart", {"status": "restarting"}, event_id="restart")
+    yield sse_event("status", {"status": "working"}, event_id="0")
     try:
         if await request.is_disconnected():
             return
-        answer = await _run_engine(engine, athlete_id, body)
+        run = asyncio.ensure_future(_run_engine(engine, athlete_id, body, locale))
+        async for frame in heartbeat_until(run, request):
+            yield frame
+        answer = run.result()
     except ProblemError as exc:
-        yield _sse_event(
-            SSE_TERMINAL_ERROR,
-            _problem_event(exc, request),
-            event_id="error",
-        )
+        yield sse_event(SSE_TERMINAL_ERROR, problem_event(exc, request), event_id="error")
         return
-    response = _render_response(answer, trace_id)
-    yield _sse_event(SSE_TERMINAL_DONE, _terminal_envelope(response), event_id="done")
-
-
-def _problem_event(exc: ProblemError, request: Request) -> dict[str, Any]:
-    """Render a :class:`ProblemError` as the streamed ``error`` body (API-R16).
-
-    The streamed ``error`` carries the SAME RFC 9457 problem body as the non-streamed
-    contract (§6 / API-R16); the stream never terminates silently on failure.
-    """
-    return {
-        "type": exc.problem_type.uri,
-        "title": exc.problem_type.title,
-        "status": exc.problem_type.status,
-        "detail": exc.detail if exc.detail is not None else exc.problem_type.title,
-        "instance": request.url.path,
-        "trace_id": resolve_trace_id(request),
-    }
-
-
-#: Anti-buffering + keep-alive headers so SSE works through proxies/CDNs (API-R22a).
-_SSE_HEADERS: Final[dict[str, str]] = {
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
+    response = _render_response(answer, trace_id, locale)
+    yield sse_event(SSE_TERMINAL_DONE, response.model_dump(), event_id="done")
 
 
 # --- the endpoint ----------------------------------------------------------------
 
 
-@router.post("/ask", dependencies=[_Agent], operation_id="agentAsk")
+@router.post(
+    "/ask",
+    response_model=AgentAskResponse,
+    dependencies=[_Agent],
+    operation_id="agentAsk",
+)
 async def agent_ask(
     request: Request,
     body: AgentAskRequest,
     engine: Engine,
     athlete_id: AthleteId,
     limiter: Limiter,
+    accept_language: Annotated[str | None, Header()] = None,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> Any:
     """Submit a question to the coaching agent (API-R11); JSON or SSE per ``stream``.
 
     Requires the ``agent`` scope (AUTH-R13) and debits the per-athlete ``agent`` rate
-    bucket (``20/min``, LIMIT-R2) keyed by the server-derived id (AUTH-R3). Returns the
-    status-discriminated :class:`AgentAskResponse` (API-R11a) with a server-sanitized
-    ``answer_html`` (API-R13) and no billing/model machinery (API-R11c); a run that
-    cannot ground fails closed ``422`` ``agent-grounding-failed`` (API-R12). With
-    ``stream:true`` it returns a cancellation-safe SSE stream of typed events whose
-    terminal ``done`` carries the identical union (API-R22 / PERF-R10(b)).
+    bucket (``20/min``, LIMIT-R2) keyed by the server-derived id (AUTH-R3). The 200 body
+    is the named status-discriminated :class:`AgentAskResponse` (SCHEMA-R1/API-R11a) with
+    a server-sanitized ``answer_html`` (API-R13) and no billing/model machinery
+    (API-R11c); a run that cannot ground fails closed ``422`` ``agent-grounding-failed``
+    (API-R12). The response language resolves body ``language`` -> ``Accept-Language`` ->
+    ``en`` (API-R37). With ``stream:true`` it returns a cancellation-safe SSE stream
+    (heartbeats + ``Last-Event-ID`` resume, API-R22a) whose terminal ``done`` carries the
+    identical union (API-R22 / PERF-R10(b)).
     """
     limiter.check(athlete_id, LimitClass.AGENT)
     _validate_request(body)
     trace_id = resolve_trace_id(request)
+    locale = resolve_locale(body, accept_language)
     if body.stream:
         return StreamingResponse(
-            _stream_answer(request, engine, athlete_id, body, trace_id),
+            _stream_answer(request, engine, athlete_id, body, trace_id, locale, last_event_id),
             media_type="text/event-stream",
-            headers=_SSE_HEADERS,
+            headers=SSE_HEADERS,
         )
-    answer = await _run_engine(engine, athlete_id, body)
-    return _render_response(answer, trace_id)
+    answer = await _run_engine(engine, athlete_id, body, locale)
+    return _render_response(answer, trace_id, locale)
 
 
 __all__ = [

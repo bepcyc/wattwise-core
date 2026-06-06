@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from wattwise_core.api.auth import Principal, Scope, authenticate
 from wattwise_core.api.deps import get_db, get_settings
 from wattwise_core.api.errors import install_error_handlers
+from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import connections as connections_router
 from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import onboarding as onboarding_router
@@ -227,6 +228,7 @@ def _build_app(
     """Assemble a minimal app: error handlers + the four routers + overridden seams."""
     app = FastAPI()
     app.state.settings = settings
+    app.state.rate_limiter = RateLimiter()  # the per-athlete read/mutating buckets (LIMIT-R1)
     install_error_handlers(app)
     for module in (connections_router, imports_router, sync_router, onboarding_router):
         app.include_router(module.router)
@@ -387,6 +389,68 @@ def test_reconnect_replaces_ref_without_duplicating_row(harness: _Harness) -> No
     assert first.status_code == second.status_code == 200
     assert _connection_count(harness) == 1
     assert _only_connection(harness).credential_ref == "cred_ref_2"
+
+
+def test_reconnect_route_recovers_an_errored_connection(harness: _Harness) -> None:
+    """POST /{connection_id}/reconnect re-auths an api_key connection in place (API-R45)."""
+    harness.client.post(
+        "/v1/connections/intervals_icu/complete", headers=_auth(), json={"api_key": "good-key"}
+    )
+    connection_id = str(_only_connection(harness).connection_id)
+    resp = harness.client.post(
+        f"/v1/connections/{connection_id}/reconnect",
+        headers=_auth(),
+        json={"api_key": "good-key"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "connected"
+    # The probe ran before reconnecting (AUTH-R17) and the ref was atomically replaced,
+    # with no duplicate row minted (one connection, history preserved).
+    assert _connection_count(harness) == 1
+    assert _only_connection(harness).credential_ref == "cred_ref_2"
+
+
+def test_reconnect_bad_key_is_422_credential_invalid(harness: _Harness) -> None:
+    """A bad key on reconnect -> 422 credential-invalid; the row is untouched (API-R45/R17)."""
+    harness.client.post(
+        "/v1/connections/intervals_icu/complete", headers=_auth(), json={"api_key": "good-key"}
+    )
+    connection_id = str(_only_connection(harness).connection_id)
+    resp = harness.client.post(
+        f"/v1/connections/{connection_id}/reconnect", headers=_auth(), json={"api_key": "bad"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["type"].endswith("/credential-invalid")
+    assert _only_connection(harness).credential_ref == "cred_ref_1"  # untouched
+
+
+def test_reconnect_unknown_connection_is_404(harness: _Harness) -> None:
+    """Reconnecting an unknown/foreign connection id -> 404 (API-R51)."""
+    resp = harness.client.post(
+        "/v1/connections/00000000-0000-0000-0000-000000000000/reconnect",
+        headers=_auth(),
+        json={"api_key": "good-key"},
+    )
+    assert resp.status_code == 404
+
+
+def test_initiate_complete_accept_write_only_token(harness: _Harness) -> None:
+    """initiate/complete require WRITE only (not READ+WRITE), per API-R43/R44/AUTH-R11."""
+    # Re-bind the auth seam to a WRITE-only principal (no READ scope).
+    harness.client.app.dependency_overrides[authenticate] = lambda: Principal(
+        subject=harness.athlete_id, scopes=frozenset({Scope.WRITE, Scope.SYNC})
+    )
+    try:
+        init = harness.client.post("/v1/connections/intervals_icu/initiate", headers=_auth())
+        assert init.status_code == 200  # a write-only token is accepted (no extra read needed)
+        done = harness.client.post(
+            "/v1/connections/intervals_icu/complete", headers=_auth(), json={"api_key": "good-key"}
+        )
+        assert done.status_code == 200
+    finally:
+        harness.client.app.dependency_overrides[authenticate] = lambda: Principal(
+            subject=harness.athlete_id, scopes=_OWNER_SCOPES
+        )
 
 
 # --------------------------------------------------------------------------- imports

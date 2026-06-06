@@ -28,11 +28,12 @@ from sqlalchemy import String, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from wattwise_core.persistence.base import Base, TimestampMixin
+from wattwise_core.agent.state_store import AGENT_STATE_PREFIX, AgentStateBase
 from wattwise_core.persistence.types import (
+    created_at_column,
     enum_column,
-    fk_uuid_column,
     pk_column,
+    updated_at_column,
 )
 
 # --- closed canonical enum (MEM-R5; owned by doc 50) ---
@@ -63,25 +64,31 @@ class UntrustedMemoryWriteError(RuntimeError):
     """
 
 
-# --- ORM table (agent-state store; athlete-scoped) ---
+# --- ORM table (DEDICATED agent-state store; never the canonical GBO store) ---
 
 
-class MemoryItem(Base, TimestampMixin):
-    """One durable, ground-truth-preserving memory episode (MEM-R1/R2/R3).
+class MemoryItem(AgentStateBase):
+    """One durable, ground-truth-preserving memory episode (MEM-R1/R2/R3, ARCH-R13).
 
-    Scoped to the owner ``athlete_id`` (MEM-R3). ``content`` preserves the athlete's
-    own words (MEM-R2, low-extraction); ``inferred`` marks an LLM-derived item that is
-    confirmable against the preserved episode (MEM-R2). There is deliberately NO
-    numeric column: the store cannot hold a canonical analytic value (MEM-R1).
+    Registered on :class:`AgentStateBase` (the dedicated agent-state metadata), NOT the
+    canonical ``Base`` — durable agent memory MUST live in the agent-state store, never
+    the canonical GBO store (MEM-R3/MEM-R4/ARCH-R13), with its own write credential and
+    erased alongside checkpoints (CKPT-R8). ``athlete_id`` is an agent-state-side scope
+    column (defence-in-depth, like ``AgentCheckpoint``), NOT a foreign key into the
+    canonical ``athlete`` table. ``content`` preserves the athlete's own words (MEM-R2);
+    ``inferred`` marks an LLM-derived item (MEM-R2). There is deliberately NO numeric
+    column: the store cannot hold a canonical analytic value (MEM-R1).
     """
 
-    __tablename__ = "memory_item"
+    __tablename__ = AGENT_STATE_PREFIX + "memory_item"
 
     memory_item_id: Mapped[uuid.UUID] = pk_column()
-    athlete_id: Mapped[uuid.UUID] = fk_uuid_column("athlete.athlete_id", nullable=False)
+    athlete_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
     kind: Mapped[MemoryItemKind] = enum_column(MemoryItemKind, nullable=False)
     content: Mapped[str] = mapped_column(String(2048), nullable=False)
     inferred: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_at: Mapped[_dt.datetime] = created_at_column()
+    updated_at: Mapped[_dt.datetime] = updated_at_column()
 
 
 # --- recall result (returned to the engine; never raw numbers) ---

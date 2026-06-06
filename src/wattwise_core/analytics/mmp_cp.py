@@ -150,6 +150,18 @@ def mmp(
     results: dict[int, MetricResult[MMPWindow]] = {}
     n = power_1hz.size
 
+    # Mean-maximal POWER is a cycling-power-specific metric (ANL-R11/R12): requested for a
+    # sport without mechanical power it is NOT applicable — return a typed unavailable,
+    # never a plausible number from a power channel that does not mean the same thing.
+    if sport not in APPLICABLE_SPORTS:
+        return {
+            int(d): Unavailable(
+                reason=UnavailableReason.NOT_APPLICABLE_FOR_SPORT,
+                detail=f"mean-maximal power is not defined for sport {sport!r}",
+            )
+            for d in grid
+        }
+
     # No power channel at all -> the required input is absent (MMP-R5).
     if n == 0:
         for d in grid:

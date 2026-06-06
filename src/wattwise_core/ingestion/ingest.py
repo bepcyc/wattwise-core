@@ -171,8 +171,8 @@ class IngestService:
         _apply_activity_scalars(act, scalars)
         act.coverage = coverage
         await self._session.flush()
+        streams = _cw.resolve_streams(candidates, _tier_of)  # per-channel trust (CONF-R3)
         best = _highest_trust(candidates)
-        streams = cast("dict[str, Any]", best.payload.get("streams") or {})
         laps = cast("list[dict[str, Any]]", best.payload.get("laps") or [])
         if streams:
             await _cw.upsert_stream_set(self._session, activity_id, streams)

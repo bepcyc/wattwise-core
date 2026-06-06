@@ -8,6 +8,7 @@ modules; this file holds only the contracts.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -32,15 +33,72 @@ Trigger = Literal["user_turn", "scheduled_digest", "scheduled_briefing"]
 
 # --- typed graph state (STATE-R1..R6) ---
 
+# STATE-R6 bounds: the ``retrieved`` channel is serialized into every checkpoint, so it
+# MUST stay bounded. On overflow the keyed-merge reducer drops the lowest-relevance
+# records (relevance assigned by ``gather`` onto each record) and records the drop so the
+# truncation surfaces in ``coverage_gaps`` (the gather node reads the marker back).
+RETRIEVED_MAX_RECORDS = 64
+RETRIEVED_MAX_BYTES = 256 * 1024
+# Marker key carried INSIDE the retrieved dict recording that the reducer trimmed; the
+# gather node lifts it into ``coverage_gaps`` (a binop reducer cannot reach that field).
+RETRIEVED_TRUNCATION_KEY = "__truncated__"
+
 
 def _append(left: list[Any], right: list[Any]) -> list[Any]:
     """messages reducer: append-only (STATE-R3)."""
     return [*left, *right]
 
 
+def _record_relevance(record: Any) -> float:
+    """The gather-assigned relevance of a retrieved record (default 0.0; STATE-R6).
+
+    ``gather`` stamps a numeric ``relevance`` onto each record so the reducer can rank and
+    drop the least-relevant on overflow. An un-stamped record sorts as least relevant.
+    """
+    if isinstance(record, dict):
+        rel = record.get("relevance")
+        if isinstance(rel, (int, float)) and not isinstance(rel, bool):
+            return float(rel)
+    return 0.0
+
+
+def _serialized_size(records: dict[str, Any]) -> int:
+    """Best-effort serialized byte size of the retrieved dict (STATE-R6 size bound)."""
+    try:
+        return len(json.dumps(records, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(str(records).encode("utf-8"))
+
+
 def _keyed_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    """retrieved reducer: merge by canonical record id; later replaces earlier (STATE-R3)."""
-    return {**left, **right}
+    """retrieved reducer: merge by canonical id, bounded by count + size (STATE-R3/R6).
+
+    Later records replace earlier ones by key. On exceeding ``RETRIEVED_MAX_RECORDS`` or
+    ``RETRIEVED_MAX_BYTES`` the lowest-relevance records are dropped (relevance assigned by
+    ``gather``); the number dropped is recorded under ``RETRIEVED_TRUNCATION_KEY`` so the
+    ``gather`` node can surface the truncation into ``coverage_gaps`` (STATE-R6).
+    """
+    merged = {**left, **right}
+    prior = int(merged.pop(RETRIEVED_TRUNCATION_KEY, 0) or 0)
+    payload = {k: v for k, v in merged.items() if k != RETRIEVED_TRUNCATION_KEY}
+    payload, dropped = _enforce_retrieved_bounds(payload)
+    total_dropped = prior + dropped
+    if total_dropped:
+        payload[RETRIEVED_TRUNCATION_KEY] = total_dropped
+    return payload
+
+
+def _enforce_retrieved_bounds(records: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Drop lowest-relevance records until within the count + size bounds (STATE-R6)."""
+    ranked = sorted(records.items(), key=lambda kv: _record_relevance(kv[1]), reverse=True)
+    if len(ranked) > RETRIEVED_MAX_RECORDS:
+        ranked = ranked[:RETRIEVED_MAX_RECORDS]
+    kept = dict(ranked)
+    while len(kept) > 1 and _serialized_size(kept) > RETRIEVED_MAX_BYTES:
+        # Drop the current least-relevant survivor (ranked ascending tail).
+        victim = min(kept, key=lambda k: _record_relevance(kept[k]))
+        del kept[victim]
+    return kept, len(records) - len(kept)
 
 
 def _set_union(left: set[str], right: set[str]) -> set[str]:
@@ -55,6 +113,23 @@ def _monotonic(left: int, right: int) -> int:
     return right
 
 
+def _write_once(left: str, right: str) -> str:
+    """Write-once reducer for immutable identity inputs (STATE-R4 / AGT-SEC-R1).
+
+    The first non-empty write sets the value; any later write of a DIFFERENT non-empty
+    value is rejected at the reducer level (raises). A node-, model-, or tool-produced
+    attempt to overwrite ``athlete_id``/``idempotency_key`` therefore fails closed rather
+    than silently winning under langgraph's default last-value-wins channel. langgraph's
+    ``BinaryOperatorAggregate`` seeds a ``str`` channel with ``""``, which is treated as
+    the unset sentinel.
+    """
+    if not left:
+        return right
+    if right and right != left:
+        raise ValueError("write-once identity field changed (STATE-R4 / AGT-SEC-R1)")
+    return left
+
+
 class AgentState(TypedDict, total=False):
     """The agent graph's typed serializable state (STATE-R1/R2).
 
@@ -63,19 +138,23 @@ class AgentState(TypedDict, total=False):
     server-derived only (AGT-SEC-R1) and never set by a model/tool output.
     """
 
-    # (a) immutable inputs
-    athlete_id: str
+    # (a) immutable inputs (write-once, STATE-R4)
+    athlete_id: Annotated[str, _write_once]
     trigger: Trigger
     request_text: str | None
     briefing_screen: str | None
     locale: str
-    idempotency_key: str
+    idempotency_key: Annotated[str, _write_once]
+    thread_id: str | None
+    response_length: str | None
     # (b) accumulating working memory
     messages: Annotated[list[dict[str, Any]], _append]
     retrieved: Annotated[dict[str, Any], _keyed_merge]
     coverage_gaps: Annotated[set[str], _set_union]
     reflection_count: Annotated[int, _monotonic]
     redraft_count: Annotated[int, _monotonic]
+    node_visits: Annotated[int, _monotonic]
+    cost_events: Annotated[list[dict[str, Any]], _append]
     # (c) outputs
     draft: str | None
     grounded_html: str | None
@@ -84,6 +163,8 @@ class AgentState(TypedDict, total=False):
     citations: list[dict[str, Any]]
     status: RunStatus
     coverage_caveat: dict[str, Any] | None
+    interrupt_id: str | None
+    cost_rollup: dict[str, Any] | None
 
 
 # --- model-routing seam (MODEL-R*, STRUCT-R*) ---
@@ -204,6 +285,46 @@ class RetrievalRequest:
     params: dict[str, Any]
 
 
+# --- reflect verdict (REFLECT-R2, closed enum, STRUCT-R1) ---
+
+
+class ReflectVerdict(StrEnum):
+    """Closed reflect decision over the §6 verdict set (REFLECT-R2)."""
+
+    REPLAN = "replan"
+    ANSWER_WITH_CAVEAT = "answer_with_caveat"
+    GIVE_UP_GRACEFULLY = "give_up_gracefully"
+
+
+class ReflectDecision(BaseModel):
+    """A provider-enforced structured reflect verdict (REFLECT-R2 / STRUCT-R1).
+
+    ``verdict`` is the closed §6 decision; ``add_requests`` names the capability keys a
+    ``replan`` should add/widen (considering the open coverage gaps). It is obtained via
+    ``run_structured`` so the verdict is schema-constrained, never free-text parsed.
+    """
+
+    verdict: ReflectVerdict
+    rationale: str = ""
+    add_requests: tuple[str, ...] = ()
+
+
+# --- typed coverage caveat (OUTCOME-R4, structured not prose) ---
+
+
+class CoverageCaveat(BaseModel):
+    """Source-agnostic typed coverage caveat for a degraded outcome (OUTCOME-R4).
+
+    Names — in source-agnostic terms — which canonical inputs were missing/substituted/
+    stale and the resulting fidelity, rather than leaking raw coverage-internal tokens.
+    """
+
+    missing: tuple[str, ...] = ()
+    substituted: tuple[str, ...] = ()
+    stale: tuple[str, ...] = ()
+    fidelity: Literal["full", "partial", "degraded"] = "partial"
+
+
 @dataclass(slots=True)
 class CoachConfig:
     """Loaded coach persona/voice + grounding/abstention refs (COACH-CFG-R*).
@@ -218,17 +339,23 @@ class CoachConfig:
 
 
 __all__ = [
+    "RETRIEVED_MAX_BYTES",
+    "RETRIEVED_MAX_RECORDS",
+    "RETRIEVED_TRUNCATION_KEY",
     "AgentState",
     "Capability",
     "ChatModel",
     "Claim",
     "ClaimKind",
     "CoachConfig",
+    "CoverageCaveat",
     "GroundDecision",
     "GroundVerdict",
     "GroundedClaim",
     "GroundingEvidence",
     "GroundingResult",
+    "ReflectDecision",
+    "ReflectVerdict",
     "RetrievalRequest",
     "RunStatus",
     "Trigger",
