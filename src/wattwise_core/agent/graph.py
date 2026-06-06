@@ -299,6 +299,15 @@ def _make_finalize(svc: AgentServices, ceiling: int) -> GraphNode:
             "thread_id": state.get("thread_id"),
             "cost_events": [{"node": "finalize", "kind": "settle", "status": status.value}],
         }
+        # Fail closed on abstain (GROUND-R6): when grounding could not verify enough to
+        # answer, the deliverable MUST be an explicit "insufficient grounded data"
+        # limitation — never the last scrubbed draft (a partial non-answer). Replace the
+        # body so the projected deliverable states the limitation, not a stale draft.
+        if decision is GroundDecision.ABSTAIN:
+            limitation = gs.limitation_text(state)
+            update["grounded_text"] = limitation
+            update["grounded_html"] = gs.safe_html(limitation)
+            update["citations"] = []
         return gs.tick_visit(state, update)
 
     return finalize

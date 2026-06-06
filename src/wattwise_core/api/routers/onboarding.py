@@ -12,10 +12,13 @@ sync, so ``first_sync_state`` stays ``not_started`` until the athlete runs a man
 ``first_data_ready=true`` with no connection at all (``has_connection`` may be
 ``false`` after a first import).
 
-This surface MAY name a source (it composes the Connections list, AUTH-R15). Acting
-identity is server-derived (AUTH-R3); the request carries no caller-identity field.
+This surface MUST NOT name a source: it is NOT one of the three source-identity-exempt
+surfaces (AUTH-R15/API-R28 permits a provider/source name only on /v1/connections,
+/v1/sync, /v1/data-health), so the connection rows here carry the opaque connection id +
+generic status + auth archetype, never the source key/display name. Acting identity is
+server-derived (AUTH-R3); the request carries no caller-identity field.
 
-Requirement IDs: API-R46, API-R47, AUTH-R3, AUTH-R11, AUTH-R15.
+Requirement IDs: API-R46, API-R47, AUTH-R3, AUTH-R11, AUTH-R15, API-R28.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from wattwise_core.api.auth import Scope, require_scopes
 from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus
-from wattwise_core.persistence.models import Activity, Connection, SourceDescriptor
+from wattwise_core.persistence.models import Activity, Connection
 
 router = APIRouter(prefix="/v1/onboarding", tags=["onboarding"], dependencies=[RateLimit])
 
@@ -44,11 +47,16 @@ FirstSyncState = Literal["not_started", "syncing_recent", "recent_ready", "backf
 
 
 class OnboardingConnection(BaseModel):
-    """One connected source in the onboarding view (composes Connections, AUTH-R15)."""
+    """One connection in the onboarding progress view.
+
+    Onboarding is NOT one of the three source-identity-exempt surfaces (AUTH-R15/API-R28
+    permits a provider/source NAME only on /v1/connections, /v1/sync, /v1/data-health), so
+    this composed progress view exposes the connection's opaque id + generic status + auth
+    archetype, but NOT the source key or its display name. A client that needs the provider
+    identity reads it from /v1/connections.
+    """
 
     connection_id: str
-    source: str
-    display_name: str
     status: ConnectionStatus
     auth_archetype: AuthArchetype
 
@@ -108,25 +116,16 @@ async def onboarding_status(principal: CurrentPrincipal, session: DbSession) -> 
 async def _owner_connections(
     session: AsyncSession, athlete_id: uuid.UUID
 ) -> list[OnboardingConnection]:
-    """Return the owner's connections joined to their descriptor (source name, AUTH-R15)."""
-    stmt = (
-        select(Connection, SourceDescriptor)
-        .join(
-            SourceDescriptor,
-            SourceDescriptor.source_descriptor_id == Connection.source_descriptor_id,
-        )
-        .where(Connection.athlete_id == athlete_id)
-    )
-    rows = (await session.execute(stmt)).all()
+    """Return the owner's connections as progress rows — no source identity (AUTH-R15)."""
+    stmt = select(Connection).where(Connection.athlete_id == athlete_id)
+    conns = (await session.execute(stmt)).scalars().all()
     return [
         OnboardingConnection(
             connection_id=str(conn.connection_id),
-            source=descriptor.source_key,
-            display_name=descriptor.display_name,
             status=conn.status,
             auth_archetype=conn.auth_archetype,
         )
-        for conn, descriptor in rows
+        for conn in conns
     ]
 
 

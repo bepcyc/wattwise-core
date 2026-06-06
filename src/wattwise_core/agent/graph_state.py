@@ -210,6 +210,26 @@ def safe_html(text: str) -> str:
     return f"<p>{_html.escape(text)}</p>" if text else ""
 
 
+# Deterministic, jargon-free limitation copy for an abstaining run (GROUND-R6, VOICE-R2/R3).
+# This is the fail-closed safety floor the engine guarantees when grounding cannot verify
+# enough to answer; a loaded coach persona MAY re-voice it, but the engine never ships the
+# scrubbed draft as if it were an answer. No internal terms; warm + truthful.
+_LIMITATION_TEXT = {
+    "en": "I don't have enough confirmed data to answer that reliably yet. "
+    "Sync your sources and I'll take another look.",
+    "de": "Mir fehlen noch genug gesicherte Daten, um das verlaesslich zu beantworten. "
+    "Synchronisiere deine Quellen und ich schaue noch einmal.",
+    "ru": "Poka nedostatochno podtverzhdyonnyh dannyh, chtoby otvetit' nadyozhno. "
+    "Sinhroniziruj istochniki i ya posmotryu snova.",
+}
+
+
+def limitation_text(state: AgentState) -> str:
+    """The localized fail-closed limitation statement for an abstaining run (GROUND-R6)."""
+    locale = (state.get("locale") or "en").split("-", 1)[0].lower()
+    return _LIMITATION_TEXT.get(locale, _LIMITATION_TEXT["en"])
+
+
 # --- terminal status + coverage caveat (OUTCOME-R1/-R4/-R5; no self-grading) ---
 
 
@@ -273,6 +293,7 @@ __all__ = [
     "last_ground_decision",
     "last_plan_requests",
     "last_reflect_verdict",
+    "limitation_text",
     "open_gaps",
     "over_ceiling",
     "plan_requires_approval",
