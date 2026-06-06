@@ -49,7 +49,12 @@ def build_upsert(
     """
     cols = list(values.keys())
     if update_columns is None:
-        update_columns = [c for c in cols if c not in set(conflict_keys)]
+        # On conflict, refresh every supplied value column EXCEPT the conflict keys, the
+        # surrogate primary key, and created_at — clobbering the PK would rewrite the
+        # identity that source_candidate.resolved_*_id back-pointers reference, and
+        # bumping created_at would churn an unchanged row (UPS-R3 idempotency, GBO-AC-1).
+        protected = set(conflict_keys) | set(table.primary_key.columns.keys()) | {"created_at"}
+        update_columns = [c for c in cols if c not in protected]
 
     # --- the ONE sanctioned dialect branch (UPS-R2) ---
     if dialect in ("postgresql", "sqlite"):

@@ -31,12 +31,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import (
     AuthArchetype,
-    DeviceClass,
     Fidelity,
-    SampleBasis,
     SourceKind,
     StreamChannelName,
 )
+from wattwise_core.ingestion.adapters import _intervals_map as _im
 
 # ``ingestion.base`` is the rankless adapter CONTRACT (the SourceAdapter Protocol,
 # SourceDescriptorRef, FetchContext) that every L2 adapter is DEFINED against — the
@@ -48,42 +47,6 @@ from wattwise_core.storage import content_hash
 
 _BASE_URL: Final = "https://intervals.icu"
 _BASIC_USERNAME: Final = "API_KEY"  # literal username per CLI-R13 (NOT a secret)
-
-# Source stream type -> canonical channel + sampling basis (MAP-R4).
-_STREAM_CHANNELS: Final[dict[str, tuple[StreamChannelName, SampleBasis]]] = {
-    "watts": (StreamChannelName.POWER_W, SampleBasis.TIME),
-    "heartrate": (StreamChannelName.HR_BPM, SampleBasis.TIME),
-    "cadence": (StreamChannelName.CADENCE_RPM, SampleBasis.TIME),
-    "velocity_smooth": (StreamChannelName.SPEED_MPS, SampleBasis.TIME),
-    "distance": (StreamChannelName.DISTANCE_M, SampleBasis.DISTANCE),
-    "altitude": (StreamChannelName.ALTITUDE_M, SampleBasis.TIME),
-    "latlng": (StreamChannelName.LATLNG, SampleBasis.TIME),
-    "temp": (StreamChannelName.TEMP_C, SampleBasis.TIME),
-}
-
-# Source activity ``type`` vocab -> canonical sport registry code (MAP-R4).
-# Unknown tokens map to "other" (never a passthrough of the raw source token).
-_SPORT_CODES: Final[dict[str, str]] = {
-    "ride": "cycling",
-    "virtualride": "cycling",
-    "gravelride": "cycling",
-    "mountainbikeride": "cycling",
-    "ebikeride": "cycling",
-    "run": "running",
-    "virtualrun": "running",
-    "trailrun": "running",
-    "walk": "other",
-    "hike": "other",
-    "swim": "swimming",
-    "openwaterswim": "swimming",
-    "rowing": "rowing",
-    "kayaking": "rowing",
-    "nordicski": "xc_ski",
-    "backcountryski": "xc_ski",
-    "weighttraining": "strength",
-    "workout": "strength",
-}
-
 
 class IntervalsActivityAsbo(BaseModel):
     """Validated source-shaped activity payload (CLI-R2; fail-closed at the boundary)."""
@@ -220,7 +183,7 @@ class IntervalsIcuClient:
         detail.raise_for_status()
         streams = await self._client.get(
             f"/api/v1/activity/{activity_id}/streams",
-            params={"types": ",".join(_STREAM_CHANNELS)},
+            params={"types": ",".join(_im.STREAM_CHANNELS)},
         )
         stream_rows = streams.json() if streams.status_code == httpx.codes.OK else []
         return ActivityWithStreams(
@@ -262,42 +225,6 @@ def _stable_hash(payload: Mapping[str, Any]) -> str:
     return content_hash(encoded.encode("utf-8"))
 
 
-def _sport_code(raw_type: str | None) -> str:
-    """Map a source activity ``type`` to a canonical sport code (MAP-R4)."""
-    if raw_type is None:
-        return "other"
-    return _SPORT_CODES.get(raw_type.strip().lower(), "other")
-
-
-def _device_class(act: IntervalsActivityAsbo) -> str:
-    """Derive a canonical device class from provenance flags (MAP-R2; never a name)."""
-    if act.trainer:
-        return DeviceClass.TRAINER.value
-    if act.power_meter or act.device_watts:
-        return DeviceClass.POWERMETER.value
-    if act.average_speed is not None or act.distance is not None:
-        return DeviceClass.GPS_WATCH.value
-    return DeviceClass.UNKNOWN.value
-
-
-def _build_streams(
-    streams: Sequence[IntervalsStreamAsbo],
-) -> dict[str, dict[str, Any]]:
-    """Map source streams to canonical channels with gaps as ``None`` (MAP-R5)."""
-    out: dict[str, dict[str, Any]] = {}
-    for row in streams:
-        mapped = _STREAM_CHANNELS.get(row.type)
-        if mapped is None:
-            continue
-        channel, basis = mapped
-        out[channel.value] = {
-            "values": [None if v is None else v for v in row.data],
-            "sample_basis": basis.value,
-            "sample_rate_hz": 1.0,
-        }
-    return out
-
-
 def _activity_payload(
     act: IntervalsActivityAsbo,
     start_time: _dt.datetime,
@@ -306,8 +233,8 @@ def _activity_payload(
     """Assemble the canonical ``activity`` payload (MAP-R2/R3; SI units, no source keys)."""
     return {
         "start_time": start_time,
-        "sport": _sport_code(act.type),
-        "sub_sport": act.sub_type,
+        "sport": _im.sport_code(act.type),
+        "sub_sport": _im.sub_sport_code(act.sub_type),
         "elapsed_time_s": act.elapsed_time,
         "moving_time_s": act.moving_time,
         "distance_m": act.distance,
@@ -321,7 +248,7 @@ def _activity_payload(
         "avg_speed_mps": act.average_speed,
         "elevation_gain_m": act.total_elevation_gain,
         "avg_temp_c": act.average_temp,
-        "device_class": _device_class(act),
+        "device_class": _im.device_class(act),
         "has_power": act.device_watts is True or act.icu_average_watts is not None,
         "has_hr": bool(act.has_heartrate) or act.average_heartrate is not None,
         "has_gps": StreamChannelName.LATLNG.value in streams,
@@ -395,7 +322,7 @@ class IntervalsIcuAdapter:
         start_time = _parse_utc(act.start_date) or _parse_utc(act.start_date_local)
         if start_time is None:
             return []  # required canonical field absent -> no fabricated candidate
-        canonical_streams = _build_streams(streams)
+        canonical_streams = _im.build_streams(streams)
         payload = _activity_payload(act, start_time, canonical_streams)
         has_real_stream = bool(canonical_streams)
         untrusted = bool(act.name or act.description)

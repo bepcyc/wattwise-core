@@ -21,7 +21,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import decoupling as _dec
@@ -137,8 +137,16 @@ async def _load_wellness_hrv_summary(
     return None if dw is None else _f(dw.hrv_rmssd_ms)
 
 
-class AnalyticsService:
-    """Computes canonical analytics for one athlete from the canonical store."""
+class AnalyticsService:  # noqa: size-limits
+    """Computes canonical analytics for one athlete from the canonical store.
+
+    Intentionally ONE class slightly over the derived class-size guard: ARCH-R5/R23
+    mandate a SINGLE canonical entry point per analytics capability shared by the API
+    and the agent, so splitting this facade into sibling classes would create multiple
+    entry points — the opposite of the spec invariant. The module stays well under the
+    400-line module ceiling and every method under the 60-line function ceiling; the
+    stateless loaders are already factored to module level.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -273,11 +281,9 @@ class AnalyticsService:
         for act in activities:
             day = act.start_time.date()
             seen.add(day)
-            bundle = await self.coggan(str(act.activity_id))
-            if is_computed(bundle):
-                tss = bundle.value.tss
-                if is_computed(tss):
-                    by_day[day] += float(tss.value)
+            load = await self._activity_load(str(act.activity_id))
+            if load is not None:
+                by_day[day] += load
         out: dict[_dt.date, float | None] = {}
         cur = from_date
         while cur <= to_date:
@@ -287,6 +293,27 @@ class AnalyticsService:
             cur += _dt.timedelta(days=1)
         return out
 
+    async def _activity_load(self, activity_id: str) -> float | None:
+        """Per-activity training load by the LOAD-R3 priority: power_tss -> hr_load -> None.
+
+        Power TSS when a mechanical-power channel + effective FTP are present; otherwise
+        the Banister HR load (TRIMP-R1) when HR + HR_max/HR_rest are present; otherwise
+        the activity contributes nothing (a surfaced unknown-load day, never a silent 0).
+        """
+        bundle = await self.coggan(activity_id)
+        if is_computed(bundle) and is_computed(bundle.value.tss):
+            return float(bundle.value.tss.value)
+        hr_load = await self.trimp(activity_id)
+        return float(hr_load.value) if is_computed(hr_load) else None
+
+    async def _earliest_activity_date(self, athlete_id: str) -> _dt.date | None:
+        """The local-date of the athlete's first-ever activity, or None if none."""
+        stmt = select(func.min(Activity.start_time)).where(
+            Activity.athlete_id == _uid(athlete_id)
+        )
+        first = (await self._session.execute(stmt)).scalar_one_or_none()
+        return None if first is None else first.date()
+
     async def pmc(
         self,
         athlete_id: str,
@@ -295,35 +322,56 @@ class AnalyticsService:
         *,
         seed: tuple[float, float] | None = None,
     ) -> list[MetricResult[_pmc.PmcDay]]:
-        """Compute the PMC (CTL/ATL/TSB) series over the daily-load grid (PMC-R1)."""
-        loads = await self.daily_load_series(athlete_id, from_date, to_date)
+        """Compute the PMC (CTL/ATL/TSB) series over the requested window (PMC-R1/R3/R5).
+
+        The EWMA is seeded from the athlete's true training origin, not from
+        ``from_date``: a mid-history window seeded at zero would report CTL/ATL near
+        zero regardless of real history — the wrong-but-plausible number PMC-R5 forbids.
+        So the daily-load grid is built from the athlete's first activity (or
+        ``from_date`` when no earlier history exists, or an explicit ``seed``) through
+        ``to_date``, the full series is integrated, and the requested ``[from_date,
+        to_date]`` slice is returned with its correctly carried-forward state (PMC-R3).
+        """
+        origin = from_date if seed is not None else (await self._earliest_activity_date(athlete_id))
+        if origin is None or origin > from_date:
+            origin = from_date
+        loads = await self.daily_load_series(athlete_id, origin, to_date)
         series = [loads[d] for d in sorted(loads)]
-        return _pmc.pmc(series, seed=seed)
+        full = _pmc.pmc(series, seed=seed)
+        start_index = (from_date - origin).days
+        return full[start_index:]
 
     async def power_curve(
-        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date, *, sport: str = "cycling"
     ) -> dict[int, MetricResult[_mmp.MMPWindow]]:
-        """Aggregate mean-maximal-power curve over the date range (MMP-R4)."""
+        """Aggregate mean-maximal-power curve for ONE sport over the date range (MMP-R4).
+
+        Sport-partitioned (ANL-R13): only activities of ``sport`` contribute, and the
+        resolved ``sport`` is threaded into the metric so lineage never mislabels a
+        non-cycling power effort as cycling or pools incommensurable sports into one curve.
+        """
         activities = await self._activities_in_range(athlete_id, from_date, to_date)
         best: dict[int, MetricResult[_mmp.MMPWindow]] = {}
         for act in activities:
+            if act.sport != sport:
+                continue
             power = (await self._activity_channels(str(act.activity_id))).get(
                 StreamChannelName.POWER_W
             )
             if power is None:
                 continue
-            for d, res in _mmp.mmp(resample_to_1hz(power)).items():
+            for d, res in _mmp.mmp(resample_to_1hz(power), sport=sport).items():
                 if is_computed(res) and (d not in best or _better_mmp(res, best[d])):
                     best[d] = res
         return best
 
     async def critical_power(
-        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date, *, sport: str = "cycling"
     ) -> MetricResult[_mmp.CPFit]:
-        """Fit CP/W' from the aggregate power curve over the range (CP-R1)."""
-        curve = await self.power_curve(athlete_id, from_date, to_date)
+        """Fit CP/W' from the sport-partitioned aggregate power curve (CP-R1, ANL-R13)."""
+        curve = await self.power_curve(athlete_id, from_date, to_date, sport=sport)
         points = {d: res.value.mean_power_w for d, res in curve.items() if is_computed(res)}
-        return _mmp.cp_wprime(points)
+        return _mmp.cp_wprime(points, sport=sport)
 
     async def hrv(
         self, athlete_id: str, local_date: _dt.date

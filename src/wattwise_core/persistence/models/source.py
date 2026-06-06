@@ -109,11 +109,17 @@ class SourceCandidate(Base, TimestampMixin):
 
     __tablename__ = "source_candidate"
     __table_args__ = (
+        # UNIQUE on the candidate key PLUS content_hash: re-ingesting byte-identical
+        # content is an idempotent no-op (UPS-R3), while a changed restatement (same
+        # candidate key, new content_hash) lands as a NEW retained version that
+        # supersedes the prior one (UPS-R5/PRV-R2) — versioning the bare candidate key
+        # could not (only one current version is non-superseded at a time).
         UniqueConstraint(
             "athlete_id",
             "source_descriptor_id",
             "source_native_id",
             "gbo_type",
+            "content_hash",
             name="uq_source_candidate_candidate_key",
         ),
         Index(

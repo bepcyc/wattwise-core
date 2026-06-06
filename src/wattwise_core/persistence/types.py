@@ -26,10 +26,19 @@ from sqlalchemy import (
     Integer,
     Numeric,
     SmallInteger,
+    TypeDecorator,
     Uuid,
 )
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
+
+# Canonical fractional numeric: explicit precision/scale so MariaDB does NOT collapse
+# an unparameterized NUMERIC to integer DECIMAL(10,0) (GBO-R8b/R10 — identical fractional
+# storage across SQLite/PostgreSQL/MariaDB); ``asdecimal=False`` returns a Python ``float``
+# on every backend (SQLite has no decimal), matching the ``Mapped[float]`` field hints and
+# keeping value equality byte-stable across backends (GBO-AC-1).
+_CANONICAL_NUMERIC = Numeric(precision=18, scale=6, asdecimal=False)
 
 # Last-generated UUIDv7 millisecond + counter for intra-millisecond monotonicity
 # (UUIDv7 PKs give index locality on append-heavy ingest, GBO-R11). Held in a
@@ -63,6 +72,35 @@ def utcnow() -> _dt.datetime:
     return _dt.datetime.now(_dt.UTC)
 
 
+class UtcDateTime(TypeDecorator[_dt.datetime]):
+    """A ``timestamptz`` that always reads back tz-aware UTC on every backend (GBO-R32).
+
+    SQLite (and MariaDB) drop the timezone on a ``DateTime(timezone=True)`` column, so a
+    naive datetime would come back from those backends while PostgreSQL returns tz-aware.
+    This decorator normalizes both directions — it coerces a stored instant to UTC on the
+    way in and re-attaches UTC tzinfo on the way out — so the substrate delivers an
+    identical tz-aware UTC round-trip across SQLite/PostgreSQL/MariaDB without per-call-site
+    fixups, never storing a local-time instant.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(
+        self, value: _dt.datetime | None, dialect: Dialect
+    ) -> _dt.datetime | None:
+        if value is None:
+            return None
+        return value.astimezone(_dt.UTC) if value.tzinfo else value.replace(tzinfo=_dt.UTC)
+
+    def process_result_value(
+        self, value: _dt.datetime | None, dialect: Dialect
+    ) -> _dt.datetime | None:
+        if value is None:
+            return None
+        return value if value.tzinfo else value.replace(tzinfo=_dt.UTC)
+
+
 # --- column factories (one spelling per primitive) ---
 
 
@@ -78,15 +116,15 @@ def fk_uuid_column(target: str, *, nullable: bool = False, index: bool = True) -
 
 def timestamptz_column(*, nullable: bool = False) -> Mapped[Any]:
     """Timezone-aware UTC timestamp (``timestamptz``)."""
-    return mapped_column(DateTime(timezone=True), nullable=nullable)
+    return mapped_column(UtcDateTime(), nullable=nullable)
 
 
 def created_at_column() -> Mapped[_dt.datetime]:
-    return mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    return mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 def updated_at_column() -> Mapped[_dt.datetime]:
-    return mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    return mapped_column(UtcDateTime(), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 def enum_column[E: StrEnum](enum_cls: type[E], *, nullable: bool = False, **kw: Any) -> Mapped[Any]:
@@ -99,6 +137,7 @@ def enum_column[E: StrEnum](enum_cls: type[E], *, nullable: bool = False, **kw: 
         Enum(
             enum_cls,
             native_enum=False,
+            create_constraint=True,
             validate_strings=True,
             values_callable=lambda e: [m.value for m in e],
             length=64,
@@ -109,7 +148,7 @@ def enum_column[E: StrEnum](enum_cls: type[E], *, nullable: bool = False, **kw: 
 
 
 def numeric_column(*, nullable: bool = True, **kw: Any) -> Mapped[Any]:
-    return mapped_column(Numeric, nullable=nullable, **kw)
+    return mapped_column(_CANONICAL_NUMERIC, nullable=nullable, **kw)
 
 
 def integer_column(*, nullable: bool = True, **kw: Any) -> Mapped[Any]:

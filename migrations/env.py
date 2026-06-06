@@ -19,6 +19,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy.engine import Connection
 
+from wattwise_core.agent import memory as _agent_memory  # noqa: F401 (registers MemoryItem)
+from wattwise_core.agent.state_store import AgentStateBase
 from wattwise_core.config import get_settings
 from wattwise_core.persistence.engine import _normalize_dsn, create_engine_from_settings
 from wattwise_core.persistence.models import Base
@@ -29,8 +31,11 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Full canonical schema lives on Base.metadata once the models package is imported.
-target_metadata = Base.metadata
+# The canonical schema (Base) plus the SEPARATE agent-state store schema (AgentStateBase,
+# ARCH-R13 — checkpoints/threads/writes never on the canonical store). Both are managed in
+# one migration chain; target_metadata is the union so autogenerate/`alembic check` see the
+# full schema rather than reporting the agent-state tables as extraneous.
+target_metadata = [Base.metadata, AgentStateBase.metadata]
 
 
 def _database_url() -> str:

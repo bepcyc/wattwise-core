@@ -12,7 +12,9 @@ __all__ = ["create_app"]
 def __getattr__(name: str) -> object:
     # Lazy re-export so importing the package does not pull in FastAPI eagerly.
     if name == "create_app":
-        from wattwise_core.api.app import create_app
+        # Lazy: importing the package must not pull FastAPI/uvicorn eagerly (keeps
+        # `import wattwise_core` cheap for non-API consumers like the CLI gates).
+        from wattwise_core.api.app import create_app  # noqa: PLC0415
 
         return create_app
     raise AttributeError(name)

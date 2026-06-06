@@ -146,6 +146,9 @@ ignore = ["PLR0913", "PLR2004"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "PLR2004", "PLR0915"]
 "tools/lint/**" = ["S101"]
+# The seam-contract base-classes are a shipped TEST deliverable (GOLD-R5 §6.3a):
+# they are assertion-based pytest contracts that happen to live under src/.
+"src/wattwise_core/testing/**" = ["S101"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "requests".msg = "Use httpx (async, typed) — see CLI-R13."

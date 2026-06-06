@@ -22,25 +22,14 @@ from typing import Any, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from wattwise_core.domain.candidate import FieldCandidate, GboCandidate
-from wattwise_core.domain.enums import (
-    Fidelity,
-    GboType,
-    SampleBasis,
-    StreamChannelName,
-    StreamSetKind,
-    trust_rank,
-)
+from wattwise_core.domain.candidate import GboCandidate
+from wattwise_core.domain.enums import Fidelity, GboType, trust_rank
+from wattwise_core.ingestion import _canonical as _cw
+from wattwise_core.ingestion._canonical import OriginalFile
 from wattwise_core.ingestion.dedup import resolve_activity_identity, resolve_field
-from wattwise_core.persistence.models import (
-    Activity,
-    ActivityLap,
-    ActivityStreamSet,
-    DailyWellness,
-    SourceCandidate,
-    StreamChannel,
-)
+from wattwise_core.persistence.models import Activity, SourceCandidate
 from wattwise_core.persistence.types import utcnow, uuid7
+from wattwise_core.storage import ObjectStore, create_object_store
 
 # Canonical scalar fields carried on an activity candidate's payload (resolved per
 # field across candidates; streams/laps are handled separately).
@@ -68,8 +57,9 @@ class IngestResult:
 class IngestService:
     """Persists adapter candidates and resolves them into canonical records."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, object_store: ObjectStore | None = None) -> None:
         self._session = session
+        self._object_store = object_store
 
     async def ingest(
         self,
@@ -79,79 +69,60 @@ class IngestService:
         *,
         connection_id: str | uuid.UUID | None = None,
         ingest_run_id: uuid.UUID | None = None,
+        original_files: list[OriginalFile] | None = None,
     ) -> IngestResult:
-        """Land a batch of candidates into the canonical store (one transaction)."""
+        """Land a batch of candidates into the canonical store (one transaction).
+
+        ``original_files`` carries the verbatim tier-1 recording artifacts (a
+        ``file_import`` upload supplies them; a direct-API source supplies none); each
+        is stored verbatim and linked to its resolved activity via ``activity_file``
+        (ING-R8/FIL-R1). Wellness candidates are batched per ``local_date`` so the row
+        is resolved across ALL same-day candidates (CONF-R2), never last-write-wins.
+        """
         athlete = _uid(athlete_id)
         descriptor = _uid(source_descriptor_id)
         run_id = ingest_run_id or uuid7()
+        files_by_native = {f.source_native_id: f for f in (original_files or [])}
         result = IngestResult()
+        wellness_dates: set[_dt.date] = set()
         for cand in candidates:
-            row = await self._persist_candidate(athlete, descriptor, cand, connection_id, run_id)
+            row = await _persist_candidate(
+                self._session, athlete, descriptor, cand, connection_id, run_id
+            )
             result.candidates_persisted += 1
             if cand.gbo_type == GboType.ACTIVITY.value:
-                activity_id = await self._resolve_activity_id(athlete, cand)
-                row.resolved_activity_id = activity_id
-                await self._session.flush()
-                await self._write_activity_canonical(athlete, activity_id)
+                activity_id = await self._resolve_and_write_activity(athlete, row, cand)
+                await self._capture_original(
+                    athlete, descriptor, activity_id, files_by_native.get(cand.source_native_id),
+                    cand.fetched_at,
+                )
                 result.activities_written.add(str(activity_id))
             elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
-                await _write_wellness_canonical(self._session, athlete, cand)
-                result.wellness_written += 1
+                wellness_dates.add(_parse_date(cand.payload["local_date"]))
+        for local_date in wellness_dates:
+            await self._write_wellness(athlete, local_date)
+            result.wellness_written += 1
         return result
 
-    async def _persist_candidate(
-        self,
-        athlete: uuid.UUID,
-        descriptor: uuid.UUID,
-        cand: GboCandidate,
-        connection_id: str | uuid.UUID | None,
-        run_id: uuid.UUID,
-    ) -> SourceCandidate:
-        """Upsert the source candidate on its natural key; retain the mapped payload."""
-        stmt = select(SourceCandidate).where(
-            SourceCandidate.athlete_id == athlete,
-            SourceCandidate.source_descriptor_id == descriptor,
-            SourceCandidate.source_native_id == cand.source_native_id,
-            SourceCandidate.gbo_type == GboType(cand.gbo_type),
-        )
-        existing = (await self._session.execute(stmt)).scalar_one_or_none()
-        if existing is not None:
-            # Unchanged content -> value-level no-op (UPS-R3): only refresh fetch metadata.
-            if existing.content_hash != cand.content_hash:
-                existing.content_hash = cand.content_hash
-                existing.payload = _jsonsafe(cand.payload)
-                existing.trust_profile = {"tier": cand.trust_tier.value}
-                existing.confidence = cand.confidence
-            existing.fetched_at = cand.fetched_at
-            existing.ingest_run_id = run_id
-            return existing
-        row = SourceCandidate(
-            athlete_id=athlete,
-            source_descriptor_id=descriptor,
-            connection_id=_uid(connection_id) if connection_id else None,
-            source_native_id=cand.source_native_id,
-            gbo_type=GboType(cand.gbo_type),
-            observed_at=cand.observed_at,
-            fetched_at=cand.fetched_at,
-            content_hash=cand.content_hash,
-            adapter_version=cand.adapter_version,
-            mapping_version=cand.mapping_version,
-            trust_profile={"tier": cand.trust_tier.value},
-            payload=_jsonsafe(cand.payload),
-            confidence=cand.confidence,
-            ingest_run_id=run_id,
-            untrusted_content=cand.untrusted_content,
-        )
-        self._session.add(row)
-        await self._session.flush()
-        return row
+    async def _resolve_and_write_activity(
+        self, athlete: uuid.UUID, row: SourceCandidate, cand: GboCandidate
+    ) -> uuid.UUID:
+        """Resolve identity (reusing the row's prior id) and write the canonical activity."""
+        if row.resolved_activity_id is not None:
+            activity_id = row.resolved_activity_id  # ING-R6: reuse the resolved identity
+        else:
+            activity_id = await self._resolve_activity_id(athlete, cand)
+            row.resolved_activity_id = activity_id
+            await self._session.flush()
+        await self._write_activity_canonical(athlete, activity_id)
+        return activity_id
 
     async def _resolve_activity_id(self, athlete: uuid.UUID, cand: GboCandidate) -> uuid.UUID:
-        """Resolve the candidate to a canonical activity id (MAP-R9..R12, DEDUP-R7).
+        """Resolve a NEW candidate to a canonical activity id (MAP-R9..R12, DEDUP-R7).
 
         Reuses an existing canonical activity when the conservative matcher (start-time
-        window + duration tolerance + compatible sport, or a shared fingerprint) is
-        satisfied; otherwise mints a new id. Conservative: ambiguity stays separate.
+        window + duration tolerance + compatible sport, OR a shared fingerprint derived
+        from a stored candidate, MAP-R10) is satisfied; otherwise mints a new id.
         """
         start = _parse_start_time(cand.payload["start_time"])
         duration = float(cast("float", cand.payload.get("elapsed_time_s") or 0))
@@ -166,12 +137,24 @@ class IngestService:
         for act in (await self._session.execute(stmt)).scalars().all():
             # SQLite returns tz-naive datetimes; coerce to UTC for the matcher (GBO-R32).
             act_start = _parse_start_time(act.start_time)
+            act_fp = await self._activity_fingerprint(athlete, act.activity_id)
             if resolve_activity_identity(
                 start, duration, sport, fingerprint,
-                act_start, float(act.elapsed_time_s or 0), act.sport, None,
+                act_start, float(act.elapsed_time_s or 0), act.sport, act_fp,
             ):
                 return act.activity_id
         return uuid7()
+
+    async def _activity_fingerprint(
+        self, athlete: uuid.UUID, activity_id: uuid.UUID
+    ) -> str | None:
+        """The stored activity's identity fingerprint from a resolved candidate (MAP-R10)."""
+        stmt = select(SourceCandidate.source_native_id).where(
+            SourceCandidate.athlete_id == athlete,
+            SourceCandidate.resolved_activity_id == activity_id,
+            SourceCandidate.is_superseded.is_(False),
+        )
+        return (await self._session.execute(stmt)).scalars().first()
 
     async def _write_activity_canonical(
         self, athlete: uuid.UUID, activity_id: uuid.UUID
@@ -180,19 +163,44 @@ class IngestService:
         candidates = await self._activity_candidates(athlete, activity_id)
         if not candidates:
             return
-        scalars = _resolve_scalars(candidates, _ACTIVITY_SCALARS)
+        scalars, coverage = _resolve_scalars(candidates, _ACTIVITY_SCALARS)
         act = await self._session.get(Activity, activity_id)
         if act is None:
             act = Activity(activity_id=activity_id, athlete_id=athlete, sport="other")
             self._session.add(act)
         _apply_activity_scalars(act, scalars)
+        act.coverage = coverage
         await self._session.flush()
         best = _highest_trust(candidates)
         streams = cast("dict[str, Any]", best.payload.get("streams") or {})
         laps = cast("list[dict[str, Any]]", best.payload.get("laps") or [])
         if streams:
-            await _upsert_stream_set(self._session, activity_id, streams)
-        await _upsert_laps(self._session, activity_id, laps)
+            await _cw.upsert_stream_set(self._session, activity_id, streams)
+        await _cw.upsert_laps(self._session, activity_id, laps, _LAP_SCALARS)
+
+    async def _write_wellness(self, athlete: uuid.UUID, local_date: _dt.date) -> None:
+        """Resolve daily wellness across ALL candidates for the date (CONF-R2/ING-UPS-R5)."""
+        candidates = await self._wellness_candidates(athlete, local_date)
+        await _cw.write_wellness_canonical(
+            self._session, athlete, local_date, candidates, _tier_of
+        )
+
+    async def _capture_original(
+        self,
+        athlete: uuid.UUID,
+        descriptor: uuid.UUID,
+        activity_id: uuid.UUID,
+        original: OriginalFile | None,
+        fetched_at: _dt.datetime | None,
+    ) -> None:
+        """Store the verbatim original file + its activity_file reference (ING-R8/FIL-R1)."""
+        if original is None:
+            return  # a direct-API source has no original recording file -> no ActivityFile
+        store = self._object_store or create_object_store()
+        await _cw.create_activity_file(
+            self._session, store, athlete=athlete, activity_id=activity_id,
+            source_descriptor_id=descriptor, original=original, fetched_at=fetched_at,
+        )
 
     async def _activity_candidates(
         self, athlete: uuid.UUID, activity_id: uuid.UUID
@@ -205,116 +213,124 @@ class IngestService:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
-
-# --- module-level write helpers (stateless; take the session explicitly) ---
-
-
-async def _upsert_stream_set(
-    session: AsyncSession, activity_id: uuid.UUID, streams: dict[str, Any]
-) -> None:
-    """Get-or-create the activity stream set and upsert each channel."""
-    stmt = select(ActivityStreamSet).where(ActivityStreamSet.activity_id == activity_id)
-    stream_set = (await session.execute(stmt)).scalar_one_or_none()
-    if stream_set is None:
-        first = next(iter(streams.values()))
-        stream_set = ActivityStreamSet(
-            activity_id=activity_id,
-            sample_basis=SampleBasis(first.get("sample_basis", "time")),
-            sample_rate_hz=first.get("sample_rate_hz", 1.0),
-            sample_count=len(first.get("values", [])),
-            t0=utcnow(),
+    async def _wellness_candidates(
+        self, athlete: uuid.UUID, local_date: _dt.date
+    ) -> list[SourceCandidate]:
+        stmt = select(SourceCandidate).where(
+            SourceCandidate.athlete_id == athlete,
+            SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
+            SourceCandidate.is_superseded.is_(False),
         )
-        session.add(stream_set)
-        await session.flush()
-    for name, chan in streams.items():
-        await _upsert_channel(session, stream_set.stream_set_id, name, chan)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
 
 
-async def _upsert_channel(
-    session: AsyncSession, stream_set_id: uuid.UUID, name: str, chan: dict[str, Any]
-) -> None:
-    stmt = select(StreamChannel).where(
-        StreamChannel.stream_set_id == stream_set_id,
-        StreamChannel.channel == StreamChannelName(name),
+# --- module-level write/resolution helpers (stateless; take the session) ---
+
+
+async def _persist_candidate(
+    session: AsyncSession,
+    athlete: uuid.UUID,
+    descriptor: uuid.UUID,
+    cand: GboCandidate,
+    connection_id: str | uuid.UUID | None,
+    run_id: uuid.UUID,
+) -> SourceCandidate:
+    """Upsert the source candidate; supersede-and-version on a CHANGED re-ingest.
+
+    Unchanged content is a value-level no-op (UPS-R3). A CHANGED re-ingest (same
+    candidate key, new ``content_hash``) marks the prior row ``is_superseded=True`` and
+    INSERTS a NEW candidate version, carrying its ``resolved_activity_id`` forward
+    (ING-R6), preserving the prior for audit (PRV-R2 / UPS-R5) rather than mutating it.
+    """
+    stmt = select(SourceCandidate).where(
+        SourceCandidate.athlete_id == athlete,
+        SourceCandidate.source_descriptor_id == descriptor,
+        SourceCandidate.source_native_id == cand.source_native_id,
+        SourceCandidate.gbo_type == GboType(cand.gbo_type),
+        SourceCandidate.is_superseded.is_(False),
     )
     existing = (await session.execute(stmt)).scalar_one_or_none()
-    values = chan.get("values", [])
-    if existing is None:
-        session.add(
-            StreamChannel(
-                stream_set_id=stream_set_id,
-                set_kind=StreamSetKind.ACTIVITY,
-                channel=StreamChannelName(name),
-                sample_basis=SampleBasis(chan.get("sample_basis", "time")),
-                values=values,
-                coverage={},
-            )
-        )
-    else:
-        existing.values = values
-
-
-async def _upsert_laps(
-    session: AsyncSession, activity_id: uuid.UUID, laps: list[dict[str, Any]]
-) -> None:
-    for lap in laps:
-        idx = int(lap["lap_index"])
-        stmt = select(ActivityLap).where(
-            ActivityLap.activity_id == activity_id, ActivityLap.lap_index == idx
-        )
-        existing = (await session.execute(stmt)).scalar_one_or_none()
-        fields = {k: lap.get(k) for k in _LAP_SCALARS}
-        if existing is None:
-            session.add(ActivityLap(activity_id=activity_id, lap_index=idx, **fields))
-        else:
-            for k, v in fields.items():
-                setattr(existing, k, v)
-
-
-async def _write_wellness_canonical(
-    session: AsyncSession, athlete: uuid.UUID, cand: GboCandidate
-) -> None:
-    """Upsert the daily wellness row on (athlete_id, local_date) (GBO-R24)."""
-    payload = cand.payload
-    local_date = _parse_date(payload["local_date"])
-    stmt = select(DailyWellness).where(
-        DailyWellness.athlete_id == athlete, DailyWellness.local_date == local_date
-    )
-    row = (await session.execute(stmt)).scalar_one_or_none()
-    if row is None:
-        row = DailyWellness(athlete_id=athlete, local_date=local_date, coverage={})
-        session.add(row)
-    for key in ("resting_hr_bpm", "hrv_rmssd_ms", "hrv_sdnn_ms", "sleep_score", "steps"):
-        if payload.get(key) is not None:
-            setattr(row, key, payload[key])
+    if existing is not None and existing.content_hash == cand.content_hash:
+        existing.fetched_at = cand.fetched_at  # UPS-R3 no-op: refresh fetch metadata only
+        existing.ingest_run_id = run_id
+        return existing
+    prior_activity_id = None
+    if existing is not None:
+        # PRV-R2: preserve the prior version for audit. The candidate-key unique
+        # constraint admits only ONE row per key, so the superseded row's
+        # source_native_id is version-tagged (its observed identity is retained in the
+        # untouched payload/content_hash) and the NEW row reclaims the canonical key.
+        existing.is_superseded = True
+        existing.source_native_id = _superseded_native_id(existing)
+        prior_activity_id = existing.resolved_activity_id
+        await session.flush()
+    row = _new_candidate(athlete, descriptor, cand, connection_id, run_id)
+    row.resolved_activity_id = prior_activity_id  # carry the resolved identity forward (ING-R6)
+    session.add(row)
     await session.flush()
+    return row
 
 
-# --- module-level pure helpers (resolution + coercion) ---
+def _superseded_native_id(prior: SourceCandidate) -> str:
+    """A version-tagged native id freeing the canonical key for the new version (PRV-R2).
+
+    The prior row stays fully readable for audit (its payload/content_hash are
+    untouched); only its candidate-key slot is vacated so the new version can hold the
+    canonical key under the single-row unique constraint.
+    """
+    tag = f"#superseded:{prior.content_hash[:16]}"
+    base = prior.source_native_id.split("#superseded:", 1)[0]
+    return f"{base}{tag}"
+
+
+def _new_candidate(
+    athlete: uuid.UUID,
+    descriptor: uuid.UUID,
+    cand: GboCandidate,
+    connection_id: str | uuid.UUID | None,
+    run_id: uuid.UUID,
+) -> SourceCandidate:
+    return SourceCandidate(
+        athlete_id=athlete,
+        source_descriptor_id=descriptor,
+        connection_id=_uid(connection_id) if connection_id else None,
+        source_native_id=cand.source_native_id,
+        gbo_type=GboType(cand.gbo_type),
+        observed_at=cand.observed_at,
+        fetched_at=cand.fetched_at,
+        content_hash=cand.content_hash,
+        adapter_version=cand.adapter_version,
+        mapping_version=cand.mapping_version,
+        trust_profile={"tier": cand.trust_tier.value},
+        payload=_jsonsafe(cand.payload),
+        confidence=cand.confidence,
+        ingest_run_id=run_id,
+        untrusted_content=cand.untrusted_content,
+    )
 
 
 def _resolve_scalars(
     candidates: list[SourceCandidate], fields: tuple[str, ...]
-) -> dict[str, Any]:
-    """Resolve each scalar field across candidates via the conflict resolver (CONF-R2)."""
+) -> tuple[dict[str, Any], dict[str, object]]:
+    """Resolve each scalar field across candidates + build its coverage (CONF-R2/R5).
+
+    Returns ``(resolved_values, coverage)``. A field whose >=2 contributors materially
+    disagree beyond the per-field dispute tolerance gets ``coverage.disputed=True`` —
+    the best value is still selected, the disagreement is surfaced not hidden (CONF-R5).
+    """
     resolved: dict[str, Any] = {}
+    coverage: dict[str, object] = {}
     for fname in fields:
-        contributors = [
-            FieldCandidate(
-                value=c.payload[fname],
-                trust_tier=_tier_of(c),
-                source_descriptor_id=str(c.source_descriptor_id),
-                confidence=float(c.confidence) if c.confidence is not None else 1.0,
-                observed_at=c.observed_at,
-                fetched_at=c.fetched_at,
-            )
-            for c in candidates
-            if c.payload.get(fname) is not None
-        ]
-        winner = resolve_field(contributors)
-        if winner is not None:
-            resolved[fname] = winner.value
-    return resolved
+        contributors = _cw.field_candidates(candidates, fname, _tier_of)
+        winner = resolve_field(contributors, dispute_tolerance=_cw.dispute_tolerance(fname))
+        if winner is None:
+            continue
+        resolved[fname] = winner.value
+        coverage[fname] = _cw.coverage_for(
+            True, contributors[0].trust_tier, disputed=winner.disputed
+        ).to_jsonable()
+    return resolved, coverage
 
 
 def _apply_activity_scalars(act: Activity, scalars: dict[str, Any]) -> None:
@@ -363,4 +379,4 @@ def _uid(value: str | uuid.UUID) -> uuid.UUID:
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
 
 
-__all__ = ["IngestResult", "IngestService"]
+__all__ = ["IngestResult", "IngestService", "OriginalFile"]

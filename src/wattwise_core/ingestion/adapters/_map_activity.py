@@ -36,6 +36,30 @@ _SCALAR_CHANNELS: Final[tuple[tuple[str, StreamChannelName], ...]] = (
     ("temp_c", StreamChannelName.TEMP_C),
 )
 
+# Source ``sub_sport`` vocab -> canonical sub_sport registry code (MAP-R4/R2). Values
+# are SEEDED ``{sport}_other`` codes (migration 0001 §_seed) so the emitted value is a
+# valid FK and never a raw source token; an unmapped token resolves to ``None``.
+_SUB_SPORT_CODES: Final[dict[str, str]] = {
+    "road": "cycling_other",
+    "gravel": "cycling_other",
+    "mountain": "cycling_other",
+    "mountain_bike": "cycling_other",
+    "cyclocross": "cycling_other",
+    "indoor_cycling": "cycling_other",
+    "spin": "cycling_other",
+    "track_cycling": "cycling_other",
+    "trail": "running_other",
+    "track": "running_other",
+    "treadmill": "running_other",
+    "road_running": "running_other",
+    "street": "running_other",
+    "lap_swimming": "swimming_other",
+    "open_water": "swimming_other",
+    "indoor_rowing": "rowing_other",
+    "classic": "xc_ski_other",
+    "skate": "xc_ski_other",
+}
+
 # Source ``sport`` vocab -> canonical sport registry code (MAP-R4); unknown -> "other".
 _SPORT_CODES: Final[dict[str, str]] = {
     "cycling": "cycling",
@@ -186,12 +210,18 @@ def sport_code(raw: Any) -> str:
 
 
 def _sub_sport(raw: Any) -> str | None:
+    """Map a source sub_sport token to a canonical registry code (MAP-R4/R2).
+
+    Translates through ``_SUB_SPORT_CODES`` (seeded codes); an unmapped/absent token
+    yields ``None`` (a typed gap). NEVER echoes the raw lowercased source token into a
+    canonical FK field.
+    """
     if not isinstance(raw, str):
         return None
-    token = raw.strip().lower()
+    token = raw.strip().lower().replace(" ", "_").replace("-", "_")
     if not token or token in ("generic", "all"):
         return None
-    return token
+    return _SUB_SPORT_CODES.get(token)
 
 
 def has_free_text(asbo: ActivityAsbo) -> bool:

@@ -1,6 +1,35 @@
-"""API router registry. Each router module exposes ``router: APIRouter``; the app
-factory includes them. Routers are mounted here so the factory stays thin."""
+"""API router registry (doc 60).
+
+Each feature-router module exposes a module-level ``router: APIRouter`` carrying its
+own full ``/v1/...`` path prefix; the app factory includes everything listed in
+``ROUTERS``. Routers are aggregated here so :func:`wattwise_core.api.app.create_app`
+stays thin and agnostic to which slices exist.
+"""
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from fastapi import APIRouter
+
+from wattwise_core.api.routers import (
+    activities,
+    agent_routes,
+    connections,
+    imports,
+    onboarding,
+    performance,
+    sync,
+)
+
+#: Every feature router, in mount order. Each already carries its full ``/v1/...``
+#: prefix, so the factory includes them verbatim (no extra prefix).
+ROUTERS: list[APIRouter] = [
+    performance.router,
+    activities.router,
+    agent_routes.router,
+    connections.router,
+    imports.router,
+    sync.router,
+    onboarding.router,
+]
+
+__all__ = ["ROUTERS"]

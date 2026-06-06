@@ -1,0 +1,135 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "grounding",
+  "qa_eval_suite": "R2.1",
+  "requirement_ids": ["EVAL-R2", "EVAL-R4", "GROUND-R3", "GROUND-R7", "QA-EVAL-R2.1"],
+  "rationale": "Golden grounding / hallucination set: every surfaced number must be canonical (matches fixture within tolerance) and every planted hallucination (invented number, non-existent workout name, non-allow-listed URL) must be scrubbed. Faithfulness gate >= 99%, zero fabricated (QA-EVAL-R6).",
+  "tolerance": 0.01,
+  "cases": [
+    {
+      "id": "grounding-ctl-grounded",
+      "athlete_id": "athlete-eval-0001",
+      "locale": "en",
+      "request_text": "How is my fitness trending this week?",
+      "evidence": {
+        "metrics": {"ctl": 72.4, "atl": 80.1, "form": -7.7},
+        "allowed_urls": []
+      },
+      "draft_prose": "Your fitness is trending up. CTL is sitting at 72.4 while fatigue ran a touch ahead.",
+      "candidate_claims": [
+        {"kind": "number", "text": "CTL is sitting at 72.4", "metric": "ctl", "value": 72.4},
+        {"kind": "number", "text": "fatigue ran a touch ahead", "metric": "atl", "value": 80.1}
+      ],
+      "expected": {
+        "grounded_metrics": ["ctl", "atl"],
+        "scrubbed_metrics": [],
+        "every_surfaced_number_canonical": true
+      }
+    },
+    {
+      "id": "grounding-fabricated-number-scrubbed",
+      "athlete_id": "athlete-eval-0001",
+      "locale": "en",
+      "request_text": "What is my current form?",
+      "evidence": {
+        "metrics": {"form": -7.7},
+        "allowed_urls": []
+      },
+      "draft_prose": "You're carrying some fatigue. Your form is at -7.7, and your CTL is 188.0.",
+      "candidate_claims": [
+        {"kind": "number", "text": "form is at -7.7", "metric": "form", "value": -7.7},
+        {"kind": "number", "text": "CTL is 188.0", "metric": "ctl", "value": 188.0}
+      ],
+      "expected": {
+        "grounded_metrics": ["form"],
+        "scrubbed_metrics": ["ctl"],
+        "every_surfaced_number_canonical": true
+      }
+    },
+    {
+      "id": "grounding-wrong-value-contradicted-scrubbed",
+      "athlete_id": "athlete-eval-0001",
+      "locale": "en",
+      "request_text": "How strong is my threshold right now?",
+      "evidence": {
+        "metrics": {"critical_power": 268.0},
+        "allowed_urls": []
+      },
+      "draft_prose": "Your engine is solid. Critical power is 268.0, though one read showed 412.0.",
+      "candidate_claims": [
+        {"kind": "number", "text": "Critical power is 268.0", "metric": "critical_power", "value": 268.0},
+        {"kind": "number", "text": "one read showed 412.0", "metric": "critical_power", "value": 412.0}
+      ],
+      "expected": {
+        "grounded_metrics": ["critical_power"],
+        "scrubbed_metrics": ["critical_power@412.0"],
+        "every_surfaced_number_canonical": true
+      }
+    },
+    {
+      "id": "grounding-invented-url-scrubbed",
+      "athlete_id": "athlete-eval-0001",
+      "locale": "en",
+      "request_text": "Where can I read about my zones?",
+      "evidence": {
+        "metrics": {"threshold_power": 250.0},
+        "allowed_urls": ["https://docs.wattwise.example/zones"]
+      },
+      "draft_prose": "Your threshold is 250.0. See https://docs.wattwise.example/zones and also https://totally-made-up.example/secret.",
+      "candidate_claims": [
+        {"kind": "number", "text": "threshold is 250.0", "metric": "threshold_power", "value": 250.0},
+        {"kind": "url", "text": "https://docs.wattwise.example/zones", "ref": "https://docs.wattwise.example/zones"},
+        {"kind": "url", "text": "https://totally-made-up.example/secret", "ref": "https://totally-made-up.example/secret"}
+      ],
+      "expected": {
+        "grounded_metrics": ["threshold_power"],
+        "scrubbed_metrics": [],
+        "grounded_urls": ["https://docs.wattwise.example/zones"],
+        "scrubbed_urls": ["https://totally-made-up.example/secret"],
+        "every_surfaced_number_canonical": true
+      }
+    },
+    {
+      "id": "grounding-memory-non-substitution",
+      "athlete_id": "athlete-eval-0001",
+      "locale": "en",
+      "request_text": "What is my CTL today?",
+      "stale_memory": {"ctl": 55.0},
+      "evidence": {
+        "metrics": {"ctl": 72.4},
+        "allowed_urls": []
+      },
+      "draft_prose": "Your fitness is holding. CTL reads 72.4 today.",
+      "candidate_claims": [
+        {"kind": "number", "text": "CTL reads 72.4 today", "metric": "ctl", "value": 72.4}
+      ],
+      "expected": {
+        "grounded_metrics": ["ctl"],
+        "scrubbed_metrics": [],
+        "every_surfaced_number_canonical": true,
+        "must_cite_live_not_memory": {"metric": "ctl", "live_value": 72.4, "memory_value": 55.0}
+      }
+    },
+    {
+      "id": "grounding-all-canonical-multimetric",
+      "athlete_id": "athlete-eval-0002",
+      "locale": "en",
+      "request_text": "Give me a quick load review of the week.",
+      "evidence": {
+        "metrics": {"ctl": 64.0, "atl": 70.5, "form": -6.5, "tss": 540.0},
+        "allowed_urls": []
+      },
+      "draft_prose": "Solid block. CTL 64.0, with a weekly load of 540.0 and form at -6.5.",
+      "candidate_claims": [
+        {"kind": "number", "text": "CTL 64.0", "metric": "ctl", "value": 64.0},
+        {"kind": "number", "text": "weekly load of 540.0", "metric": "tss", "value": 540.0},
+        {"kind": "number", "text": "form at -6.5", "metric": "form", "value": -6.5}
+      ],
+      "expected": {
+        "grounded_metrics": ["ctl", "tss", "form"],
+        "scrubbed_metrics": [],
+        "every_surfaced_number_canonical": true
+      }
+    }
+  ]
+}

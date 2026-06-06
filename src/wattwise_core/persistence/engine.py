@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -19,6 +20,21 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from wattwise_core.config import Settings, get_settings
+
+
+def _enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
+    """Enforce foreign keys on SQLite (GBO-R8b, GBO-AC-7, TEN-R1).
+
+    SQLite defaults FK enforcement OFF per connection, so an orphan personal row that
+    PostgreSQL/MariaDB reject would be silently accepted — breaking the "runs unchanged
+    DSN-only" parity. Issue ``PRAGMA foreign_keys=ON`` on every new DBAPI connection.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_pragma(dbapi_connection: object, _record: object) -> None:
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def _normalize_dsn(dsn: str) -> str:
@@ -49,7 +65,7 @@ def create_engine_from_settings(settings: Settings | None = None) -> AsyncEngine
         raise RuntimeError("fail-closed: WATTWISE_DATABASE_DSN is required to create an engine")
     dsn = _normalize_dsn(settings.database_dsn.get_secret_value())
     is_sqlite = dsn.startswith("sqlite")
-    return create_async_engine(
+    engine = create_async_engine(
         dsn,
         echo=False,
         future=True,
@@ -57,6 +73,9 @@ def create_engine_from_settings(settings: Settings | None = None) -> AsyncEngine
         # server backends use a real pool with pre-ping for liveness.
         pool_pre_ping=not is_sqlite,
     )
+    if is_sqlite:
+        _enable_sqlite_foreign_keys(engine)
+    return engine
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
