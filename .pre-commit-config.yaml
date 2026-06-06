@@ -1,0 +1,83 @@
+# wattwise-core — pre-commit hooks (CI-R11, E3-T4).
+#
+# A FAST LOCAL MIRROR of the fast CI-R1 subset (target ≤ ~30s on a typical diff).
+# It is a convenience, NOT a substitute for or relaxation of CI: CI-R1 stays the
+# blocking source of truth and CI-R2 (no self-bypass) is unaffected. These hooks
+# MUST NOT run the slow tiers or the image/SBOM/SCA scans (CI-R11).
+#
+# Where a hook mirrors a gate, it delegates to the SAME Justfile recipe via a
+# `repo: local` entry so the hook command equals the CI command (CI-R0).
+#
+# Install once:  uv run pre-commit install --hook-type pre-commit --hook-type commit-msg
+# CI validates this file with `pre-commit validate-config` (CI-R1 item 19).
+
+minimum_pre_commit_version: "4.0.0"
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  # --- repo hygiene (CI-R11): cheap, universal file checks ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]   # hard cap: keep fixtures/binaries out of the repo
+      - id: check-yaml
+      - id: check-toml
+
+  # --- ruff lint + format-check (mirrors CI-R1 items 1 + format) ---
+  # Pinned ruff mirror for speed; the authoritative version is the uv-locked one
+  # invoked by `just lint` in CI. Keep this rev in step with the dev group.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        name: ruff (lint)
+        args: ["check", "--force-exclude"]
+      - id: ruff-format
+        name: ruff (format check)
+        args: ["format", "--check", "--force-exclude"]
+
+  # --- secret-pattern scan over the diff (mirrors SEC-R13.1 / CI-R1 item 8) ---
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # --- local hooks delegating to Justfile recipes (CI-R0: hook command == CI command) ---
+  - repo: local
+    hooks:
+      # mypy on the whole typed surface via the committed pyproject config
+      # (QUAL-R8). `just type` is the exact CI command (CI-R1 item 2).
+      - id: just-type
+        name: just type (mypy --strict)
+        entry: just type
+        language: system
+        pass_filenames: false
+        types_or: [python, toml]
+        require_serial: true
+
+      # The custom AST lints (module/function size, test-docstring, English-only
+      # identifiers) — the code-craft gate (CI-R1 item 14, QUAL-R9/R10b/R11).
+      # TODO(tools/lint): `just lint-ast` -> `python -m tools.lint ast` owned by
+      # the lint sibling; the hook goes green when that module lands.
+      - id: just-lint-ast
+        name: just lint-ast (code-craft AST gate)
+        entry: just lint-ast
+        language: system
+        pass_filenames: false
+        files: ^(src|tests|tools)/.*\.py$
+        require_serial: true
+
+      # Conventional-commit message check (QUAL-R12(b), CI-R1 item 15). Runs at
+      # the commit-msg stage on the prepared message file.
+      # TODO(scripts): `just lint-commits` -> `scripts/lint_commits.sh` owned by
+      # the delivery sibling.
+      - id: just-lint-commits
+        name: just lint-commits (Conventional Commits)
+        entry: just lint-commits
+        language: system
+        stages: [commit-msg]
+        pass_filenames: false

@@ -1,0 +1,133 @@
+# wattwise-core — operator self-host composition (the `just deploy` target).
+#
+# Implements DEPLOY-R8 / DEPLOY-R9 / CI-R12:
+#   * The app runs a SPECIFIC, RELEASED, semver-tagged, DIGEST-PINNED image pulled from the forge
+#     OCI registry (or the local registry:2 offline fallback) — NEVER an ad-hoc `docker build` of
+#     the working tree (DEPLOY-R9). `just deploy VERSION=vX.Y.Z` substitutes the pinned ref below.
+#   * PostgreSQL is ISOLATED and DEDICATED to this product: a DEDICATED NAMED VOLUME and a
+#     NON-DEFAULT published host port (55432, not 5432) so a pre-existing host-native Postgres on
+#     the same machine is physically unreachable and unmodifiable by the engine (DEPLOY-R8).
+#   * Secrets/config come ONLY from the environment / secret manager (SEC-R12 / BOOT-R4) — this file
+#     bakes NO secret. Required vars are listed under each service.
+#
+# ============================================================================================
+#  !!! DATA-SAFETY RULES — READ BEFORE RUNNING ANY COMPOSE COMMAND (DEPLOY-R8) !!!
+# ============================================================================================
+#  * NEVER run `docker compose down -v` (or `down --volumes`) against this file. The `-v` flag
+#    DELETES the named data volume `wattwise_pgdata` and DESTROYS the athlete's training history.
+#    Volume deletion is a SEPARATE, explicit, manually-confirmed action (`docker volume rm
+#    wattwise_pgdata`) that the deploy/rollback/teardown recipes MUST NEVER perform.
+#  * NEVER point WATTWISE_DATABASE_DSN at a pre-existing or host-native database. The engine MUST
+#    connect ONLY to the isolated `db` service defined here, on its dedicated volume + non-default
+#    port. The operator's years of live data on the same machine MUST stay unreachable.
+#  * The `db` service publishes on host port 55432 (NOT the default 5432) and uses a dedicated
+#    NAMED volume — never a bind-mount onto a host Postgres data directory.
+#  * `just deploy` / `just rollback` use `up -d` / `stop` / `start` only; teardown uses `down`
+#    WITHOUT `-v`. The named volume survives every restart, redeploy, and rollback.
+# ============================================================================================
+#
+# ONE-STEP ROLLBACK (DEPLOY-R9):
+#   The previously-deployed image tag is retained. To roll back in one step, re-run the deploy with
+#   the prior version — the data volume is untouched, only the app image is swapped:
+#       just deploy VERSION=<previous-vX.Y.Z>
+#   or, equivalently, directly:
+#       WATTWISE_IMAGE='<registry>/<owner>/wattwise-core:<previous>@sha256:<digest>' \
+#         docker compose -f deploy/compose.yaml up -d --no-deps wattwise-core
+#   (Postgres is NOT restarted; the durable volume `wattwise_pgdata` carries all data forward.)
+
+name: wattwise
+
+services:
+  # ---- Isolated, dedicated PostgreSQL (DEPLOY-R8) -------------------------------------------
+  db:
+    image: postgres:17-bookworm
+    # Identify this DB as wattwise-owned so it is never confused with a host-native instance.
+    container_name: wattwise-db
+    restart: unless-stopped
+    environment:
+      # Credentials are injected from the environment / secret manager (SEC-R12 / BOOT-R4); this
+      # file bakes NO password. `just deploy` requires these to be set before bringing the stack up.
+      POSTGRES_USER: ${WATTWISE_PG_USER:?set WATTWISE_PG_USER in the environment}
+      POSTGRES_PASSWORD: ${WATTWISE_PG_PASSWORD:?set WATTWISE_PG_PASSWORD in the environment}
+      POSTGRES_DB: ${WATTWISE_PG_DB:-wattwise}
+      # Keep the data subdir explicit so the dedicated named volume is the ONLY data location.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    # DEDICATED NAMED VOLUME (never a bind-mount onto a host Postgres dir).
+    volumes:
+      - wattwise_pgdata:/var/lib/postgresql/data
+    # NON-DEFAULT published host port: 55432 on the host, not 5432, so a host-native Postgres on
+    # 5432 is never shadowed and the engine can only reach ITS OWN db. Bound to loopback so the
+    # store is not exposed off-box (the app reaches it over the internal compose network).
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WATTWISE_PG_USER:-wattwise} -d ${WATTWISE_PG_DB:-wattwise}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Hardening: this DB serves only the engine; no extra capabilities needed.
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - wattwise_internal
+
+  # ---- The wattwise-core release image (DEPLOY-R9 / CI-R12) ---------------------------------
+  wattwise-core:
+    # DIGEST-PINNED, RELEASED image — substituted by `just deploy VERSION=vX.Y.Z`, which resolves
+    # `{registry}/{owner}/wattwise-core:{VERSION}@sha256:{digest}` from the forge release and exports
+    # it as WATTWISE_IMAGE. There is intentionally NO `build:` key here: a production deploy MUST
+    # pull a released, digest-pinned image, never build the working tree (DEPLOY-R9).
+    image: ${WATTWISE_IMAGE:?set WATTWISE_IMAGE to a released digest-pinned ref via just deploy}
+    container_name: wattwise-core
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Canonical-store DSN points ONLY at the isolated `db` service (DEPLOY-R8) — async driver.
+      # Credentials interpolate from the same env-injected secrets used by the db service.
+      WATTWISE_DATABASE_DSN: >-
+        postgresql+asyncpg://${WATTWISE_PG_USER:?set WATTWISE_PG_USER}:${WATTWISE_PG_PASSWORD:?set WATTWISE_PG_PASSWORD}@db:5432/${WATTWISE_PG_DB:-wattwise}
+      # Required service secrets — injected from the environment / secret manager (SEC-R12/BOOT-R4):
+      WATTWISE_ENCRYPTION_ROOT_KEY: ${WATTWISE_ENCRYPTION_ROOT_KEY:?set WATTWISE_ENCRYPTION_ROOT_KEY}
+      WATTWISE_TOKEN_SIGNING_KEY: ${WATTWISE_TOKEN_SIGNING_KEY:?set WATTWISE_TOKEN_SIGNING_KEY}
+      WATTWISE_LLM_API_KEY: ${WATTWISE_LLM_API_KEY:?set WATTWISE_LLM_API_KEY}
+      WATTWISE_APP__ENVIRONMENT: ${WATTWISE_APP__ENVIRONMENT:-production}
+      WATTWISE_API__HOST: "0.0.0.0"
+      WATTWISE_API__PORT: "8000"
+    ports:
+      # API published on a non-default host port; bound to loopback by default (front it with the
+      # operator's own TLS-terminating reverse proxy per SEC-R10.1 / the deployment edge).
+      - "127.0.0.1:${WATTWISE_HOST_PORT:-58000}:8000"
+    # Readiness gate for the deploy smoke check (CI-R7): readiness (OBS-R6.2) reflects "can serve
+    # now" — DB reachable, migrations applied, config valid, entitlement resolver ready.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=4).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Read-only root filesystem (RUN-R2): the image writes no PII to disk (PRIV-R6); only the
+    # explicit scratch tmpfs below is writable.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+      - /var/run/wattwise:rw,nosuid,nodev,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - wattwise_internal
+
+# DEDICATED named volume (DEPLOY-R8). Durable across restarts/redeploys/rollbacks. Destroying it is
+# a separate, explicit, manually-confirmed action — NEVER `down -v`.
+volumes:
+  wattwise_pgdata:
+    name: wattwise_pgdata
+
+networks:
+  wattwise_internal:
+    name: wattwise_internal
+    driver: bridge

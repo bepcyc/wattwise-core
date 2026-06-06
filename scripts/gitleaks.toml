@@ -1,0 +1,33 @@
+# gitleaks configuration for wattwise-core (consumed by scripts/secret_scan.sh, SEC-R13.1).
+#
+# Extends the upstream default ruleset and adds a tight ALLOWLIST for known non-secrets so the
+# committed-secret gate has no false positives that would erode trust in it:
+#   * scripts/secret_scan.sh deliberately constructs a FAKE canary for its planted-secret self-test
+#     (SEC-R12-AC) — that canary must not be mistaken for a committed secret.
+#   * .env.example documents variable NAMES with EMPTY values only (no real secrets, SEC-R12).
+#   * test fixtures / eval datasets may carry dummy tokens to exercise redaction (PRIV-R5).
+#
+# The allowlist is path/regex scoped and intentionally narrow — it never blanket-disables detection.
+
+title = "wattwise-core gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "wattwise-core known non-secrets"
+# The canonical AWS docs example access-key id (used only by the self-test canary; not a real key)
+# and the reassembled canary fragments from scripts/secret_scan.sh.
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''wJalrXUtnFEMI.K7MDENG.bPxRfiCYEXAMPLEKEY''',
+  '''planted0FAKE0key0material0for0scanner0selftest0only''',
+]
+# Files allowed to contain secret-shaped strings that are NOT secrets.
+paths = [
+  '''scripts/secret_scan\.sh''',   # the self-test canary lives here by design
+  '''scripts/gitleaks\.toml''',    # this allowlist file references the canary patterns
+  '''\.env\.example$''',           # documents variable names with empty values only
+  '''(^|/)tests/''',               # dummy tokens in fixtures exercising redaction/auth tests
+  '''(^|/)src/wattwise_core/eval/datasets/''',  # eval fixtures may carry sample tokens
+]

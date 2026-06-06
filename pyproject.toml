@@ -115,6 +115,9 @@ markers = [
   "integration: tests requiring a real DB backend",
   "e2e: API-level end-to-end journeys",
   "portability: 3-backend portability tests (SQLite/PostgreSQL/MariaDB)",
+  "fuzz: fuzz tests over decoders/parsers (TIER-R5)",
+  "inject: prompt-injection isolation tests (INJ-R2)",
+  "logging: logging-contract / redaction tests (QA-LOG-R*)",
 ]
 
 [tool.coverage.run]

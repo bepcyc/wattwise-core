@@ -1,0 +1,12 @@
+[
+  {"type": "time", "valueType": "java.lang.Integer", "data": [0, 1, 2, 3, 4, 5]},
+  {"type": "watts", "valueType": "java.lang.Integer", "data": [240, 255, null, 260, 250, 245]},
+  {"type": "heartrate", "valueType": "java.lang.Integer", "data": [150, 151, 152, 153, 154, 155]},
+  {"type": "cadence", "valueType": "java.lang.Integer", "data": [90, 91, 92, null, 90, 89]},
+  {"type": "velocity_smooth", "valueType": "java.lang.Double", "data": [8.1, 8.2, 8.3, 8.4, 8.3, 8.2]},
+  {"type": "distance", "valueType": "java.lang.Double", "data": [0.0, 8.1, 16.3, 24.6, 32.9, 41.1]},
+  {"type": "altitude", "valueType": "java.lang.Double", "data": [100.0, 101.0, 102.5, 103.0, 104.2, 105.0]},
+  {"type": "temp", "valueType": "java.lang.Integer", "data": [21, 21, 22, 22, 22, 21]},
+  {"type": "latlng", "valueType": "java.util.List", "valueTypeIsArray": true, "data": [[0.0, 0.0], [0.0, 0.0], null, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]},
+  {"type": "unmappable_channel", "valueType": "java.lang.Integer", "data": [1, 2, 3, 4, 5, 6]}
+]

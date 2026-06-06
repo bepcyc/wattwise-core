@@ -1,0 +1,42 @@
+[
+  {
+    "allNull": false,
+    "anomalies": null,
+    "custom": false,
+    "data": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "data2": null,
+    "name": null,
+    "type": "time",
+    "valueType": "java.lang.Integer",
+    "valueTypeIsArray": false
+  },
+  {
+    "allNull": false,
+    "anomalies": null,
+    "custom": false,
+    "data": [
+      102,
+      102,
+      102,
+      101,
+      101,
+      100,
+      99,
+      98
+    ],
+    "data2": null,
+    "name": null,
+    "type": "heartrate",
+    "valueType": "java.lang.Integer",
+    "valueTypeIsArray": false
+  }
+]

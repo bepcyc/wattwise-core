@@ -1,0 +1,301 @@
+# wattwise-core CI — Forgejo Actions (self-host mirror, CI-R9/DELIV-R8).
+#
+# THIN SCHEDULER ONLY (CI-R0/CI-R9): every step is a single `just <recipe>` call,
+# IDENTICAL to the GitHub Actions file (.github/workflows/ci.yml). The recipe set
+# referenced here MUST equal the GitHub set — `just test-forge-portable`
+# (CI-R1 item 18) fails the build if they diverge. Adding a gate to one forge's
+# file REQUIRES adding it to the other.
+#
+# Forgejo Actions is gitea-compatible; the same `just <recipe>` invocations run
+# unchanged because the Justfile is the single source of truth.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]   # the v*-tag push triggers the release job (CI-R10/CI-R12)
+  pull_request:
+    branches: [main]
+
+env:
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  # ----------------------------------------------------------------- FAST STAGE
+  lint:
+    name: Lint
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just lint            # CI-R1 item 1 + item 14
+      - run: just fmt-check
+
+  type-check:
+    name: Type check
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just type            # CI-R1 item 2
+
+  conventional-commits:
+    name: Conventional commits
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just lint-commits     # CI-R1 item 15
+
+  precommit-config:
+    name: Pre-commit config validity
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: uv run pre-commit validate-config   # CI-R1 item 19
+
+  fast-tests:
+    name: Fast tiers (unit+property+golden+contract+fuzz+logging)
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just test-unit        # CI-R1 item 3
+      - run: just test-property
+      - run: just test-golden
+      - run: just test-contract
+      - run: just test-fuzz        # CI-R1 item 16
+      - run: just test-logging     # CI-R1 item 11
+
+  coverage:
+    name: Coverage gate
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just cov              # CI-R1 item 5
+      - uses: actions/upload-artifact@v4   # CI-R6
+        if: always()
+        with: { name: coverage-report, path: reports/coverage.xml }
+
+  agent-eval:
+    name: Agent eval gate
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just eval             # CI-R1 item 6
+      - uses: actions/upload-artifact@v4   # CI-R6
+        if: always()
+        with: { name: eval-scorecard, path: reports/eval-scorecard.json }
+
+  injection:
+    name: Injection gate
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just test-inject      # CI-R1 item 7
+
+  secret-and-dep-scan:
+    name: Secret + dependency scan
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just scan             # CI-R1 items 8 + 9
+
+  forge-portability:
+    name: Forge portability
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just test-forge-portable   # CI-R1 item 18
+
+  # ----------------------------------------------------------------- SLOW STAGE
+  integration:
+    name: Integration (T-INT)
+    needs: [lint, type-check, fast-tests]
+    runs-on: docker
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wattwise
+          POSTGRES_PASSWORD: wattwise
+          POSTGRES_DB: wattwise
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wattwise" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@postgres:5432/wattwise
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just migrate
+      - run: just test-integration      # CI-R1 item 4
+
+  db-portability:
+    name: Bootstrap & DB portability (SQLite+PostgreSQL+MariaDB)
+    needs: [lint, type-check, fast-tests]
+    runs-on: docker
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wattwise
+          POSTGRES_PASSWORD: wattwise
+          POSTGRES_DB: wattwise
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wattwise" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_USER: wattwise
+          MARIADB_PASSWORD: wattwise
+          MARIADB_DATABASE: wattwise
+          MARIADB_ROOT_PASSWORD: rootwattwise
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      WATTWISE_PG_DSN: postgresql+asyncpg://wattwise:wattwise@postgres:5432/wattwise
+      WATTWISE_MARIADB_DSN: mysql+aiomysql://wattwise:wattwise@mariadb:3306/wattwise
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - name: Bootstrap acceptance (health endpoint serves)
+        run: |
+          just migrate
+          # TODO(src/wattwise_core/api): create_app + /health owned by Dev A.
+          WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-ci.sqlite" \
+            uv run uvicorn --factory wattwise_core.api.app:create_app \
+            --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/health && break || sleep 1;
+          done
+          curl -fsS http://127.0.0.1:8000/health
+      - run: just test-unit && just test-property && just test-golden && just test-contract
+      - run: just test-db-portable      # CI-R1 item 13
+
+  e2e:
+    name: E2E smoke
+    needs: [integration]
+    runs-on: docker
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wattwise
+          POSTGRES_PASSWORD: wattwise
+          POSTGRES_DB: wattwise
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wattwise" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@postgres:5432/wattwise
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just migrate
+      - run: just test-e2e              # CI-R1 item 12
+
+  image-scan-sbom:
+    name: Container image scan + SBOM
+    needs: [lint, type-check, fast-tests]
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just sbom                  # CI-R1 item 10 (CONT-R1)
+      - uses: actions/upload-artifact@v4   # CI-R6
+        if: always()
+        with: { name: image-scan-sbom, path: reports/ }
+
+  package-build:
+    name: Package build & install-boot
+    needs: [lint, type-check, fast-tests]
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just install-boot-check    # CI-R1 item 20
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }
+
+  # ----------------------------------------------------------------- RELEASE
+  # FORGE_PROVIDER=forgejo selects the Forgejo release + its built-in OCI
+  # registry (CI-R12). `just release` is identical to the GitHub job; only the
+  # provider env differs (CI-R10: NO code change between forges).
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - lint
+      - type-check
+      - conventional-commits
+      - precommit-config
+      - fast-tests
+      - coverage
+      - agent-eval
+      - injection
+      - secret-and-dep-scan
+      - forge-portability
+      - integration
+      - db-portability
+      - e2e
+      - image-scan-sbom
+      - package-build
+    runs-on: docker
+    env:
+      FORGE_PROVIDER: forgejo
+      UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: https://github.com/astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just release               # CI-R10/CI-R12 (FORGE_PROVIDER=forgejo)

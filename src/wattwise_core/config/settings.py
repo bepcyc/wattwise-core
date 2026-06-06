@@ -14,6 +14,7 @@ insecure state.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from collections.abc import Mapping
 from enum import StrEnum
@@ -78,7 +79,7 @@ class _LayeredFileSource(PydanticBaseSettingsSource):
             _flatten("", _read_toml(config_file), merged)
         self._data = merged
 
-    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:  # noqa: ANN401
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
         # Unused: the whole mapping is returned from __call__ instead.
         return None, field_name, False
 
@@ -184,8 +185,6 @@ class Settings(BaseSettings):
         # layered packaged-defaults + operator-file source. NO dotenv source is
         # registered: the engine does not read .env files at runtime (TASK §5);
         # secrets arrive via the environment / secret manager only.
-        import os
-
         config_file_env = os.environ.get("WATTWISE_CONFIG_FILE")
         config_file = Path(config_file_env) if config_file_env else None
         return (init_settings, env_settings, _LayeredFileSource(settings_cls, config_file))
@@ -200,6 +199,6 @@ def get_settings() -> Settings:
     return load_settings()
 
 
-def load_settings(**overrides: Any) -> Settings:  # noqa: ANN401
+def load_settings(**overrides: Any) -> Settings:
     """Load and validate settings fresh, applying any explicit overrides."""
     return Settings(**overrides)

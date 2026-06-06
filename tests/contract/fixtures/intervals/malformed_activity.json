@@ -1,0 +1,6 @@
+{
+  "type": "Ride",
+  "start_date": "2026-06-02T05:00:00Z",
+  "moving_time": 1800,
+  "average_heartrate": 140.0
+}

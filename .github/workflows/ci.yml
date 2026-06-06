@@ -1,0 +1,318 @@
+# wattwise-core CI — GitHub Actions (primary forge, DELIV-R1).
+#
+# THIN SCHEDULER ONLY (CI-R0/CI-R9): every step is a single `just <recipe>` call.
+# There is ZERO gate logic here — the Justfile is the single source of truth, so
+# the command CI runs is the command a contributor runs locally. The Forgejo
+# mirror (.forgejo/workflows/ci.yml) MUST reference the IDENTICAL recipe set
+# (`just test-forge-portable`, CI-R1 item 18 / CI-R9 / DELIV-R8).
+#
+# Job names are the branch-protection required-check names (CI-R1, QUAL-R3).
+# Staging (CI-R3): the `fast` jobs gate first and fail fast; the `slow` jobs
+# (integration, db-portability, e2e, image-scan/SBOM, package-build) follow.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]   # the v*-tag push triggers the release job (CI-R10/CI-R12)
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write   # push the release image to GHCR (CI-R12)
+
+env:
+  # uv installs from the frozen lockfile (CI-R5/RUN-R3.2); pin the runtime to 3.13.
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  # ----------------------------------------------------------------- FAST STAGE
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just lint            # CI-R1 item 1 + item 14 (lint-ast/content/novendor-sql/arch)
+      - run: just fmt-check
+
+  type-check:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just type            # CI-R1 item 2 (mypy --strict)
+
+  conventional-commits:
+    name: Conventional commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }  # need the full PR commit range
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just lint-commits     # CI-R1 item 15
+
+  precommit-config:
+    name: Pre-commit config validity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: uv run pre-commit validate-config   # CI-R1 item 19 (CI-R11)
+
+  fast-tests:
+    name: Fast tiers (unit+property+golden+contract+fuzz+logging)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just test-unit        # CI-R1 item 3
+      - run: just test-property
+      - run: just test-golden
+      - run: just test-contract
+      - run: just test-fuzz        # CI-R1 item 16 (bounded PR-gate mode)
+      - run: just test-logging     # CI-R1 item 11
+
+  coverage:
+    name: Coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥95%)
+      - uses: actions/upload-artifact@v4   # retained artifact (CI-R6)
+        if: always()
+        with: { name: coverage-report, path: reports/coverage.xml }
+
+  agent-eval:
+    name: Agent eval gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just eval             # CI-R1 item 6 (recorded-response mode)
+      - uses: actions/upload-artifact@v4   # eval scorecard (CI-R6)
+        if: always()
+        with: { name: eval-scorecard, path: reports/eval-scorecard.json }
+
+  injection:
+    name: Injection gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just test-inject      # CI-R1 item 7
+
+  secret-and-dep-scan:
+    name: Secret + dependency scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # secret scan over diff + history delta
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just scan             # CI-R1 items 8 + 9
+
+  forge-portability:
+    name: Forge portability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just test-forge-portable   # CI-R1 item 18 (CI-R9/DELIV-R8)
+
+  # ----------------------------------------------------------------- SLOW STAGE
+  integration:
+    name: Integration (T-INT)
+    needs: [lint, type-check, fast-tests]
+    runs-on: ubuntu-latest
+    services:
+      # Ephemeral master store on a NON-DEFAULT host port (hermetic, TIER-R2).
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wattwise
+          POSTGRES_PASSWORD: wattwise
+          POSTGRES_DB: wattwise
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wattwise" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@localhost:55432/wattwise
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just migrate
+      - run: just test-integration      # CI-R1 item 4
+
+  db-portability:
+    name: Bootstrap & DB portability (SQLite+PostgreSQL+MariaDB)
+    needs: [lint, type-check, fast-tests]
+    runs-on: ubuntu-latest
+    services:
+      # 3-backend matrix on NON-DEFAULT host ports so nothing collides (TIER-R2).
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wattwise
+          POSTGRES_PASSWORD: wattwise
+          POSTGRES_DB: wattwise
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wattwise" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_USER: wattwise
+          MARIADB_PASSWORD: wattwise
+          MARIADB_DATABASE: wattwise
+          MARIADB_ROOT_PASSWORD: rootwattwise
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      WATTWISE_PG_DSN: postgresql+asyncpg://wattwise:wattwise@localhost:55432/wattwise
+      WATTWISE_MARIADB_DSN: mysql+aiomysql://wattwise:wattwise@localhost:53306/wattwise
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      # Bootstrap-acceptance (BOOT-R1, E4-T3): clean checkout -> migrate ->
+      # health-serving instance. The bootstrap recipe runs uvicorn in the
+      # foreground, so here we start it backgrounded, poll health, then tear down.
+      - name: Bootstrap acceptance (health endpoint serves)
+        run: |
+          just migrate
+          # TODO(src/wattwise_core/api): create_app + /health owned by Dev A.
+          WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-ci.sqlite" \
+            uv run uvicorn --factory wattwise_core.api.app:create_app \
+            --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/health && break || sleep 1;
+          done
+          curl -fsS http://127.0.0.1:8000/health
+      - run: just test-unit && just test-property && just test-golden && just test-contract
+      - run: just test-db-portable      # CI-R1 item 13 (BOOT-R1/R2/R3)
+
+  e2e:
+    name: E2E smoke
+    needs: [integration]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wattwise
+          POSTGRES_PASSWORD: wattwise
+          POSTGRES_DB: wattwise
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wattwise" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@localhost:55432/wattwise
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just migrate
+      - run: just test-e2e              # CI-R1 item 12
+
+  image-scan-sbom:
+    name: Container image scan + SBOM
+    needs: [lint, type-check, fast-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just sbom                  # CI-R1 item 10 (CONT-R1: no Critical + SBOM)
+      - uses: actions/upload-artifact@v4   # retained image-scan report + SBOM (CI-R6)
+        if: always()
+        with: { name: image-scan-sbom, path: reports/ }
+
+  package-build:
+    name: Package build & install-boot
+    needs: [lint, type-check, fast-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just install-boot-check    # CI-R1 item 20 (uv build + boot from wheel)
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }
+
+  # ----------------------------------------------------------------- RELEASE
+  # Tag-driven (CI-R10/CI-R12). The job is a thin scheduler: `just release` owns
+  # the ordered steps (abort-on-red, build, changelog, SBOM, image push, forge
+  # release, conditional PyPI publish). FORGE_PROVIDER selects GitHub here.
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - lint
+      - type-check
+      - conventional-commits
+      - precommit-config
+      - fast-tests
+      - coverage
+      - agent-eval
+      - injection
+      - secret-and-dep-scan
+      - forge-portability
+      - integration
+      - db-portability
+      - e2e
+      - image-scan-sbom
+      - package-build
+    runs-on: ubuntu-latest
+    env:
+      FORGE_PROVIDER: github
+      # Publish tokens are injected as secrets; `just release` skips cleanly when
+      # absent (CI-R10 step 6). Never baked into the image (SEC-R12).
+      UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: just install
+      - run: just release               # CI-R10/CI-R12 (live in CI; FORGE_PROVIDER=github)

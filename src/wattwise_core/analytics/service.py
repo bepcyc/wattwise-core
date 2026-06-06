@@ -1,0 +1,346 @@
+"""Canonical analytics service — the single consumer surface (B-E3-T6, doc 40).
+
+The agent (its `gather`/MCP tools) and the REST API are PEERS over this service
+(doc 50 §1): both read computed analytics ONLY through here, and this is the only
+place that bridges the canonical ORM store (tier 3) to the pure metric functions.
+It reads exclusively named, typed canonical fields and stream channels (ANL-R1/R1a),
+resolves athlete reference params from effective-dated ``fitness_signature`` (ANL-R9),
+and returns the same typed :data:`MetricResult` envelopes the metric functions
+produce — fail-closed, never a fabricated number.
+
+The service is thin: all numeric truth lives in the pure functions; this layer only
+loads canonical inputs (via the module-level loaders below), calls them, and threads
+provenance.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import uuid
+from collections import defaultdict
+from dataclasses import dataclass
+
+import numpy as np
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from wattwise_core.analytics import decoupling as _dec
+from wattwise_core.analytics import hrv as _hrv
+from wattwise_core.analytics import mmp_cp as _mmp
+from wattwise_core.analytics import np_if_tss as _np
+from wattwise_core.analytics import pmc as _pmc
+from wattwise_core.analytics import trimp as _trimp
+from wattwise_core.analytics import wbal as _wbal
+from wattwise_core.analytics.result import (
+    Computed,
+    MetricResult,
+    Unavailable,
+    UnavailableReason,
+    is_computed,
+)
+from wattwise_core.analytics.series import Stream, resample_to_1hz
+from wattwise_core.domain.enums import StreamChannelName, StreamSetKind
+from wattwise_core.persistence.models import (
+    Activity,
+    ActivityStreamSet,
+    Athlete,
+    DailyWellness,
+    FitnessSignature,
+    StreamChannel,
+    WellnessStreamSet,
+)
+
+ENGINE_VERSION = "analytics-1"
+
+_MISSING = UnavailableReason.MISSING_REQUIRED_INPUT
+
+
+@dataclass(frozen=True, slots=True)
+class SignatureParams:
+    """Effective athlete reference params resolved as-of an activity date (ANL-R9)."""
+
+    ftp_w: float | None = None
+    cp_w: float | None = None
+    w_prime_j: float | None = None
+    max_hr_bpm: float | None = None
+    resting_hr_bpm: float | None = None
+
+
+# --- module-level helpers (stateless loaders + coercions) ---
+
+
+def _uid(value: str | uuid.UUID) -> uuid.UUID:
+    """Coerce a string id to a UUID at the query boundary (portable Uuid binds UUIDs)."""
+    return value if isinstance(value, uuid.UUID) else uuid.UUID(value)
+
+
+def _f(value: object) -> float | None:
+    """Coerce a nullable numeric column to ``float | None`` for the pure functions."""
+    return None if value is None else float(value)  # type: ignore[arg-type]
+
+
+def _num_or_nan(value: object) -> float:
+    """Coerce a JSON sample to ``float``; non-numeric (incl. ``None``) becomes a gap."""
+    return float(value) if isinstance(value, int | float) else float("nan")
+
+
+def _channel_to_stream(channel: StreamChannel, sample_rate_hz: float | None) -> Stream:
+    """Build an analytic :class:`Stream` from a canonical channel (ANL-R7).
+
+    ``None``/non-numeric samples become ``NaN`` gaps; the time axis is derived from
+    the channel's nominal sample rate (default 1 Hz). Metric functions resample.
+    """
+    rate = sample_rate_hz if sample_rate_hz and sample_rate_hz > 0 else 1.0
+    vals = np.array([_num_or_nan(v) for v in channel.values], dtype=np.float64)
+    t = np.arange(vals.size, dtype=np.float64) / rate
+    return Stream(t_seconds=t, values=vals)
+
+
+def _day_bounds(from_date: _dt.date, to_date: _dt.date) -> tuple[_dt.datetime, _dt.datetime]:
+    """The half-open UTC instant range [from 00:00, to+1 00:00) for a local-date span."""
+    lo = _dt.datetime.combine(from_date, _dt.time.min, _dt.UTC)
+    hi = _dt.datetime.combine(to_date + _dt.timedelta(days=1), _dt.time.min, _dt.UTC)
+    return lo, hi
+
+
+async def _load_athlete_sex(session: AsyncSession, athlete_id: str) -> str | None:
+    athlete = await session.get(Athlete, _uid(athlete_id))
+    return None if athlete is None else str(athlete.sex)
+
+
+async def _load_wellness_rr(
+    session: AsyncSession, athlete_id: str, local_date: _dt.date
+) -> list[float] | None:
+    stmt = select(WellnessStreamSet).where(
+        WellnessStreamSet.athlete_id == _uid(athlete_id),
+        WellnessStreamSet.local_date == local_date,
+    )
+    for s in (await session.execute(stmt)).scalars().all():
+        cstmt = select(StreamChannel).where(
+            StreamChannel.stream_set_id == s.wellness_stream_set_id,
+            StreamChannel.channel == StreamChannelName.RR_INTERVALS_MS,
+        )
+        ch = (await session.execute(cstmt)).scalar_one_or_none()
+        if ch is not None:
+            return [_num_or_nan(v) for v in ch.values if v is not None]
+    return None
+
+
+async def _load_wellness_hrv_summary(
+    session: AsyncSession, athlete_id: str, local_date: _dt.date
+) -> float | None:
+    stmt = select(DailyWellness).where(
+        DailyWellness.athlete_id == _uid(athlete_id),
+        DailyWellness.local_date == local_date,
+    )
+    dw = (await session.execute(stmt)).scalar_one_or_none()
+    return None if dw is None else _f(dw.hrv_rmssd_ms)
+
+
+class AnalyticsService:
+    """Computes canonical analytics for one athlete from the canonical store."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    # --- canonical input loading ---
+
+    async def _activity(self, activity_id: str) -> Activity | None:
+        return await self._session.get(Activity, _uid(activity_id))
+
+    async def _activity_channels(self, activity_id: str) -> dict[StreamChannelName, Stream]:
+        """Load the activity's stream channels as analytic streams, keyed by channel."""
+        stmt = select(ActivityStreamSet).where(
+            ActivityStreamSet.activity_id == _uid(activity_id)
+        )
+        stream_set = (await self._session.execute(stmt)).scalar_one_or_none()
+        if stream_set is None:
+            return {}
+        cstmt = select(StreamChannel).where(
+            StreamChannel.stream_set_id == stream_set.stream_set_id,
+            StreamChannel.set_kind == StreamSetKind.ACTIVITY,
+        )
+        channels = (await self._session.execute(cstmt)).scalars().all()
+        rate = float(stream_set.sample_rate_hz) if stream_set.sample_rate_hz else 1.0
+        return {c.channel: _channel_to_stream(c, rate) for c in channels}
+
+    async def resolve_signature(
+        self, athlete_id: str, signature_type: str, as_of: _dt.date
+    ) -> SignatureParams:
+        """Resolve the effective signature params as-of ``as_of`` (ANL-R9, GBO-R26/R27)."""
+        stmt = (
+            select(FitnessSignature)
+            .where(
+                FitnessSignature.athlete_id == _uid(athlete_id),
+                FitnessSignature.signature_type == signature_type,
+                FitnessSignature.effective_date <= as_of,
+            )
+            .order_by(FitnessSignature.effective_date.desc())
+            .limit(1)
+        )
+        sig = (await self._session.execute(stmt)).scalar_one_or_none()
+        if sig is None:
+            return SignatureParams()
+        return SignatureParams(
+            ftp_w=_f(sig.ftp_w),
+            cp_w=_f(sig.cp_w),
+            w_prime_j=_f(sig.w_prime_j),
+            max_hr_bpm=_f(sig.max_hr_bpm),
+            resting_hr_bpm=_f(sig.resting_hr_bpm),
+        )
+
+    # --- per-activity metrics ---
+
+    async def coggan(self, activity_id: str) -> MetricResult[_np.LoadMetricsBundle]:
+        """Compute the NP/IF/TSS load-metrics bundle for an activity (LM-R1)."""
+        act = await self._activity(activity_id)
+        if act is None:
+            return Unavailable(_MISSING, "unknown activity")
+        channels = await self._activity_channels(activity_id)
+        power = channels.get(StreamChannelName.POWER_W)
+        if power is None:
+            return Unavailable(_MISSING, "no power channel")
+        hr = channels.get(StreamChannelName.HR_BPM)
+        sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
+        bundle = _np.load_metrics_bundle(
+            power, hr, sig.ftp_w, _f(act.avg_power_w), _f(act.avg_hr_bpm)
+        )
+        return Computed(value=bundle)
+
+    async def w_balance(self, activity_id: str) -> MetricResult[_wbal.WBalResult]:
+        """Compute the W' balance series for an activity (WBAL-R1)."""
+        act = await self._activity(activity_id)
+        if act is None:
+            return Unavailable(_MISSING, "unknown activity")
+        channels = await self._activity_channels(activity_id)
+        power = channels.get(StreamChannelName.POWER_W)
+        if power is None:
+            return Unavailable(_MISSING, "no power channel")
+        sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
+        return _wbal.wbal(resample_to_1hz(power), sig.cp_w, sig.w_prime_j)
+
+    async def aerobic_decoupling(self, activity_id: str) -> MetricResult[float]:
+        """Compute aerobic decoupling for an activity (DEC-R1)."""
+        act = await self._activity(activity_id)
+        if act is None:
+            return Unavailable(_MISSING, "unknown activity")
+        channels = await self._activity_channels(activity_id)
+        hr = channels.get(StreamChannelName.HR_BPM)
+        output = channels.get(StreamChannelName.POWER_W) or channels.get(
+            StreamChannelName.SPEED_MPS
+        )
+        if hr is None or output is None:
+            return Unavailable(_MISSING, "needs output + HR")
+        return _dec.aerobic_decoupling(output, hr, act.sport)
+
+    async def trimp(self, activity_id: str) -> MetricResult[float]:
+        """Compute Banister-HRR HR load for an activity (TRIMP-R1)."""
+        act = await self._activity(activity_id)
+        if act is None:
+            return Unavailable(_MISSING, "unknown activity")
+        channels = await self._activity_channels(activity_id)
+        hr = channels.get(StreamChannelName.HR_BPM)
+        sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
+        sex = await _load_athlete_sex(self._session, str(act.athlete_id))
+        return _trimp.banister_hr_load(hr, sig.max_hr_bpm, sig.resting_hr_bpm, sex)
+
+    # --- athlete-level metrics ---
+
+    async def _activities_in_range(
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+    ) -> list[Activity]:
+        lo, hi = _day_bounds(from_date, to_date)
+        stmt = select(Activity).where(
+            Activity.athlete_id == _uid(athlete_id),
+            Activity.start_time >= lo,
+            Activity.start_time < hi,
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def daily_load_series(
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+    ) -> dict[_dt.date, float | None]:
+        """Per-day summed training load over resolved canonical activities (LOAD-R1).
+
+        Reads RESOLVED canonical activities (DEDUP-R4 — never per-source rows); each
+        contributes its computed power-TSS once. A day with no activity is a real ``0``
+        rest day; a day whose only activity has no computable load contributes ``None``
+        (surfaced), never a silent zero.
+        """
+        activities = await self._activities_in_range(athlete_id, from_date, to_date)
+        by_day: dict[_dt.date, float] = defaultdict(float)
+        seen: set[_dt.date] = set()
+        for act in activities:
+            day = act.start_time.date()
+            seen.add(day)
+            bundle = await self.coggan(str(act.activity_id))
+            if is_computed(bundle):
+                tss = bundle.value.tss
+                if is_computed(tss):
+                    by_day[day] += float(tss.value)
+        out: dict[_dt.date, float | None] = {}
+        cur = from_date
+        while cur <= to_date:
+            # A day with no activity is a real 0 rest day; a day that had an activity
+            # but no computable load is a surfaced None, never a silent zero (LOAD-R1).
+            out[cur] = by_day.get(cur, None if cur in seen else 0.0)
+            cur += _dt.timedelta(days=1)
+        return out
+
+    async def pmc(
+        self,
+        athlete_id: str,
+        from_date: _dt.date,
+        to_date: _dt.date,
+        *,
+        seed: tuple[float, float] | None = None,
+    ) -> list[MetricResult[_pmc.PmcDay]]:
+        """Compute the PMC (CTL/ATL/TSB) series over the daily-load grid (PMC-R1)."""
+        loads = await self.daily_load_series(athlete_id, from_date, to_date)
+        series = [loads[d] for d in sorted(loads)]
+        return _pmc.pmc(series, seed=seed)
+
+    async def power_curve(
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+    ) -> dict[int, MetricResult[_mmp.MMPWindow]]:
+        """Aggregate mean-maximal-power curve over the date range (MMP-R4)."""
+        activities = await self._activities_in_range(athlete_id, from_date, to_date)
+        best: dict[int, MetricResult[_mmp.MMPWindow]] = {}
+        for act in activities:
+            power = (await self._activity_channels(str(act.activity_id))).get(
+                StreamChannelName.POWER_W
+            )
+            if power is None:
+                continue
+            for d, res in _mmp.mmp(resample_to_1hz(power)).items():
+                if is_computed(res) and (d not in best or _better_mmp(res, best[d])):
+                    best[d] = res
+        return best
+
+    async def critical_power(
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+    ) -> MetricResult[_mmp.CPFit]:
+        """Fit CP/W' from the aggregate power curve over the range (CP-R1)."""
+        curve = await self.power_curve(athlete_id, from_date, to_date)
+        points = {d: res.value.mean_power_w for d, res in curve.items() if is_computed(res)}
+        return _mmp.cp_wprime(points)
+
+    async def hrv(
+        self, athlete_id: str, local_date: _dt.date
+    ) -> MetricResult[_hrv.TimeDomainHrv]:
+        """Compute time-domain HRV for a wellness day (HRV-R0/R3, fail-closed)."""
+        rr = await _load_wellness_rr(self._session, athlete_id, local_date)
+        summary = await _load_wellness_hrv_summary(self._session, athlete_id, local_date)
+        return _hrv.time_domain_hrv(rr_intervals_ms=rr, summary_rmssd_ms=summary)
+
+
+def _better_mmp(
+    candidate: Computed[_mmp.MMPWindow], current: MetricResult[_mmp.MMPWindow]
+) -> bool:
+    """True if ``candidate`` is a higher mean power than the current best (MMP-R4)."""
+    if not is_computed(current):
+        return True
+    return candidate.value.mean_power_w > current.value.mean_power_w
+
+
+__all__ = ["ENGINE_VERSION", "AnalyticsService", "SignatureParams"]

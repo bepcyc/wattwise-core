@@ -1,0 +1,88 @@
+# wattwise-core build context exclusions.
+#
+# Keeps the build context minimal, deterministic, and SECRET-FREE (SEC-R12 / RUN-R2): tests, VCS
+# history, the local venv, scratch data, scanner outputs, and any .env / key material MUST NOT enter
+# the image. Only pyproject.toml, uv.lock, README/NOTICE/LICENSE, and src/ are needed by the
+# Dockerfile (everything else here is excluded so a stray local file can never leak into a layer).
+
+# --- everything-but allowlist is impractical for Docker; deny the known-bad and bulky instead ---
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+.github/
+.forgejo/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.so
+
+# Virtual environments (NEVER copy a host venv into the image)
+.venv/
+venv/
+/opt/venv/
+
+# Tests + tooling NOT needed at runtime (RUN-R2: no tests in the final image)
+tests/
+tools/
+scripts/
+docs/
+migrations/versions/__pycache__/
+
+# Test / lint / type caches and reports
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+junit*.xml
+
+# Supply-chain scanner outputs (generated locally; not build inputs)
+sbom*.json
+*.sarif
+trivy-report*.json
+grype-report*.json
+gitleaks-report*.json
+
+# SECRETS — never into a layer (SEC-R12 / BOOT-R4). The build must not read the operator .env.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.secrets/
+
+# Local data / scratch — the engine targets ONLY its own isolated external store (DEPLOY-R8)
+*.sqlite
+*.sqlite3
+*.db
+local.db
+/data/
+/.scratch/
+/migration_local/
+
+# Container / compose files (not needed inside the image)
+Dockerfile
+.dockerignore
+deploy/
+compose*.yaml
+compose*.yml
+docker-compose*.yml
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
