@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from wattwise_core.agent.engine import UnconfiguredAgentEngine, build_agent_engine
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.api.auth import (
     Principal,
@@ -49,8 +50,13 @@ from wattwise_core.api.openapi import install_openapi
 from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import activities as activities_router
 from wattwise_core.api.routers import agent_routes as agent_router
+from wattwise_core.api.routers import connections as connections_router
+from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import performance as performance_router
+from wattwise_core.api.routers import sync as sync_router
+from wattwise_core.api.wiring import build_ingestion_seams
 from wattwise_core.config import Settings, get_settings
+from wattwise_core.identity import OWNER_SUBJECT
 from wattwise_core.observability.logging import configure_logging
 from wattwise_core.persistence import Database
 
@@ -118,8 +124,12 @@ def _wire_router_seams(app: FastAPI) -> None:
     (AUTH-R1/R7): the scope gate runs the bearer+scope check, the acting athlete id is
     derived server-side from the verified principal (AUTH-R3), the analytics service is
     built per request from the shared DB session, and the agent rate limiter is the
-    process limiter. The agent engine remains an injectable seam the runtime supplies
-    (the OSS factory has no model config to construct it).
+    process limiter. The agent engine is built from settings (the LangGraph coach when a
+    model is configured, else a graceful unconfigured fallback) so /v1/agent is live. The
+    connect/import/sync routers' seams are bound to the real OSS ingestion services (the
+    file-upload import processor, the on-demand sync orchestrator, and the credential
+    store) via :func:`wattwise_core.api.wiring.build_ingestion_seams` so the built stack
+    can connect → sync → land canonical data (ARCH-R22 — routers stay source-blind).
     """
     overrides = app.dependency_overrides
     overrides[performance_router.require_read_scope] = require_scopes(Scope.READ)
@@ -130,6 +140,14 @@ def _wire_router_seams(app: FastAPI) -> None:
     overrides[agent_router.require_agent_scope] = require_scopes(Scope.AGENT)
     overrides[agent_router.current_athlete_id] = _athlete_id_seam
     overrides[agent_router.rate_limiter] = get_rate_limiter
+    engine = build_agent_engine(app.state.database, app.state.settings) or UnconfiguredAgentEngine()
+    overrides[agent_router.agent_engine] = lambda: engine
+    seams = build_ingestion_seams(app.state.database, app.state.settings)
+    overrides[imports_router.import_processor] = lambda: seams.import_processor
+    overrides[sync_router.sync_orchestrator] = lambda: seams.sync_orchestrator
+    if seams.credential_sink is not None:
+        sink = seams.credential_sink
+        overrides[connections_router.credential_sink] = lambda: sink
 
 
 def _athlete_id_seam(principal: Annotated[Principal, Depends(authenticate)]) -> str:
@@ -232,7 +250,7 @@ def _auth_router() -> APIRouter:
     async def issue_token(body: _TokenRequest, settings: AppSettings) -> dict[str, object]:
         """Exchange the first-party owner credential for an access token (API-R23/R24)."""
         _verify_owner_secret(settings, body.owner_secret)
-        tokens = issue_access_token(settings, subject="owner", scopes=_OWNER_SCOPES)
+        tokens = issue_access_token(settings, subject=OWNER_SUBJECT, scopes=_OWNER_SCOPES)
         return tokens.to_dict()
 
     return router

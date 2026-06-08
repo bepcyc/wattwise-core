@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from wattwise_core.persistence.types import UtcDateTime
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -56,8 +57,8 @@ def upgrade() -> None:
         sa.Column("kind", _MEMORY_ITEM_KIND, nullable=False),
         sa.Column("content", sa.String(length=2048), nullable=False),
         sa.Column("inferred", sa.Boolean(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", UtcDateTime(), nullable=False),
+        sa.Column("updated_at", UtcDateTime(), nullable=False),
         sa.PrimaryKeyConstraint("memory_item_id", name=op.f("pk_agent_memory_item")),
     )
     with op.batch_alter_table(_TABLE, schema=None) as batch_op:

@@ -106,7 +106,34 @@ def ground(
         if outcome.scrub_text is not None:
             text = _scrub_span(text, claim.text, outcome.scrub_text)
     decision = _decide(grounded)
+    text = _scrub_unverified_urls(text, evidence, allow_list)
     return GroundingResult(decision=decision, claims=tuple(grounded), scrubbed_text=text)
+
+
+def _scrub_unverified_urls(
+    text: str, evidence: GroundingEvidence, allow_list: frozenset[str]
+) -> str:
+    """Remove every URL in the body not on the allow-list / a matched record (GROUND-R4).
+
+    A SECOND, extraction-independent net: even a URL the model never surfaced as a claim is
+    scrubbed unless it is first-party allow-listed or accepted by the evidence — so a
+    model-invented link can never reach the athlete just because it went unextracted. A body
+    with no URL is returned untouched; removals collapse the whitespace they leave behind.
+    """
+    if not _URL_RE.search(text):
+        return text
+
+    def _keep(match: re.Match[str]) -> str:
+        url = match.group(0)
+        if _normalize_url(url) in allow_list or evidence.url_allowed(url):
+            return url
+        return ""
+
+    cleaned = _URL_RE.sub(_keep, text)
+    if cleaned == text:
+        return text
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return re.sub(r"\s+([.,;:!?])", r"\1", cleaned).strip()
 
 
 class _Outcome:
@@ -158,9 +185,7 @@ def _verify_number(claim: Claim, evidence: GroundingEvidence) -> _Outcome:
         citation = _metric_citation(claim, canonical)
         return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), None)
     replacement = _format_number(canonical, claim.text)
-    return _Outcome(
-        GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), replacement
-    )
+    return _Outcome(GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), replacement)
 
 
 def _verify_name(claim: Claim, name_library: NameLibrary | None) -> _Outcome:
@@ -180,9 +205,7 @@ def _verify_name(claim: Claim, name_library: NameLibrary | None) -> _Outcome:
     return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), None)
 
 
-def _verify_url(
-    claim: Claim, evidence: GroundingEvidence, allow_list: frozenset[str]
-) -> _Outcome:
+def _verify_url(claim: Claim, evidence: GroundingEvidence, allow_list: frozenset[str]) -> _Outcome:
     """Restrict a URL to the allow-list / matched-record destinations (GROUND-R4).
 
     A URL passes only if it is on the caller's allow-list OR the evidence object accepts
@@ -200,14 +223,28 @@ def _verify_url(
 def _verify_statement(claim: Claim) -> _Outcome:
     """Classify a non-factual statement (GROUND-R9 ``complementary`` rule, fail-closed).
 
-    A statement carries no checkable number/name/URL of its own. It MAY publish as
-    ``complementary`` only when it is non-prescriptive (GROUND-R9); a prescriptive
-    statement (a target/instruction) without a backing grounded prescription is treated
-    as ``ungrounded`` and scrubbed (fail-closed default).
+    A statement MAY publish as ``complementary`` only when it is non-prescriptive AND
+    carries NO checkable token of its own (GROUND-R9: "a statement carries no checkable
+    number/name/URL"). This is ENFORCED deterministically here, not trusted from the
+    model's claim-kind label: a statement smuggling a numeric literal or a URL (e.g. a
+    ``STATEMENT`` whose text is "Your CTL is 999") is treated as ``ungrounded`` and scrubbed,
+    so a factual span can never reach the athlete unverified by being mislabeled non-factual.
+    A prescriptive statement (a target/instruction) without a backing grounded prescription
+    is likewise ungrounded (fail-closed default).
     """
-    if claim.prescriptive:
+    if claim.prescriptive or _carries_checkable_token(claim.text):
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
     return _Outcome(GroundedClaim(claim, GroundVerdict.COMPLEMENTARY, None), None)
+
+
+def _carries_checkable_token(text: str) -> bool:
+    """True if ``text`` contains a numeric literal or a URL (a checkable factual token).
+
+    The deterministic guard for GROUND-R9: a complementary statement must be purely
+    non-factual; a number or URL in its span makes it a checkable claim that MUST be
+    verified by its kind-specific verifier, never published on a statement's free pass.
+    """
+    return bool(_NUMBER_RE.search(text) or _URL_RE.search(text))
 
 
 def _scrubbed(claim: Claim, verdict: GroundVerdict) -> _Outcome:
@@ -267,9 +304,7 @@ def _is_publishable(claim: GroundedClaim) -> bool:
 # --- numeric helpers (GROUND-R7) ---
 
 
-def _canonical_metric(
-    evidence: GroundingEvidence, metric: str, ref: str | None
-) -> float | None:
+def _canonical_metric(evidence: GroundingEvidence, metric: str, ref: str | None) -> float | None:
     """Read the canonical value for a ``(metric, as_of)`` request, fail-closed (GROUND-R7).
 
     The base :class:`GroundingEvidence` contract's ``metric_value`` is async; the grounder
@@ -309,9 +344,17 @@ def _within_tolerance(claimed: float, canonical: float) -> bool:
 
 
 def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
-    """Citation for a grounded number: canonical metric id + verbatim value (GROUND-R5/R7)."""
+    """Citation for a grounded number: canonical metric id + verbatim value (GROUND-R5/R7).
+
+    ``record_id`` is the stable canonical reference to the analytic the number was read
+    from — ``{metric}@{as_of}`` (or just the metric when no date) — so a deliverable layer
+    keeps the citation (a grounded number MUST carry a resolvable citation, GROUND-R5; a
+    citation with no record id is dropped downstream and the number would ship uncited).
+    """
+    record_id = f"{claim.metric}@{claim.ref}" if claim.ref else str(claim.metric)
     return {
         "kind": "metric",
+        "record_id": record_id,
         "metric": claim.metric,
         "value": canonical,
         "as_of": claim.ref,
@@ -341,6 +384,11 @@ def _render_value(value: float) -> str:
 
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+# A URL token in athlete-facing prose; the deterministic URL sweep checks every match
+# against the allow-list / matched-record destinations regardless of model extraction
+# (GROUND-R4: invented URLs are scrubbed unconditionally).
+_URL_RE = re.compile(r"https?://[^\s)>\]]+", re.IGNORECASE)
 
 
 def _normalize_urls(urls: Iterable[str]) -> frozenset[str]:

@@ -31,10 +31,11 @@ exercisable offline (ADP-R17, TST-R1).
 from __future__ import annotations
 
 import datetime as _dt
+import gzip
 from typing import Any, ClassVar, Final
 
 from wattwise_core.domain.candidate import GboCandidate
-from wattwise_core.domain.enums import AuthArchetype, Fidelity, SourceKind
+from wattwise_core.domain.enums import ActivityFileFormat, AuthArchetype, Fidelity, SourceKind
 from wattwise_core.ingestion.adapters import _map_activity as _m
 from wattwise_core.ingestion.adapters._asbo import (
     ActivityAsbo,
@@ -45,7 +46,12 @@ from wattwise_core.ingestion.adapters._asbo import (
 from wattwise_core.ingestion.adapters._decode_fit import decode_fit
 from wattwise_core.ingestion.adapters._decode_gpx import decode_gpx
 from wattwise_core.ingestion.adapters._decode_tcx import decode_tcx
-from wattwise_core.ingestion.base import FetchContext, SourceDescriptorRef
+from wattwise_core.ingestion.base import (
+    FetchContext,
+    FileImportError,
+    SourceDescriptorRef,
+    UploadDecode,
+)
 from wattwise_core.storage import content_hash
 
 # The single built-in file-upload descriptor slug (LIN-R1.1).
@@ -84,7 +90,15 @@ def decode(data: bytes, *, filename: str | None = None) -> ActivityAsbo:
     if not isinstance(data, bytes | bytearray):  # defensive: fuzz feeds odd inputs
         raise FileDecodeError("decode expects bytes")
     blob = bytes(data)
-    fmt = detect_format(filename, blob)
+    name = filename
+    if blob[:2] == b"\x1f\x8b":  # gzip magic — a compressed export (e.g. `.fit.gz`)
+        try:
+            blob = gzip.decompress(blob)
+        except (OSError, EOFError) as exc:
+            raise FileDecodeError("could not decompress the gzipped activity file") from exc
+        if name and name.lower().endswith(".gz"):
+            name = name[: -len(".gz")]  # detect the inner format on the unwrapped name
+    fmt = detect_format(name, blob)
     if fmt == "fit":
         return decode_fit(blob)
     if fmt == "gpx":
@@ -138,6 +152,30 @@ class FileUploadAdapter:
         if start is None:
             return []  # required canonical field absent -> no fabricated candidate
         return self._build_activity(asbo, start, source_descriptor, fetch_context, None)
+
+    def decode_upload(
+        self,
+        raw_bytes: bytes,
+        *,
+        filename: str | None,
+        source_descriptor: SourceDescriptorRef,
+        fetch_context: FetchContext,
+    ) -> UploadDecode:
+        """Decode + pure-map one uploaded file (FIL-R1); a bad file → :class:`FileImportError`.
+
+        The file-import seam (:class:`~wattwise_core.ingestion.base.FileImportAdapter`) a
+        source-blind consumer drives: it runs the impure :func:`decode` then the pure
+        :meth:`map_upload`, wrapping the typed decoder failure in the neutral
+        :class:`FileImportError` so the consumer never imports a source-specific error
+        (ARCH-R22). Reports the verbatim original's format for tier-1 capture (FIL-R1).
+        """
+        try:
+            asbo = decode(raw_bytes, filename=filename)
+            file_format = ActivityFileFormat(detect_format(filename, raw_bytes))
+        except FileDecodeError as exc:
+            raise FileImportError("could not decode the uploaded activity file") from exc
+        candidates = self.map_upload(raw_bytes, asbo, source_descriptor, fetch_context)
+        return UploadDecode(candidates=candidates, file_format=file_format)
 
     def map_upload(
         self,

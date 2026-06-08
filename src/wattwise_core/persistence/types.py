@@ -81,10 +81,25 @@ class UtcDateTime(TypeDecorator[_dt.datetime]):
     way in and re-attaches UTC tzinfo on the way out — so the substrate delivers an
     identical tz-aware UTC round-trip across SQLite/PostgreSQL/MariaDB without per-call-site
     fixups, never storing a local-time instant.
+
+    On MySQL/MariaDB the column is rendered ``DATETIME(6)``: a bare ``DATETIME`` has
+    fractional-second precision 0 and would TRUNCATE microseconds, so the same instant
+    would not round-trip byte-identically across backends (GBO-AC-1). Requesting fsp=6
+    preserves microsecond fidelity to match SQLite/PostgreSQL.
     """
 
     impl = DateTime(timezone=True)
     cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> Any:
+        """Use DATETIME(6) on MySQL/MariaDB so microseconds survive (GBO-AC-1/GBO-R32)."""
+        if dialect.name in ("mysql", "mariadb"):
+            # Deferred so importing this module never pulls in the MySQL dialect on a
+            # SQLite/PostgreSQL deployment (the dialect-specific type is only needed here).
+            from sqlalchemy.dialects.mysql import DATETIME as MySqlDateTime  # noqa: PLC0415
+
+            return dialect.type_descriptor(MySqlDateTime(fsp=6, timezone=True))
+        return dialect.type_descriptor(DateTime(timezone=True))
 
     def process_bind_param(
         self, value: _dt.datetime | None, dialect: Dialect

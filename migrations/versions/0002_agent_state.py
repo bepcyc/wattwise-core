@@ -8,7 +8,7 @@ the canonical GBO schema; they map the ORM models in
 agent state cannot share a schema or write credential (ARCH-R13, DEPLOY-R4).
 
 PORTABLE (ARCH-R13 / GBO-R8b): every column uses only the portable primitives the
-canonical layer uses — ``sa.Uuid``, ``sa.DateTime(timezone=True)``, portable ``sa.JSON``,
+canonical layer uses — ``sa.Uuid``, ``UtcDateTime()``, portable ``sa.JSON``,
 ``sa.LargeBinary`` (BLOB / BYTEA / LONGBLOB), ``sa.String`` / ``sa.Integer`` — so this
 revision runs unchanged on SQLite / PostgreSQL / MariaDB (DSN-only difference). Batch mode
 keeps index creation portable on SQLite without code change.
@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from wattwise_core.persistence.types import UtcDateTime
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -38,7 +39,7 @@ def upgrade() -> None:
         sa.Column("thread_id", sa.String(length=128), nullable=False),
         sa.Column("athlete_id", sa.Uuid(), nullable=False),
         sa.Column("conversation_id", sa.String(length=128), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", UtcDateTime(), nullable=False),
         sa.PrimaryKeyConstraint("thread_id", name=op.f("pk_agent_thread")),
         sa.UniqueConstraint(
             "athlete_id",
@@ -63,7 +64,7 @@ def upgrade() -> None:
         sa.Column("checkpoint_type", sa.String(length=64), nullable=False),
         sa.Column("checkpoint_blob", sa.LargeBinary(), nullable=False),
         sa.Column("metadata_blob", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", UtcDateTime(), nullable=False),
         sa.ForeignKeyConstraint(
             ["thread_id"],
             ["agent_thread.thread_id"],
@@ -101,7 +102,7 @@ def upgrade() -> None:
         sa.Column("channel", sa.String(length=255), nullable=False),
         sa.Column("value_type", sa.String(length=64), nullable=False),
         sa.Column("value_blob", sa.LargeBinary(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", UtcDateTime(), nullable=False),
         sa.ForeignKeyConstraint(
             ["thread_id"],
             ["agent_thread.thread_id"],

@@ -103,6 +103,7 @@ def test_grounded_number_carries_metric_citation() -> None:
     assert claim.verdict is GroundVerdict.GROUNDED
     assert claim.citation == {
         "kind": "metric",
+        "record_id": "ctl@2026-06-06",
         "metric": "ctl",
         "value": 84.0,
         "as_of": "2026-06-06",
@@ -250,6 +251,40 @@ def test_non_prescriptive_statement_is_complementary_and_published() -> None:
     assert claim.verdict is GroundVerdict.COMPLEMENTARY
     assert result.scrubbed_text == draft
     assert result.decision is GroundDecision.PROCEED
+
+
+def test_statement_smuggling_a_number_is_scrubbed_not_complementary() -> None:
+    """A non-prescriptive STATEMENT carrying a numeric literal is ungrounded (GROUND-R9).
+
+    Closes the mislabel path: code never lets a factual number ship on a statement's
+    free pass just because the model tagged the span ``STATEMENT`` instead of ``NUMBER``.
+    """
+    evidence = _FakeEvidence()
+    draft = "Your CTL is 999 and climbing."
+    result = ground(draft, [_statement(draft)], evidence, [])
+    (claim,) = result.claims
+    assert claim.verdict is GroundVerdict.UNGROUNDED
+    assert result.decision is GroundDecision.ABSTAIN
+    assert "999" not in result.scrubbed_text
+
+
+def test_unextracted_url_is_scrubbed_by_the_sweep() -> None:
+    """A URL the model never surfaced as a claim is still scrubbed (GROUND-R4 unconditional)."""
+    evidence = _FakeEvidence()
+    draft = "Nice, steady week. More at http://evil.example/x"
+    # The only extracted claim is the non-factual lead; the URL is NOT extracted.
+    result = ground(draft, [_statement("Nice, steady week.")], evidence, [])
+    assert result.decision is GroundDecision.PROCEED  # the statement still publishes
+    assert "evil.example" not in result.scrubbed_text  # the invented URL is swept out
+
+
+def test_allowlisted_url_survives_the_sweep() -> None:
+    """A first-party allow-listed URL is preserved by the deterministic URL sweep (GROUND-R4)."""
+    url = "https://wattwise.app/guide"
+    evidence = _FakeEvidence(allowed_urls=frozenset({url}))
+    draft = f"Here's a tip. See {url}"
+    result = ground(draft, [_statement("Here's a tip.")], evidence, [url])
+    assert url in result.scrubbed_text
 
 
 def test_prescriptive_statement_without_grounding_is_scrubbed() -> None:

@@ -1,0 +1,394 @@
+"""API-level Phase-1 end-to-end journeys on the BUILT stack (E2E-R1 a-d / DOD-R5).
+
+The OSS engine ships no GUI client (the web app + Telegram bot are commercial ``athload``,
+ROAD-R1), so the Phase-1 E2E journeys are exercised through the assembled REST API — the
+REAL :func:`wattwise_core.api.app.create_app` app with its real seam wiring (auth, the
+analytics service, the file-upload import processor, the on-demand sync orchestrator, the
+credential store) over a file-backed SQLite database that all request-scoped sessions
+share. The single external boundary is the LLM: the coaching agent is driven by a
+deterministic, network-free :class:`FakeModel` so the grounded-answer journey is
+reproducible (the model never self-certifies — code grounds every claim, OUTCOME-R5).
+
+The four required Phase-1 journeys (E2E-R1):
+
+- **(a) connect → sync.** Upload an activity file (``POST /v1/imports``) — the OSS
+  file-upload "connect", which lands a connectionless ``file_import`` canonical activity
+  through the real ingest path — and trigger a manual sync (``POST /v1/sync/run``). The
+  uploaded ride then appears on the canonical analytics surface.
+- **(b) headline metric.** Read the Performance Management Chart (``GET
+  /v1/performance/load-fitness``) and a headline load metric (``GET
+  /v1/performance/coggan``) over the seeded canonical activities.
+- **(c) grounded API ask.** Ask the agent a question (``POST /v1/agent/ask``) and receive
+  a grounded, status-discriminated answer; a fabricated number fails closed to ``degraded``
+  rather than shipping an unverified value (API-R12 / GROUND-R6).
+- **(d) token-issuance → grounded query.** Mint a first-party token via the real
+  ``POST /v1/auth/token`` exchange and drive a grounded query through the same canonical
+  API path with it — proving any client (the commercial bot included) can consume the
+  surface and that the server-derived subject is the single owner athlete (AUTH-R3/R18).
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import uuid
+from collections.abc import Iterator
+from pathlib import Path
+
+import jwt
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from wattwise_core.agent.contracts import ClaimKind
+from wattwise_core.agent.engine import (
+    GraphAgentEngine,
+    _ClaimSchema,
+    _ExtractedClaim,
+    _PlanSchema,
+)
+from wattwise_core.agent.model import FakeModel
+from wattwise_core.api.app import create_app
+from wattwise_core.api.routers import agent_routes
+from wattwise_core.config import Settings, load_settings
+from wattwise_core.domain.candidate import GboCandidate
+from wattwise_core.domain.enums import Fidelity, SignatureOrigin
+from wattwise_core.identity import OWNER_ATHLETE_ID, OWNER_SUBJECT
+from wattwise_core.ingestion.ingest import IngestService
+from wattwise_core.persistence.models import (
+    Athlete,
+    Base,
+    FitnessSignature,
+    SourceDescriptor,
+    Sport,
+)
+from wattwise_core.security.crypto import EnvelopeCipher
+from wattwise_core.storage import content_hash
+
+pytestmark = pytest.mark.e2e
+
+UTC = _dt.UTC
+
+#: The first-party owner sign-in secret (the configured ``token_signing_key``, API-R23).
+_SIGNING_KEY = "e2e-owner-secret-0123456789abcdef0123456789"
+
+#: A reference "today" the seeded rides sit just behind, so the agent's trailing-window
+#: plan (today minus 42 days) covers them and the PMC range is populated.
+_TODAY = _dt.date(2026, 6, 8)
+_RIDE_DAYS = (_dt.date(2026, 6, 1), _dt.date(2026, 6, 2), _dt.date(2026, 6, 3))
+
+#: The committed file-upload fixture decoded by the real import processor (journey a).
+_RIDE_FIT = (
+    Path(__file__).resolve().parents[1] / "contract" / "fixtures" / "file_upload" / "ride.fit"
+)
+
+
+def _completed_model() -> FakeModel:
+    """A FakeModel scripting a grounded, COMPLETED weekly-load answer (the default path).
+
+    The planner selects ``weekly_load`` (so the gather resolves canonical PMC); the claim
+    extractor points at one non-prescriptive state observation, which publishes as a
+    grounded ``complementary`` (GROUND-R9) — a number-free, leads-with-state coach answer.
+    """
+    return FakeModel(
+        scripted={
+            "_PlanSchema": _PlanSchema(capabilities=["weekly_load"], window_days=42),
+            "_ClaimSchema": _ClaimSchema(
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.STATEMENT,
+                        text="your training is trending in a good direction",
+                    )
+                ]
+            ),
+        },
+        prose="Your training is trending in a good direction this week — nice, steady work.",
+    )
+
+
+class _Journey:
+    """The assembled client + the scriptable model for one E2E scenario."""
+
+    def __init__(self, client: TestClient, app: FastAPI, model: FakeModel, token: str) -> None:
+        self.client = client
+        self.app = app
+        self.model = model
+        self.token = token
+
+    @property
+    def auth(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"}
+
+
+@pytest.fixture
+def journey(tmp_path: Path) -> Iterator[_Journey]:
+    """Build the REAL app on a shared file DB, seed canonical data, and mint a real token.
+
+    A temp-file DSN means every request-scoped session (the analytics read, the import
+    write, the agent read) shares ONE database — unlike ``:memory:``. The agent engine seam
+    is overridden with a :class:`FakeModel`-backed :class:`GraphAgentEngine` (the only
+    external boundary doubled); everything else is the real wiring.
+    """
+    settings = _settings(tmp_path)
+    app = create_app(settings)
+    model = _completed_model()
+    app.dependency_overrides[agent_routes.agent_engine] = lambda: GraphAgentEngine(
+        app.state.database, model
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.portal.call(_seed, app)  # type: ignore[union-attr]
+        token = _issue_owner_token(client)
+        yield _Journey(client, app, model, token)
+
+
+def _settings(tmp_path: Path) -> Settings:
+    """Dev settings on a file DB with a real envelope key (the full built-stack wiring)."""
+    return load_settings(
+        app__environment="development",
+        database_dsn=f"sqlite+aiosqlite:///{tmp_path / 'e2e.db'}",
+        token_signing_key=_SIGNING_KEY,
+        encryption_root_key=EnvelopeCipher.generate_root_key(),
+        object_store__local_root=str(tmp_path / "objects"),
+    )
+
+
+async def _seed(app: FastAPI) -> None:
+    """Create the schema + seed the owner, registries, an FTP signature, and rides.
+
+    Mirrors what the initial migration seeds (the single owner athlete + the file-import
+    descriptor) plus the per-athlete data a fresh sign-in would have (an FTP signature and
+    a few canonical rides) so the PMC/headline reads are populated.
+    """
+    database = app.state.database
+    async with database.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with database.session() as session:
+        session.add(Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True))
+        session.add(Athlete(athlete_id=OWNER_ATHLETE_ID, sex="male", reference_timezone="UTC"))
+        descriptor = SourceDescriptor(
+            source_key="file_import", display_name="Activity files", kind="file_upload"
+        )
+        session.add(descriptor)
+        session.add(
+            SourceDescriptor(
+                source_key="intervals_icu", display_name="Intervals.icu", kind="oauth_api"
+            )
+        )
+        session.add(
+            FitnessSignature(
+                athlete_id=OWNER_ATHLETE_ID,
+                signature_type="cycling",
+                effective_date=_dt.date(2024, 1, 1),
+                ftp_w=250.0,
+                origin=SignatureOrigin.MEASURED,
+            )
+        )
+        await session.flush()
+        ingest = IngestService(session)
+        for i, day in enumerate(_RIDE_DAYS):
+            await ingest.ingest(
+                str(OWNER_ATHLETE_ID),
+                str(descriptor.source_descriptor_id),
+                [_ride_candidate(f"seed-{i}", day)],
+            )
+
+
+def _ride_candidate(native_id: str, day: _dt.date) -> GboCandidate:
+    """A deterministic constant-250 W, 1 h cycling ride (TSS == 100 at FTP 250)."""
+    seconds = 3600
+    watts = 250.0
+    payload = {
+        "start_time": _dt.datetime(day.year, day.month, day.day, 8, 0, tzinfo=UTC),
+        "sport": "cycling",
+        "elapsed_time_s": seconds,
+        "moving_time_s": seconds,
+        "avg_power_w": watts,
+        "streams": {
+            "power_w": {"values": [watts] * seconds, "sample_basis": "time", "sample_rate_hz": 1.0}
+        },
+        "laps": [
+            {"lap_index": 0, "start_offset_s": 0, "duration_s": seconds, "avg_power_w": watts}
+        ],
+    }
+    return GboCandidate(
+        gbo_type="activity",
+        source_descriptor_id="placeholder",
+        source_native_id=native_id,
+        content_hash=content_hash(native_id.encode()),
+        payload=payload,
+        trust_tier=Fidelity.RAW_STREAM,
+        fetched_at=_dt.datetime(2026, 6, 4, 9, 0, tzinfo=UTC),
+    )
+
+
+def _issue_owner_token(client: TestClient) -> str:
+    """Exchange the first-party owner secret for an access token (the real route, API-R23)."""
+    resp = client.post("/v1/auth/token", json={"owner_secret": _SIGNING_KEY})
+    assert resp.status_code == 200, resp.text
+    token: str = resp.json()["access_token"]
+    return token
+
+
+# --- (a) connect → sync ----------------------------------------------------------
+
+
+def test_journey_a_connect_sync_lands_canonical_data(journey: _Journey) -> None:
+    """Upload an activity file + trigger a sync; the ride lands on the canonical surface."""
+    # Before the import, the 2024 window holds nothing (the seeded rides are in 2026).
+    before = journey.client.get(
+        "/v1/performance/coggan",
+        params={"from": "2024-01-01", "to": "2024-01-03"},
+        headers=journey.auth,
+    )
+    assert before.status_code == 200
+    assert before.json()["items"] == []
+
+    upload = journey.client.post(
+        "/v1/imports",
+        headers=journey.auth,
+        files={"file": ("ride.fit", _RIDE_FIT.read_bytes(), "application/octet-stream")},
+    )
+    assert upload.status_code == 202, upload.text
+    assert upload.json()["status"] == "queued"
+
+    # A manual sync is the only OSS trigger and is accepted (API-R46); the file-upload
+    # source has nothing to pull, so the run starts and reports accepted.
+    run = journey.client.post("/v1/sync/run", headers=journey.auth)
+    assert run.status_code == 202, run.text
+    assert run.json()["status"] == "accepted"
+
+    # The uploaded ride (2024-01-02) is now a canonical activity on the analytics surface.
+    after = journey.client.get(
+        "/v1/performance/coggan",
+        params={"from": "2024-01-01", "to": "2024-01-03"},
+        headers=journey.auth,
+    )
+    assert after.status_code == 200
+    items = after.json()["items"]
+    assert len(items) == 1, "exactly the one uploaded activity must appear (no double-land)"
+
+
+# --- (b) headline metric ---------------------------------------------------------
+
+
+def test_journey_b_pmc_and_headline_metric(journey: _Journey) -> None:
+    """The PMC and a headline load metric read the seeded canonical activities (API-R30)."""
+    pmc = journey.client.get(
+        "/v1/performance/load-fitness",
+        params={"from": "2026-05-25", "to": "2026-06-08"},
+        headers=journey.auth,
+    )
+    assert pmc.status_code == 200, pmc.text
+    body = pmc.json()
+    assert body["method"] == "pmc_ewma"
+    assert body["summary"]["fitness"] is not None and body["summary"]["fitness"] > 0
+
+    coggan = journey.client.get(
+        "/v1/performance/coggan",
+        params={"from": "2026-06-01", "to": "2026-06-03"},
+        headers=journey.auth,
+    )
+    assert coggan.status_code == 200, coggan.text
+    tss_values = [it["values"]["tss"] for it in coggan.json()["items"]]
+    assert any(v is not None and abs(v - 100.0) < 1.0 for v in tss_values), tss_values
+
+
+# --- (c) grounded API ask --------------------------------------------------------
+
+
+def test_journey_c_grounded_agent_ask(journey: _Journey) -> None:
+    """A grounded question returns a COMPLETED, grounded answer through the agent surface."""
+    resp = journey.client.post(
+        "/v1/agent/ask", json={"question": "How is my training going?"}, headers=journey.auth
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["grounding"]["grounded"] is True
+    assert body["answer_text"].strip()
+    assert "<p>" in body["answer_html"]
+
+
+def test_journey_c_grounded_number_carries_a_citation(journey: _Journey) -> None:
+    """A number that matches canonical data grounds and ships WITH its citation (GROUND-R5/R7).
+
+    Reads the current canonical fitness (CTL) off the PMC surface, scripts the agent to claim
+    exactly that value as-of the same date, and asserts the API answer is ``completed`` and
+    carries a grounding citation for ``ctl`` — exercising the numeric-grounding fix end to end.
+    """
+    pmc = journey.client.get(
+        "/v1/performance/load-fitness",
+        params={"from": "2026-05-25", "to": "2026-06-08"},
+        headers=journey.auth,
+    )
+    ctl = pmc.json()["summary"]["fitness"]
+    assert ctl is not None and ctl > 0
+    journey.model.set_response(
+        _ClaimSchema(
+            claims=[
+                _ExtractedClaim(
+                    kind=ClaimKind.NUMBER,
+                    text=f"your fitness is around {ctl:.1f}",
+                    metric="ctl",
+                    value=ctl,
+                    as_of="2026-06-08",
+                )
+            ]
+        )
+    )
+    resp = journey.client.post(
+        "/v1/agent/ask", json={"question": "What's my fitness number?"}, headers=journey.auth
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "completed"
+    citations = body["grounding"]["citations"]
+    assert citations, "a grounded number must reach the API answer with a citation (GROUND-R5)"
+    assert citations[0]["metric"] == "ctl"
+    assert abs(citations[0]["value"] - ctl) < 1e-6  # verbatim canonical value (GROUND-R7)
+
+
+def test_journey_c_fabricated_number_fails_closed_to_degraded(journey: _Journey) -> None:
+    """A model-invented number can never ship: it scrubs out and the run degrades (GROUND-R6)."""
+    journey.model.set_response(
+        _ClaimSchema(
+            claims=[
+                _ExtractedClaim(
+                    kind=ClaimKind.NUMBER, text="your CTL is 999", metric="ctl", value=999.0
+                )
+            ]
+        )
+    )
+    resp = journey.client.post(
+        "/v1/agent/ask", json={"question": "What exactly is my CTL?"}, headers=journey.auth
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert "999" not in body["answer_text"]  # the fabricated number never reaches the athlete
+
+
+# --- (d) token-issuance → grounded query -----------------------------------------
+
+
+def test_journey_d_token_issuance_drives_a_grounded_query(journey: _Journey) -> None:
+    """The real token exchange yields the owner subject and drives a grounded query (E2E-R1d)."""
+    # The minted token's subject is the single owner athlete id — a real UUID, server-derived
+    # (AUTH-R3/R18), NOT a placeholder string; this is what makes every canonical read resolve.
+    claims = jwt.decode(journey.token, options={"verify_signature": False})
+    assert claims["sub"] == OWNER_SUBJECT
+    assert uuid.UUID(claims["sub"]) == OWNER_ATHLETE_ID
+
+    # The SAME token drives a grounded query through the canonical API path.
+    resp = journey.client.post(
+        "/v1/agent/ask", json={"question": "Give me a quick read on my form."}, headers=journey.auth
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "completed"
+
+    # And the canonical analytics surface is reachable with the very same issued token.
+    pmc = journey.client.get(
+        "/v1/performance/load-fitness",
+        params={"from": "2026-05-25", "to": "2026-06-08"},
+        headers=journey.auth,
+    )
+    assert pmc.status_code == 200

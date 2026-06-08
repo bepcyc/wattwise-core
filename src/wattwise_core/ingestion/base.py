@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from wattwise_core.domain.candidate import GboCandidate
-from wattwise_core.domain.enums import AuthArchetype, SourceKind
+from wattwise_core.domain.enums import ActivityFileFormat, AuthArchetype, SourceKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,4 +80,58 @@ class SourceAdapter(Protocol):
         ...
 
 
-__all__ = ["FetchContext", "SourceAdapter", "SourceDescriptorRef"]
+class FileImportError(Exception):
+    """An uploaded recording file could not be decoded into canonical candidates (FIL-R*).
+
+    The NEUTRAL, source-agnostic failure a file-import consumer catches: a concrete decoder's
+    typed error is wrapped here so a consumer (the import seam) never imports a source-specific
+    exception (ARCH-R22). Carries only a short, non-sensitive reason — never the raw bytes.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class UploadDecode:
+    """The result of decoding one uploaded recording file (FIL-R1, source-agnostic).
+
+    ``candidates`` are the canonical activity candidate(s) the pure map produced; ``file_format``
+    is the verbatim original's format for tier-1 capture. A consumer reads these without knowing
+    which file type or adapter produced them (ARCH-R22).
+    """
+
+    candidates: list[GboCandidate]
+    file_format: ActivityFileFormat
+
+
+@runtime_checkable
+class FileImportAdapter(Protocol):
+    """A file-upload :class:`SourceAdapter` that decodes a verbatim uploaded file (FIL-R1).
+
+    The file-import archetype seam: given raw bytes + the resolved descriptor/context it decodes
+    (impure) and pure-maps to canonical candidates, reporting the original file format for tier-1
+    capture. A consumer selects it through the registry by the built-in ``file_import`` key and
+    drives THIS method — never importing a named adapter (ARCH-R22). A file that cannot be parsed
+    raises :class:`FileImportError` (a neutral, source-agnostic error).
+    """
+
+    source_key: str
+
+    def decode_upload(
+        self,
+        raw_bytes: bytes,
+        *,
+        filename: str | None,
+        source_descriptor: SourceDescriptorRef,
+        fetch_context: FetchContext,
+    ) -> UploadDecode:
+        """Decode + pure-map one uploaded file into canonical candidates (FIL-R1/MAP-R1)."""
+        ...
+
+
+__all__ = [
+    "FetchContext",
+    "FileImportAdapter",
+    "FileImportError",
+    "SourceAdapter",
+    "SourceDescriptorRef",
+    "UploadDecode",
+]

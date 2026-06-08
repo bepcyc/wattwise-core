@@ -9,7 +9,7 @@ registries and the built-in file importer:
 
 PORTABLE (GBO-R8b): every DDL statement here emits only the portable types the
 column factories produce — ``sa.Uuid``, ``sa.Enum(native_enum=False, create_constraint=True)`` (text + CHECK,
-NOT a native PG ENUM), portable ``sa.JSON``, ``sa.DateTime(timezone=True)`` — so the
+NOT a native PG ENUM), portable ``sa.JSON``, ``UtcDateTime()`` — so the
 same revision runs unchanged on SQLite / PostgreSQL / MariaDB (DSN-only difference).
 Batch mode keeps the (SQLite-absent) ALTERs portable without code change.
 
@@ -27,7 +27,8 @@ from alembic import op
 import sqlalchemy as sa
 
 from wattwise_core.domain.enums import SEED_SPORTS
-from wattwise_core.persistence.types import utcnow
+from wattwise_core.identity import OWNER_ATHLETE_ID
+from wattwise_core.persistence.types import UtcDateTime, utcnow
 
 
 # revision identifiers, used by Alembic.
@@ -50,8 +51,8 @@ def upgrade() -> None:
     sa.Column('kind', sa.Enum('oauth_api', 'file_upload', 'webhook', 'scrape', name='sourcekind', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('trust_profile', sa.JSON(), nullable=False),
     sa.Column('default_fidelity', sa.String(length=64), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.PrimaryKeyConstraint('source_descriptor_id', name=op.f('pk_source_descriptor')),
     sa.UniqueConstraint('source_key', name='uq_source_descriptor_source_key')
     )
@@ -59,8 +60,8 @@ def upgrade() -> None:
     sa.Column('sport_code', sa.String(length=64), nullable=False),
     sa.Column('display_name', sa.String(length=128), nullable=False),
     sa.Column('has_mechanical_power', sa.Boolean(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.PrimaryKeyConstraint('sport_code', name=op.f('pk_sport'))
     )
     op.create_table('stream_channel',
@@ -71,8 +72,8 @@ def upgrade() -> None:
     sa.Column('sample_basis', sa.Enum('time', 'distance', 'event', name='samplebasis', native_enum=False, create_constraint=True, length=64), nullable=True),
     sa.Column('values', sa.JSON(), nullable=False),
     sa.Column('coverage', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.PrimaryKeyConstraint('stream_channel_id', name=op.f('pk_stream_channel')),
     sa.UniqueConstraint('stream_set_id', 'channel', name='uq_stream_channel_set_channel')
     )
@@ -88,10 +89,10 @@ def upgrade() -> None:
     sa.Column('primary_locale', sa.String(length=35), nullable=True),
     sa.Column('current_sport', sa.String(length=64), nullable=True),
     sa.Column('reference_timezone', sa.String(length=64), nullable=False),
-    sa.Column('reference_timezone_effective_from', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('reference_timezone_effective_from', UtcDateTime(), nullable=True),
     sa.Column('default_training_load_model', sa.String(length=64), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['current_sport'], ['sport.sport_code'], name=op.f('fk_athlete_current_sport_sport')),
     sa.PrimaryKeyConstraint('athlete_id', name=op.f('pk_athlete'))
     )
@@ -102,8 +103,8 @@ def upgrade() -> None:
     sa.Column('sub_sport_code', sa.String(length=64), nullable=False),
     sa.Column('sport_code', sa.String(length=64), nullable=False),
     sa.Column('display_name', sa.String(length=128), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['sport_code'], ['sport.sport_code'], name=op.f('fk_sub_sport_sport_code_sport')),
     sa.PrimaryKeyConstraint('sub_sport_code', name=op.f('pk_sub_sport'))
     )
@@ -113,8 +114,8 @@ def upgrade() -> None:
     op.create_table('activity',
     sa.Column('activity_id', sa.Uuid(), nullable=False),
     sa.Column('athlete_id', sa.Uuid(), nullable=False),
-    sa.Column('start_time', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('start_time_local', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('start_time', UtcDateTime(), nullable=False),
+    sa.Column('start_time_local', UtcDateTime(), nullable=True),
     sa.Column('elapsed_time_s', sa.Integer(), nullable=True),
     sa.Column('moving_time_s', sa.Integer(), nullable=True),
     sa.Column('sport', sa.String(length=64), nullable=False),
@@ -141,8 +142,8 @@ def upgrade() -> None:
     sa.Column('has_gps', sa.Boolean(), nullable=False),
     sa.Column('has_cadence', sa.Boolean(), nullable=False),
     sa.Column('coverage', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_activity_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['sport'], ['sport.sport_code'], name=op.f('fk_activity_sport_sport')),
     sa.ForeignKeyConstraint(['sub_sport'], ['sub_sport.sub_sport_code'], name=op.f('fk_activity_sub_sport_sub_sport')),
@@ -162,11 +163,11 @@ def upgrade() -> None:
     sa.Column('status', sa.Enum('connected', 'reauth_required', 'error', 'disconnected', name='connectionstatus', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('credential_ref', sa.String(length=512), nullable=True),
     sa.Column('scopes', sa.JSON(), nullable=False),
-    sa.Column('connected_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('last_synced_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('connected_at', UtcDateTime(), nullable=True),
+    sa.Column('last_synced_at', UtcDateTime(), nullable=True),
     sa.Column('auth_archetype', sa.Enum('oauth_redirect', 'api_key', 'credentials', 'file_upload', name='autharchetype', native_enum=False, create_constraint=True, length=64), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_connection_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['source_descriptor_id'], ['source_descriptor.source_descriptor_id'], name=op.f('fk_connection_source_descriptor_id_source_descriptor')),
     sa.PrimaryKeyConstraint('connection_id', name=op.f('pk_connection')),
@@ -212,8 +213,8 @@ def upgrade() -> None:
     sa.Column('spo2_lowest_pct', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('sleep_score', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('sleep_duration_s', sa.Integer(), nullable=True),
-    sa.Column('sleep_start', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('sleep_end', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('sleep_start', UtcDateTime(), nullable=True),
+    sa.Column('sleep_end', UtcDateTime(), nullable=True),
     sa.Column('sleep_deep_s', sa.Integer(), nullable=True),
     sa.Column('sleep_light_s', sa.Integer(), nullable=True),
     sa.Column('sleep_rem_s', sa.Integer(), nullable=True),
@@ -244,8 +245,8 @@ def upgrade() -> None:
     sa.Column('endurance_score', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('readiness_external', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('coverage', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_daily_wellness_athlete_id_athlete')),
     sa.PrimaryKeyConstraint('daily_wellness_id', name=op.f('pk_daily_wellness')),
     sa.UniqueConstraint('athlete_id', 'local_date', name='uq_daily_wellness_athlete_local_date')
@@ -262,8 +263,8 @@ def upgrade() -> None:
     sa.Column('hour_local', sa.SmallInteger(), nullable=False),
     sa.Column('channels', sa.JSON(), nullable=False),
     sa.Column('status', sa.Enum('active', 'paused', 'cancelled', name='digeststatus', native_enum=False, create_constraint=True, length=64), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_digest_subscription_athlete_id_athlete')),
     sa.PrimaryKeyConstraint('subscription_id', name=op.f('pk_digest_subscription'))
     )
@@ -276,7 +277,7 @@ def upgrade() -> None:
     sa.Column('athlete_id', sa.Uuid(), nullable=False),
     sa.Column('signature_type', sa.String(length=64), nullable=False),
     sa.Column('effective_date', sa.Date(), nullable=False),
-    sa.Column('effective_to', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('effective_to', UtcDateTime(), nullable=True),
     sa.Column('cp_w', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('w_prime_j', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('ftp_w', sa.Numeric(precision=18, scale=6), nullable=True),
@@ -286,8 +287,8 @@ def upgrade() -> None:
     sa.Column('vo2max', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('origin', sa.Enum('measured', 'modeled', 'user_entered', 'source_provided', name='signatureorigin', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('fit_quality', sa.JSON(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_fitness_signature_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['signature_type'], ['sport.sport_code'], name=op.f('fk_fitness_signature_signature_type_sport')),
     sa.PrimaryKeyConstraint('signature_id', name=op.f('pk_fitness_signature')),
@@ -309,8 +310,8 @@ def upgrade() -> None:
     sa.Column('provisional', sa.Boolean(), nullable=False),
     sa.Column('engine_version', sa.String(length=64), nullable=True),
     sa.Column('lineage', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_fitness_state_daily_athlete_id_athlete')),
     sa.PrimaryKeyConstraint('fitness_state_daily_id', name=op.f('pk_fitness_state_daily')),
     sa.UniqueConstraint('athlete_id', 'local_date', 'load_model', name='uq_fitness_state_daily_athlete_date_model')
@@ -332,8 +333,8 @@ def upgrade() -> None:
     sa.Column('status', sa.Enum('active', 'achieved', 'missed', 'abandoned', name='goalstatus', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('priority', sa.SmallInteger(), nullable=True),
     sa.Column('notes', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_goal_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['sport'], ['sport.sport_code'], name=op.f('fk_goal_sport_sport')),
     sa.PrimaryKeyConstraint('goal_id', name=op.f('pk_goal'))
@@ -350,8 +351,8 @@ def upgrade() -> None:
     sa.Column('address_ref', sa.String(length=512), nullable=True),
     sa.Column('verified', sa.Boolean(), nullable=False),
     sa.Column('enabled', sa.Boolean(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_notification_route_athlete_id_athlete')),
     sa.PrimaryKeyConstraint('route_id', name=op.f('pk_notification_route')),
     sa.UniqueConstraint('athlete_id', 'channel', name='uq_notification_route_athlete_channel')
@@ -365,11 +366,11 @@ def upgrade() -> None:
     sa.Column('zone_kind', sa.Enum('power', 'hr', name='zonekind', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('sport', sa.String(length=64), nullable=True),
     sa.Column('effective_date', sa.Date(), nullable=False),
-    sa.Column('effective_to', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('effective_to', UtcDateTime(), nullable=True),
     sa.Column('basis', sa.Enum('absolute', 'relative', name='zonebasis', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('boundaries', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_training_zone_set_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['sport'], ['sport.sport_code'], name=op.f('fk_training_zone_set_sport_sport')),
     sa.PrimaryKeyConstraint('zone_set_id', name=op.f('pk_training_zone_set')),
@@ -387,9 +388,9 @@ def upgrade() -> None:
     sa.Column('recording_id', sa.SmallInteger(), nullable=False),
     sa.Column('sample_basis', sa.Enum('time', 'distance', 'event', name='samplebasis', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('sample_count', sa.Integer(), nullable=True),
-    sa.Column('t0', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('t0', UtcDateTime(), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_wellness_stream_set_athlete_id_athlete')),
     sa.PrimaryKeyConstraint('wellness_stream_set_id', name=op.f('pk_wellness_stream_set')),
     sa.UniqueConstraint('athlete_id', 'local_date', 'recording_id', name='uq_wellness_stream_set_athlete_date_recording')
@@ -404,8 +405,8 @@ def upgrade() -> None:
     sa.Column('name', sa.String(length=256), nullable=False),
     sa.Column('sport', sa.String(length=64), nullable=True),
     sa.Column('steps', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_workout_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['sport'], ['sport.sport_code'], name=op.f('fk_workout_sport_sport')),
     sa.PrimaryKeyConstraint('workout_id', name=op.f('pk_workout'))
@@ -423,9 +424,9 @@ def upgrade() -> None:
     sa.Column('byte_size', sa.Integer(), nullable=True),
     sa.Column('content_hash', sa.String(length=128), nullable=False),
     sa.Column('source_descriptor_id', sa.Uuid(), nullable=False),
-    sa.Column('fetched_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('fetched_at', UtcDateTime(), nullable=True),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['activity_id'], ['activity.activity_id'], name=op.f('fk_activity_file_activity_id_activity')),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_activity_file_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['source_descriptor_id'], ['source_descriptor.source_descriptor_id'], name=op.f('fk_activity_file_source_descriptor_id_source_descriptor')),
@@ -452,8 +453,8 @@ def upgrade() -> None:
     sa.Column('avg_speed_mps', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('elevation_gain_m', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('coverage', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['activity_id'], ['activity.activity_id'], name=op.f('fk_activity_lap_activity_id_activity')),
     sa.PrimaryKeyConstraint('activity_lap_id', name=op.f('pk_activity_lap')),
     sa.UniqueConstraint('activity_id', 'lap_index', name='uq_activity_lap_activity_lap_index')
@@ -467,9 +468,9 @@ def upgrade() -> None:
     sa.Column('sample_basis', sa.Enum('time', 'distance', 'event', name='samplebasis', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('sample_rate_hz', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('sample_count', sa.Integer(), nullable=True),
-    sa.Column('t0', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('t0', UtcDateTime(), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['activity_id'], ['activity.activity_id'], name=op.f('fk_activity_stream_set_activity_id_activity')),
     sa.PrimaryKeyConstraint('stream_set_id', name=op.f('pk_activity_stream_set')),
     sa.UniqueConstraint('activity_id', name='uq_activity_stream_set_activity')
@@ -489,10 +490,10 @@ def upgrade() -> None:
     sa.Column('efficiency_factor', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('work_above_cp_j', sa.Numeric(precision=18, scale=6), nullable=True),
     sa.Column('engine_version', sa.String(length=64), nullable=True),
-    sa.Column('computed_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('computed_at', UtcDateTime(), nullable=True),
     sa.Column('lineage', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['activity_id'], ['activity.activity_id'], name=op.f('fk_derived_activity_metric_activity_id_activity')),
     sa.PrimaryKeyConstraint('derived_activity_metric_id', name=op.f('pk_derived_activity_metric')),
     sa.UniqueConstraint('activity_id', 'load_model', name='uq_derived_activity_metric_activity_model')
@@ -509,8 +510,8 @@ def upgrade() -> None:
     sa.Column('end_date', sa.Date(), nullable=False),
     sa.Column('status', sa.Enum('active', 'completed', 'superseded', name='planstatus', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('lineage', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_plan_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['goal_id'], ['goal.goal_id'], name=op.f('fk_plan_goal_id_goal')),
     sa.PrimaryKeyConstraint('plan_id', name=op.f('pk_plan'))
@@ -526,8 +527,8 @@ def upgrade() -> None:
     sa.Column('connection_id', sa.Uuid(), nullable=True),
     sa.Column('source_native_id', sa.String(length=256), nullable=False),
     sa.Column('gbo_type', sa.Enum('activity', 'activity_lap', 'activity_file', 'stream_channel', 'daily_wellness', 'wellness_stream_set', 'fitness_signature', name='gbotype', native_enum=False, create_constraint=True, length=64), nullable=False),
-    sa.Column('observed_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('fetched_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('observed_at', UtcDateTime(), nullable=True),
+    sa.Column('fetched_at', UtcDateTime(), nullable=True),
     sa.Column('content_hash', sa.String(length=128), nullable=False),
     sa.Column('adapter_version', sa.String(length=64), nullable=True),
     sa.Column('mapping_version', sa.String(length=64), nullable=True),
@@ -545,8 +546,8 @@ def upgrade() -> None:
     sa.Column('resolved_wellness_stream_set_id', sa.Uuid(), nullable=True),
     sa.Column('resolved_stream_channel_id', sa.Uuid(), nullable=True),
     sa.Column('resolved_signature_id', sa.Uuid(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_source_candidate_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['connection_id'], ['connection.connection_id'], name=op.f('fk_source_candidate_connection_id_connection')),
     sa.ForeignKeyConstraint(['source_descriptor_id'], ['source_descriptor.source_descriptor_id'], name=op.f('fk_source_candidate_source_descriptor_id_source_descriptor')),
@@ -573,8 +574,8 @@ def upgrade() -> None:
     sa.Column('workout_id', sa.Uuid(), nullable=True),
     sa.Column('intent', sa.Enum('easy', 'moderate', 'hard', 'threshold', 'vo2', 'sprint', 'race', 'rest', 'recovery', name='plandayintent', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('rationale', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_plan_day_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['plan_id'], ['plan.plan_id'], name=op.f('fk_plan_day_plan_id_plan')),
     sa.ForeignKeyConstraint(['workout_id'], ['workout.workout_id'], name=op.f('fk_plan_day_workout_id_workout')),
@@ -598,8 +599,8 @@ def upgrade() -> None:
     sa.Column('origin', sa.Enum('athlete', 'agent', name='adjustmentorigin', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('status', sa.Enum('proposed', 'applied', 'rejected', 'reverted', name='adjustmentstatus', native_enum=False, create_constraint=True, length=64), nullable=False),
     sa.Column('reason', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('created_at', UtcDateTime(), nullable=False),
+    sa.Column('updated_at', UtcDateTime(), nullable=False),
     sa.ForeignKeyConstraint(['athlete_id'], ['athlete.athlete_id'], name=op.f('fk_schedule_adjustment_athlete_id_athlete')),
     sa.ForeignKeyConstraint(['plan_id'], ['plan.plan_id'], name=op.f('fk_schedule_adjustment_plan_id_plan')),
     sa.ForeignKeyConstraint(['replacement_workout_id'], ['workout.workout_id'], name=op.f('fk_schedule_adjustment_replacement_workout_id_workout')),
@@ -627,6 +628,31 @@ def _seed(op: object) -> None:  # noqa: ANN001 (alembic op proxy)
     """
     now = utcnow()
 
+    # The single OSS owner athlete (GBO-R13 — exactly one row). Seeded with the fixed,
+    # deterministic id the auth layer signs as every token subject (AUTH-R3/R18), so the
+    # athlete row, the token ``sub``, and every canonical FK agree out of the box — a
+    # fresh deploy can sign in and serve data with no out-of-band provisioning step.
+    athlete = sa.table(
+        "athlete",
+        sa.column("athlete_id", sa.Uuid()),
+        sa.column("sex", sa.String()),
+        sa.column("reference_timezone", sa.String()),
+        sa.column("created_at", UtcDateTime()),
+        sa.column("updated_at", UtcDateTime()),
+    )
+    op.bulk_insert(  # type: ignore[attr-defined]
+        athlete,
+        [
+            {
+                "athlete_id": OWNER_ATHLETE_ID,
+                "sex": "unknown",
+                "reference_timezone": "UTC",
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+    )
+
     # Built-in file importer (LIN-R1.1): EXACTLY ONE descriptor for all ad-hoc uploads.
     source_descriptor = sa.table(
         "source_descriptor",
@@ -636,8 +662,8 @@ def _seed(op: object) -> None:  # noqa: ANN001 (alembic op proxy)
         sa.column("kind", sa.String()),
         sa.column("trust_profile", sa.JSON()),
         sa.column("default_fidelity", sa.String()),
-        sa.column("created_at", sa.DateTime(timezone=True)),
-        sa.column("updated_at", sa.DateTime(timezone=True)),
+        sa.column("created_at", UtcDateTime()),
+        sa.column("updated_at", UtcDateTime()),
     )
     op.bulk_insert(  # type: ignore[attr-defined]
         source_descriptor,
@@ -661,8 +687,8 @@ def _seed(op: object) -> None:  # noqa: ANN001 (alembic op proxy)
         sa.column("sport_code", sa.String()),
         sa.column("display_name", sa.String()),
         sa.column("has_mechanical_power", sa.Boolean()),
-        sa.column("created_at", sa.DateTime(timezone=True)),
-        sa.column("updated_at", sa.DateTime(timezone=True)),
+        sa.column("created_at", UtcDateTime()),
+        sa.column("updated_at", UtcDateTime()),
     )
     op.bulk_insert(  # type: ignore[attr-defined]
         sport,
@@ -684,8 +710,8 @@ def _seed(op: object) -> None:  # noqa: ANN001 (alembic op proxy)
         sa.column("sub_sport_code", sa.String()),
         sa.column("sport_code", sa.String()),
         sa.column("display_name", sa.String()),
-        sa.column("created_at", sa.DateTime(timezone=True)),
-        sa.column("updated_at", sa.DateTime(timezone=True)),
+        sa.column("created_at", UtcDateTime()),
+        sa.column("updated_at", UtcDateTime()),
     )
     op.bulk_insert(  # type: ignore[attr-defined]
         sub_sport,
