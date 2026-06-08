@@ -14,6 +14,7 @@ DISABLED (no external DTD/entity fetch) — untrusted upload bytes never trigger
 from __future__ import annotations
 
 import datetime as _dt
+import math
 from typing import Any
 
 from lxml import etree
@@ -170,12 +171,18 @@ def _text(element: Any) -> str | None:
 
 
 def _as_float(value: Any) -> float | None:
+    """Parse a finite float, else ``None`` — a NaN/inf token is a typed gap (MAP-R5).
+
+    Non-finite values would make the canonical payload invalid JSON (rejected by strict
+    parsers / Postgres JSONB) and non-deterministic (``nan != nan`` breaks re-decode).
+    """
     if value is None:
         return None
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    return result if math.isfinite(result) else None
 
 
 def _as_dt(value: Any) -> _dt.datetime | None:

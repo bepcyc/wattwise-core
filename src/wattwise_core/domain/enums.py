@@ -70,6 +70,7 @@ class ActivityFileFormat(StrEnum):
     FIT = "fit"
     GPX = "gpx"
     TCX = "tcx"
+    PWX = "pwx"
     JSON = "json"
     OTHER = "other"
 

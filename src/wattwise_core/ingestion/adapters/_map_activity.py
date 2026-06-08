@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 from collections.abc import Mapping
 from typing import Any, Final
 
@@ -67,6 +68,7 @@ _SPORT_CODES: Final[dict[str, str]] = {
     "ebiking": "cycling",
     "virtualride": "cycling",
     "ride": "cycling",
+    "bike": "cycling",
     "running": "running",
     "run": "running",
     "treadmill": "running",
@@ -109,16 +111,15 @@ def build_streams(asbo: ActivityAsbo) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     records = asbo.records
     for attr, channel in _SCALAR_CHANNELS:
-        values = [getattr(rec, attr) for rec in records]
+        values = [_finite(getattr(rec, attr)) for rec in records]
         if any(v is not None for v in values):
             out[channel.value] = _channel(values, SampleBasis.TIME)
-    latlng = [list(rec.latlng) if rec.latlng is not None else None for rec in records]
+    latlng = [_finite_latlng(rec.latlng) for rec in records]
     if any(v is not None for v in latlng):
         out[StreamChannelName.LATLNG.value] = _channel(latlng, SampleBasis.TIME)
-    if asbo.rr_intervals_ms:
-        out[StreamChannelName.RR_INTERVALS_MS.value] = _channel(
-            list(asbo.rr_intervals_ms), SampleBasis.EVENT
-        )
+    rr = [_finite(v) for v in asbo.rr_intervals_ms]
+    if any(v is not None for v in rr):
+        out[StreamChannelName.RR_INTERVALS_MS.value] = _channel(rr, SampleBasis.EVENT)
     return out
 
 
@@ -140,13 +141,18 @@ def build_laps(asbo: ActivityAsbo, session_start: _dt.datetime) -> list[dict[str
             {
                 "lap_index": lap.lap_index,
                 "start_offset_s": None if offset is None else int(offset.total_seconds()),
-                "duration_s": None if lap.duration_s is None else int(lap.duration_s),
-                "distance_m": lap.distance_m,
-                "avg_power_w": lap.avg_power_w,
-                "max_power_w": lap.max_power_w,
-                "avg_hr_bpm": lap.avg_hr_bpm,
-                "max_hr_bpm": lap.max_hr_bpm,
-                "avg_cadence_rpm": lap.avg_cadence_rpm,
+                # Route every lap scalar through the finite sink (MAP-R5): a non-finite
+                # lap aggregate (e.g. a corrupt-FIT recovery field that bypasses the FIT
+                # decoder's lenient float parse) must become a typed gap here too, not leak
+                # into the payload as NaN/inf (invalid JSONB, non-deterministic hash) — and
+                # ``int(inf/nan)`` must not raise an uncaught OverflowError in the pure map.
+                "duration_s": _int(lap.duration_s),
+                "distance_m": _num(lap.distance_m),
+                "avg_power_w": _num(lap.avg_power_w),
+                "max_power_w": _num(lap.max_power_w),
+                "avg_hr_bpm": _num(lap.avg_hr_bpm),
+                "max_hr_bpm": _num(lap.max_hr_bpm),
+                "avg_cadence_rpm": _num(lap.avg_cadence_rpm),
             }
         )
     return laps
@@ -236,11 +242,37 @@ def stable_hash(payload: Mapping[str, Any]) -> str:
 
 
 def _num(value: Any) -> float | None:
+    """Coerce to a FINITE float, else ``None`` (the canonical session-scalar sink, MAP-R5).
+
+    The one place every adapter's session scalars (avg_power, total_work, ...) become
+    canonical payload numbers, so the non-finite guard lives here: a NaN/inf — from a raw
+    FIT field, an Intervals.icu value, or a malformed XML token — becomes a typed gap rather
+    than a value that makes the payload invalid JSON (Postgres JSONB rejects NaN/Infinity)
+    and non-deterministic (``nan != nan`` breaks the byte-identical re-decode, GBO-AC-1).
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int | float):
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     return None
+
+
+def _finite(value: Any) -> Any:
+    """Drop a non-finite float to ``None``; pass everything else through (MAP-R5)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _finite_latlng(latlng: tuple[float, float] | None) -> list[float] | None:
+    """A ``[lat, lon]`` pair only when BOTH coordinates are finite, else ``None`` (MAP-R5)."""
+    if latlng is None:
+        return None
+    lat, lon = latlng
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return None
+    return [lat, lon]
 
 
 def _int(value: Any) -> int | None:

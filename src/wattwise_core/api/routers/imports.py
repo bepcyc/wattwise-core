@@ -43,7 +43,7 @@ router = APIRouter(prefix="/v1/imports", tags=["imports"], dependencies=[RateLim
 
 #: The activity-file extensions the OSS importer accepts (API-R33). A double
 #: extension (``.fit.gz``) is matched as a whole suffix, not just the last segment.
-ACCEPTED_EXTENSIONS: Final[tuple[str, ...]] = (".fit", ".fit.gz", ".gpx", ".tcx")
+ACCEPTED_EXTENSIONS: Final[tuple[str, ...]] = (".fit", ".fit.gz", ".gpx", ".tcx", ".pwx")
 
 #: Read chunk size while streaming the upload to enforce the cap (LIMIT-R5).
 _CHUNK_BYTES: Final = 1 << 20  # 1 MiB

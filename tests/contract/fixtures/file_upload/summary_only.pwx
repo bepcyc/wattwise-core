@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" version="1.0" creator="WattWise-test">
+  <workout>
+    <sportType>Bike</sportType>
+    <time>2024-03-04T08:00:00Z</time>
+    <summarydata>
+      <beginning>0</beginning>
+      <duration>3600</duration>
+      <work>900</work>
+      <dist>30000</dist>
+      <hr max="170" avg="150"/>
+      <pwr max="320" avg="250"/>
+      <cad max="100" avg="88"/>
+      <spd max="12.0" avg="8.3"/>
+    </summarydata>
+  </workout>
+</pwx>

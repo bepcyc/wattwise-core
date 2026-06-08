@@ -40,6 +40,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from wattwise_core.api import connection_catalog
 from wattwise_core.api.auth import Principal, Scope, authenticate
 from wattwise_core.api.deps import get_db, get_settings
 from wattwise_core.api.errors import install_error_handlers
@@ -305,7 +306,8 @@ def test_initiate_file_upload_returns_accepted_formats(harness: _Harness) -> Non
     assert resp.status_code == 200
     body = resp.json()
     assert body["kind"] == "file_upload"
-    assert ".fit" in body["accepted_formats"]
+    # Pin every advertised format so dropping one (e.g. a regression removing .pwx) fails here.
+    assert {".fit", ".fit.gz", ".gpx", ".tcx", ".pwx"} <= set(body["accepted_formats"])
 
 
 def test_initiate_unknown_source_is_404(harness: _Harness) -> None:
@@ -517,6 +519,26 @@ def test_import_accepts_double_extension_fit_gz(harness: _Harness) -> None:
         files={"file": ("ride.fit.gz", _FIT_BYTES, "application/gzip")},
     )
     assert resp.status_code == 202
+
+
+def test_import_pwx_extension_is_accepted_202(harness: _Harness) -> None:
+    """A .pwx upload passes the extension gate -> 202 (pins imports.ACCEPTED_EXTENSIONS, API-R33).
+
+    The advertised-format list and the actual upload gate are duplicated constants; this
+    pins the gate side so dropping .pwx from imports.ACCEPTED_EXTENSIONS can no longer slip a
+    real .pwx upload into a silent 415 while initiate still advertises it.
+    """
+    resp = harness.client.post(
+        "/v1/imports",
+        headers=_auth(),
+        files={"file": ("ride.pwx", b"<pwx>data</pwx>", "application/xml")},
+    )
+    assert resp.status_code == 202
+
+
+def test_accepted_format_lists_agree() -> None:
+    """The upload gate and advertised-format list MUST stay in sync (no advertise/accept gap)."""
+    assert set(imports_router.ACCEPTED_EXTENSIONS) == set(connection_catalog.ACCEPTED_FILE_FORMATS)
 
 
 # --------------------------------------------------------------------------- sync

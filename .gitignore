@@ -51,5 +51,8 @@ local.db
 /ARCHITECTURE_DIAGRAM_SIMPLIFIED.md
 /ARCHITECTURE_DIAGRAM_SIMPLIFIED_4DUMMIES.md
 
+# local-only development progress tracker (timestamped; never published)
+/PROGRESS.md
+
 # OS
 .DS_Store
