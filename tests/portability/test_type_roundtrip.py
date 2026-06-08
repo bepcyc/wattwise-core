@@ -10,7 +10,7 @@ only a DSN difference — the "trap field" in the risk register. This module ass
 mechanically: it builds one throwaway ORM model spelling each portable primitive from
 :mod:`wattwise_core.persistence.types`, and uses hypothesis to generate arbitrary values, persist
 them, and read them back, asserting equality. SQLite always runs; PostgreSQL and MariaDB are
-parametrized from the ``WATTWISE_TEST_PG_DSN`` / ``WATTWISE_TEST_MARIADB_DSN`` environment
+parametrized from the ``WATTWISE_PG_DSN`` / ``WATTWISE_MARIADB_DSN`` environment
 variables and skipped when those are unset (so the offline tier stays credential-free, TIER-R1).
 """
 
@@ -107,20 +107,20 @@ def _backends() -> list[ParameterSet]:
     cases: list[ParameterSet] = [
         pytest.param("sqlite+aiosqlite:///:memory:", id="sqlite"),
     ]
-    pg = os.environ.get("WATTWISE_TEST_PG_DSN")
+    pg = os.environ.get("WATTWISE_PG_DSN")
     cases.append(
         pytest.param(
             pg,
             id="postgresql",
-            marks=pytest.mark.skipif(not pg, reason="WATTWISE_TEST_PG_DSN unset"),
+            marks=pytest.mark.skipif(not pg, reason="WATTWISE_PG_DSN unset"),
         )
     )
-    maria = os.environ.get("WATTWISE_TEST_MARIADB_DSN")
+    maria = os.environ.get("WATTWISE_MARIADB_DSN")
     cases.append(
         pytest.param(
             maria,
             id="mariadb",
-            marks=pytest.mark.skipif(not maria, reason="WATTWISE_TEST_MARIADB_DSN unset"),
+            marks=pytest.mark.skipif(not maria, reason="WATTWISE_MARIADB_DSN unset"),
         )
     )
     return cases

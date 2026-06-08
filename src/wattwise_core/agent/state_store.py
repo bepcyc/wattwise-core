@@ -46,7 +46,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
 
 from wattwise_core.persistence.base import NAMING_CONVENTION
-from wattwise_core.persistence.types import utcnow, uuid7
+from wattwise_core.persistence.types import UtcDateTime, utcnow, uuid7
 
 # Logical agent-state category name (ARCH-R13). Used as the table-name prefix so the
 # agent-state tables are unmistakable and never collide with canonical tables, while
@@ -87,7 +87,9 @@ class AgentThread(AgentStateBase):
     thread_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     athlete_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
     conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(default=utcnow, nullable=False)
+    created_at: Mapped[_dt.datetime] = mapped_column(
+        UtcDateTime(), default=utcnow, nullable=False
+    )
 
 
 class AgentCheckpoint(AgentStateBase):
@@ -133,7 +135,9 @@ class AgentCheckpoint(AgentStateBase):
     checkpoint_type: Mapped[str] = mapped_column(String(64), nullable=False)
     checkpoint_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     metadata_blob: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(default=utcnow, nullable=False)
+    created_at: Mapped[_dt.datetime] = mapped_column(
+        UtcDateTime(), default=utcnow, nullable=False
+    )
 
 
 class AgentWrite(AgentStateBase):
@@ -174,7 +178,9 @@ class AgentWrite(AgentStateBase):
     channel: Mapped[str] = mapped_column(String(255), nullable=False)
     value_type: Mapped[str] = mapped_column(String(64), nullable=False)
     value_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(default=utcnow, nullable=False)
+    created_at: Mapped[_dt.datetime] = mapped_column(
+        UtcDateTime(), default=utcnow, nullable=False
+    )
 
 
 __all__ = [
