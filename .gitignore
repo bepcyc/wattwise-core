@@ -54,5 +54,12 @@ local.db
 # local-only development progress tracker (timestamped; never published)
 /PROGRESS.md
 
+# local-only session handoff (never published)
+/HANDOFF.md
+
+# local-only skill-generated handoffs (session-handoff skill; carry internal
+# program structure + session notes — never published)
+/.claude/
+
 # OS
 .DS_Store
