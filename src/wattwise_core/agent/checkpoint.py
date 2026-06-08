@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
+    WRITES_IDX_MAP,
     BaseCheckpointSaver,
     ChannelVersions,
     Checkpoint,
@@ -41,7 +42,7 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
-from sqlalchemy import select
+from sqlalchemy import Table, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,6 +51,8 @@ from wattwise_core.agent.state_store import (
     AgentThread,
     AgentWrite,
 )
+from wattwise_core.persistence.types import uuid7
+from wattwise_core.persistence.upsert import upsert
 
 # Engine-side checkpoint schema version (CKPT-R7). Bump ONLY on a breaking change to the
 # persisted state shape; a stored checkpoint with a different version fails closed on
@@ -138,11 +141,16 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
         """Get-or-create the durable thread for the saver's bound (athlete, conversation).
 
         Concurrency-safe (CKPT-R1): a single graph run makes the langgraph runtime call
-        ``aput``/``aput_writes`` on SEPARATE sessions that can race to create the thread —
-        both ``SELECT`` miss, both ``INSERT``, and the loser hits the
-        ``(athlete_id, conversation_id)`` unique constraint. The losing insert is caught and
-        the now-committed thread re-resolved (still athlete-scoped, CKPT-R3), so the
-        get-or-create is idempotent and never fails a run on the benign race.
+        ``aput``/``aput_writes`` on SEPARATE sessions/connections that race to create the
+        thread — both ``SELECT`` miss, both ``INSERT``, and the loser hits the
+        ``(athlete_id, conversation_id)`` unique constraint. The loser must NOT re-resolve in
+        its own rolled-back transaction (the winner's row is not yet visible to it, so the
+        re-select still misses and the run dies on the benign race). Instead, on
+        ``IntegrityError`` we roll the poisoned transaction back and re-resolve through a
+        FRESH session (a new connection that can SEE the committed row). The re-resolve still
+        goes through ``_resolve_thread``, so a cross-identity row is REFUSED, never returned
+        (CKPT-R3). The caller only needs the row to EXIST (it discards the return value to let
+        the checkpoint/write FK resolve), so returning a detached probe object is fine.
         """
         thread = await self._resolve_thread(session, thread_id)
         if thread is not None:
@@ -157,7 +165,8 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
             await session.flush()
         except IntegrityError:
             await session.rollback()
-            existing = await self._resolve_thread(session, thread_id)
+            async with self._sessions() as probe:
+                existing = await self._resolve_thread(probe, thread_id)
             if existing is None:  # the conflict was not the benign concurrent-create race
                 raise
             return existing
@@ -353,25 +362,41 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
         task_id: str,
         task_path: str = "",
     ) -> None:
-        """Persist a node's pending intermediate writes, replayed on resume (CKPT-R2)."""
+        """Persist a node's pending intermediate writes, replayed on resume (CKPT-R2).
+
+        Special langgraph channels (``__resume__``/``__interrupt__``/``__error__``/
+        ``__scheduled__``) are keyed by their reserved negative ``idx`` from
+        ``WRITES_IDX_MAP`` — exactly as langgraph's own reference saver does — so a
+        ``__resume__`` write (idx -4, carrying the human HITL decision) can NEVER collide at
+        positional idx 0 with an ordinary branch write and be silently dropped. The natural
+        key ``(thread, ns, checkpoint, task, idx)`` is upserted with DO UPDATE (last-write-
+        wins) through the sanctioned dialect seam, so a re-delivered write of the SAME channel
+        overwrites rather than being ignored (CKPT-R2; portable across SQLite/PG/MariaDB).
+        """
         thread_id = _config_str(config, "thread_id")
         ns = _config_str(config, "checkpoint_ns")
         checkpoint_id = _config_str(config, "checkpoint_id")
         async with self._sessions() as session:
             await self._ensure_thread(session, thread_id)
             for idx, (channel, value) in enumerate(writes):
+                write_idx = WRITES_IDX_MAP.get(channel, idx)
                 value_type, value_blob = self.serde.dumps_typed(value)
-                session.add(
-                    AgentWrite(
-                        thread_id=thread_id,
-                        checkpoint_ns=ns,
-                        checkpoint_id=checkpoint_id,
-                        task_id=task_id,
-                        idx=idx,
-                        channel=channel,
-                        value_type=value_type,
-                        value_blob=value_blob,
-                    )
+                await upsert(
+                    session,
+                    cast(Table, AgentWrite.__table__),  # ORM table is a Table at runtime
+                    {
+                        "id": uuid7(),
+                        "thread_id": thread_id,
+                        "checkpoint_ns": ns,
+                        "checkpoint_id": checkpoint_id,
+                        "task_id": task_id,
+                        "idx": write_idx,
+                        "channel": channel,
+                        "value_type": value_type,
+                        "value_blob": value_blob,
+                    },
+                    conflict_keys=["thread_id", "checkpoint_ns", "checkpoint_id", "task_id", "idx"],
+                    update_columns=["channel", "value_type", "value_blob"],
                 )
             await session.commit()
 
