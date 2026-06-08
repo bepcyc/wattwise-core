@@ -22,7 +22,7 @@ from sqlalchemy.engine import Connection
 from wattwise_core.agent import memory as _agent_memory  # noqa: F401 (registers MemoryItem)
 from wattwise_core.agent.state_store import AgentStateBase
 from wattwise_core.config import get_settings
-from wattwise_core.persistence.engine import _normalize_dsn, create_engine_from_settings
+from wattwise_core.persistence.engine import create_engine_from_settings, normalize_dsn
 from wattwise_core.persistence.models import Base
 
 # Alembic Config object (reads alembic.ini).
@@ -43,7 +43,7 @@ def _database_url() -> str:
     settings = get_settings()
     if settings.database_dsn is None:  # pragma: no cover - config layer enforces this
         raise RuntimeError("fail-closed: WATTWISE_DATABASE_DSN is required to run migrations")
-    return _normalize_dsn(settings.database_dsn.get_secret_value())
+    return normalize_dsn(settings.database_dsn.get_secret_value())
 
 
 def run_migrations_offline() -> None:

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import (
 from wattwise_core.config import Settings, get_settings
 
 
-def _enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
+def enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
     """Enforce foreign keys on SQLite (GBO-R8b, GBO-AC-7, TEN-R1).
 
     SQLite defaults FK enforcement OFF per connection, so an orphan personal row that
@@ -37,7 +37,7 @@ def _enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
         cursor.close()
 
 
-def _normalize_dsn(dsn: str) -> str:
+def normalize_dsn(dsn: str) -> str:
     """Coerce common driverless DSNs onto the async drivers wattwise-core ships with."""
     prefixes = {
         "sqlite://": "sqlite+aiosqlite://",
@@ -63,7 +63,7 @@ def create_engine_from_settings(settings: Settings | None = None) -> AsyncEngine
     settings = settings or get_settings()
     if settings.database_dsn is None:
         raise RuntimeError("fail-closed: WATTWISE_DATABASE_DSN is required to create an engine")
-    dsn = _normalize_dsn(settings.database_dsn.get_secret_value())
+    dsn = normalize_dsn(settings.database_dsn.get_secret_value())
     is_sqlite = dsn.startswith("sqlite")
     engine = create_async_engine(
         dsn,
@@ -74,7 +74,7 @@ def create_engine_from_settings(settings: Settings | None = None) -> AsyncEngine
         pool_pre_ping=not is_sqlite,
     )
     if is_sqlite:
-        _enable_sqlite_foreign_keys(engine)
+        enable_sqlite_foreign_keys(engine)
     return engine
 
 
@@ -113,4 +113,6 @@ __all__ = [
     "Database",
     "create_engine_from_settings",
     "create_session_factory",
+    "enable_sqlite_foreign_keys",
+    "normalize_dsn",
 ]
