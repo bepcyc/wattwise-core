@@ -14,6 +14,7 @@ canonical store the ingest write path produces:
 from __future__ import annotations
 
 import datetime as _dt
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from wattwise_core.persistence.models import (
     ActivityFile,
     ActivityStreamSet,
     Athlete,
+    AthleteSourcePreference,
     Base,
     DailyWellness,
     SourceCandidate,
@@ -39,6 +41,7 @@ from wattwise_core.persistence.models import (
     Sport,
     StreamChannel,
 )
+from wattwise_core.persistence.models.athlete_preference import WHOLE_SOURCE_CHANNEL
 from wattwise_core.storage import LocalObjectStore, content_hash
 
 pytestmark = pytest.mark.integration
@@ -378,6 +381,99 @@ async def test_streams_resolved_per_channel_across_sources(session: AsyncSession
     assert "power_w" in by_name and "hr_bpm" in by_name
 
 
+# --------------------------------- CON-R4 wiring: configurable per-source trust precedence
+#
+# Effective trust tier is CONFIGURATION DATA layered on the adapter tier (PRV-R7/LIN-R1):
+# per-athlete override > descriptor trust_profile > adapter tier. With NO config the winner
+# is the adapter-tier winner (the prior behaviour); config is an explicit opt-in re-rank.
+
+
+async def _set_profile(
+    session: AsyncSession, descriptor_id: str, profile: dict[str, object]
+) -> None:
+    """Set a descriptor's declared per-channel trust_profile (LIN-R1 configuration data)."""
+    desc = await session.get(SourceDescriptor, uuid.UUID(descriptor_id))
+    assert desc is not None
+    desc.trust_profile = profile
+    await session.commit()
+
+
+async def _add_override(
+    session: AsyncSession, athlete_id: str, descriptor_id: str, channel: str, tier: Fidelity
+) -> None:
+    """Insert a per-athlete (source, channel) trust override row (PRV-R7)."""
+    session.add(
+        AthleteSourcePreference(
+            athlete_id=uuid.UUID(athlete_id),
+            source_descriptor_id=uuid.UUID(descriptor_id),
+            channel=channel,
+            trust_tier=tier,
+        )
+    )
+    await session.commit()
+
+
+async def _ingest_two_source_power(
+    session: AsyncSession, athlete_id: str, file_src: str, api_src: str
+) -> None:
+    """Two sources report the same ride; file_src=RAW_STREAM(200W), api_src=PLATFORM(320W)."""
+    ingest = IngestService(session)
+    await ingest.ingest(
+        athlete_id, file_src,
+        [_ride(native_id="file-1", watts=200.0, seconds=3600, tier=Fidelity.RAW_STREAM)],
+    )
+    await ingest.ingest(
+        athlete_id, api_src,
+        [_ride(native_id="api-1", watts=320.0, seconds=3600, tier=Fidelity.PLATFORM_COMPUTED)],
+    )
+    await session.commit()
+
+
+async def _power(session: AsyncSession) -> float:
+    act = (await session.execute(select(Activity))).scalars().one()
+    return float(act.avg_power_w)
+
+
+async def test_no_config_keeps_the_adapter_tier_winner_unchanged(session: AsyncSession) -> None:
+    """CONTROL: with NO config the higher adapter-tier source wins (prior behaviour, PRV-R6)."""
+    athlete_id, file_src, api_src = await _seed(session)
+    await _ingest_two_source_power(session, athlete_id, file_src, api_src)
+    # file_src is RAW_STREAM -> it wins by adapter tier; config is absent -> no re-rank.
+    assert await _power(session) == pytest.approx(200.0)
+
+
+async def test_descriptor_profile_reranks_the_winner(session: AsyncSession) -> None:
+    """A DESCRIPTOR trust_profile re-ranks the field winner vs the no-config baseline (LIN-R1)."""
+    athlete_id, file_src, api_src = await _seed(session)
+    # Declare file_src's avg_power_w as the LOWEST tier so the api_src value now outranks it.
+    await _set_profile(session, file_src, {"avg_power_w": Fidelity.SUMMARY_ONLY.value})
+    await _ingest_two_source_power(session, athlete_id, file_src, api_src)
+    # api_src (PLATFORM_COMPUTED, 320W) now beats the demoted file_src — flipped by config.
+    assert await _power(session) == pytest.approx(320.0)
+
+
+async def test_per_athlete_override_flips_the_winner(session: AsyncSession) -> None:
+    """A PER-ATHLETE override flips the field winner without any code change (PRV-R7)."""
+    athlete_id, file_src, api_src = await _seed(session)
+    # The athlete demotes file_src's power channel to the lowest tier, so the otherwise
+    # lower adapter-tier api_src value now outranks it — flipped per-athlete, no code change.
+    await _add_override(session, athlete_id, file_src, "avg_power_w", Fidelity.SUMMARY_ONLY)
+    await _ingest_two_source_power(session, athlete_id, file_src, api_src)
+    # The override demotes file_src below api_src -> api_src (320W) wins for this athlete.
+    assert await _power(session) == pytest.approx(320.0)
+
+
+async def test_per_athlete_override_beats_descriptor_profile(session: AsyncSession) -> None:
+    """The per-athlete override is consulted BEFORE the descriptor profile (PRV-R7 precedence)."""
+    athlete_id, file_src, api_src = await _seed(session)
+    # Descriptor says file_src power is RAW_STREAM (would win), but the athlete overrides it
+    # down to SUMMARY_ONLY -> the override wins the precedence, so api_src takes the field.
+    await _set_profile(session, file_src, {"avg_power_w": Fidelity.RAW_STREAM.value})
+    await _add_override(session, athlete_id, file_src, "avg_power_w", Fidelity.SUMMARY_ONLY)
+    await _ingest_two_source_power(session, athlete_id, file_src, api_src)
+    assert await _power(session) == pytest.approx(320.0)
+
+
 async def test_lower_trust_stream_never_overwrites_higher_trust(session: AsyncSession) -> None:
     """A later lower-trust power stream never clobbers the stored higher-trust one (ING-UPS-R5)."""
     athlete_id, file_src, api_src = await _seed(session)
@@ -400,3 +496,131 @@ async def test_lower_trust_stream_never_overwrites_higher_trust(session: AsyncSe
     ).scalars().one()
     # The higher-trust raw_stream power survives the lower-trust write.
     assert power.values == [200.0] * 5
+
+
+# ----------------------------------- D2: coverage fidelity badges the RESOLVED WINNER
+
+
+async def test_coverage_fidelity_badges_the_winner_not_first_scanned(
+    session: AsyncSession,
+) -> None:
+    """The scalar coverage ``fidelity`` is the WINNER's tier, not an arbitrary contributor (D2).
+
+    The LOSER (a lower-trust ``summary_only`` source) is ingested FIRST so it is the first
+    row in scan/insert order; the WINNER (a higher-trust ``raw_stream`` source) is ingested
+    second. The resolver has no ORDER BY, so badging ``contributors[0].trust_tier`` would
+    mislabel the canonical value ``summary_only`` (a PRV-R6 inversion on a client badge).
+    The fix badges the resolved winner's tier — here ``raw_stream``.
+    """
+    athlete_id, file_src, api_src = await _seed(session)
+    ingest = IngestService(session)
+    # LOSER first (lower trust), WINNER second (higher trust) — exercises the scan-order bug.
+    loser = _ride(native_id="lo-1", watts=180.0, seconds=3600, tier=Fidelity.SUMMARY_ONLY)
+    winner = _ride(
+        native_id="hi-1", watts=250.0, seconds=3600, tier=Fidelity.RAW_STREAM, hash_salt="hi"
+    )
+    await ingest.ingest(athlete_id, api_src, [loser])  # inserted FIRST -> first scanned
+    await ingest.ingest(athlete_id, file_src, [winner])
+    await session.commit()
+    act = (await session.execute(select(Activity))).scalars().one()
+    cov = act.coverage["avg_power_w"]
+    assert isinstance(cov, dict)
+    # The higher-trust raw_stream value won the field...
+    assert float(act.avg_power_w) == pytest.approx(250.0)
+    # ...and the coverage badge is the WINNER's tier, never the first-scanned loser's.
+    assert cov["fidelity"] == Fidelity.RAW_STREAM.value
+    assert cov["present"] is True
+
+
+# --------------------------------- SF-3: per-channel trust applies to STREAM channels too
+
+
+async def test_per_channel_stream_trust_profile_flips_stream_winner(
+    session: AsyncSession,
+) -> None:
+    """A per-channel STREAM trust_profile / override changes which source wins a stream (SF-3).
+
+    Both sources carry ONLY the ``power_w`` stream channel with DIFFERENT values. By adapter
+    tier the ``file_src`` (RAW_STREAM) would win the channel. A per-athlete override demotes
+    ``file_src``'s ``power_w`` to ``summary_only``, so the otherwise lower-tier ``api_src``
+    now wins the STREAM channel — proving per-channel effective trust threads into streams
+    (previously streams resolved under the whole-source ``"*"`` tier only, so the override
+    had NO effect on the stream).
+    """
+    athlete_id, file_src, api_src = await _seed(session)
+    # Demote file_src's power_w CHANNEL for this athlete below api_src's adapter tier.
+    await _add_override(session, athlete_id, file_src, "power_w", Fidelity.SUMMARY_ONLY)
+    ingest = IngestService(session)
+    hi = _ride_channels(native_id="hi", channels={"power_w": [200.0] * 5}, tier=Fidelity.RAW_STREAM)
+    lo = _ride_channels(
+        native_id="lo", channels={"power_w": [333.0] * 5}, tier=Fidelity.PLATFORM_COMPUTED
+    )
+    await ingest.ingest(athlete_id, file_src, [hi])
+    await ingest.ingest(athlete_id, api_src, [lo])
+    await session.commit()
+    ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
+    power = (
+        await session.execute(
+            select(StreamChannel).where(
+                StreamChannel.stream_set_id == ss.stream_set_id,
+                StreamChannel.channel == "power_w",
+            )
+        )
+    ).scalars().one()
+    # The override flips the STREAM winner: api_src (333) wins the channel for this athlete.
+    assert power.values == [333.0] * 5
+    cov = power.coverage
+    assert isinstance(cov, dict)
+    # The channel coverage badges the winning channel's effective tier (api_src adapter tier).
+    assert cov["fidelity"] == Fidelity.PLATFORM_COMPUTED.value
+    assert cov["present"] is True
+
+
+async def test_whole_source_override_keeps_sole_carrier_stream_channel(
+    session: AsyncSession,
+) -> None:
+    """A whole-source ``"*"`` demotion re-badges but NEVER drops a sole-carrier stream (PRV-R7).
+
+    Exactly ONE source physically carries the per-second ``power_w`` stream (``file_src``,
+    adapter tier ``RAW_STREAM``); the other source (``api_src``) carries a DIFFERENT channel
+    (``hr_bpm``) and so is the sole carrier of nothing on ``power_w``. A per-athlete override
+    keyed on the WHOLE source (:data:`WHOLE_SOURCE_CHANNEL` ``"*"``) demotes ``file_src`` to
+    ``summary_only`` — that demotion changes WHICH source would win a contested channel, but
+    here ``power_w`` is uncontested, so it must NOT delete the only real per-second data that
+    exists. The resolved activity must STILL carry the ``power_w`` channel with its verbatim
+    per-second values, while its coverage badge reflects the demoted ``summary_only`` tier (a
+    trust demotion re-ranks/re-badges; it never destroys data no other source provides).
+    """
+    athlete_id, file_src, api_src = await _seed(session)
+    # Whole-source "*" demotion of the SOLE power_w carrier to the lowest tier for this athlete.
+    await _add_override(session, athlete_id, file_src, WHOLE_SOURCE_CHANNEL, Fidelity.SUMMARY_ONLY)
+    ingest = IngestService(session)
+    # file_src is the ONLY source with a power_w stream (real per-second data, adapter RAW_STREAM);
+    # api_src carries only hr_bpm, so nothing else provides power_w.
+    carrier = _ride_channels(
+        native_id="carrier", channels={"power_w": [200.0] * 5}, tier=Fidelity.RAW_STREAM
+    )
+    other = _ride_channels(
+        native_id="other", channels={"hr_bpm": [140.0] * 5}, tier=Fidelity.PLATFORM_COMPUTED
+    )
+    await ingest.ingest(athlete_id, file_src, [carrier])
+    await ingest.ingest(athlete_id, api_src, [other])
+    await session.commit()
+    ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
+    chans = (
+        await session.execute(
+            select(StreamChannel).where(StreamChannel.stream_set_id == ss.stream_set_id)
+        )
+    ).scalars().all()
+    by_name = {c.channel.value: c for c in chans}
+    # The sole-carrier power_w channel is PRESERVED, not dropped by the whole-source demotion.
+    assert "power_w" in by_name, "whole-source demotion dropped the SOLE-carrier power_w stream"
+    power = by_name["power_w"]
+    # ...with its real per-second values intact (would fail if the channel were dropped/emptied).
+    assert power.values == [200.0] * 5
+    cov = power.coverage
+    assert isinstance(cov, dict)
+    assert cov["present"] is True
+    # ...and the badge reflects the demoted summary_only tier, NOT the carrier's RAW_STREAM
+    # adapter tier — proving the "*" override threaded through (non-vacuous: differs from adapter).
+    assert cov["fidelity"] == Fidelity.SUMMARY_ONLY.value

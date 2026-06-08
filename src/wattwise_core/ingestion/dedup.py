@@ -23,7 +23,7 @@ import datetime as _dt
 from dataclasses import dataclass
 
 from wattwise_core.domain.candidate import FieldCandidate
-from wattwise_core.domain.enums import trust_rank
+from wattwise_core.domain.enums import Fidelity, trust_rank
 
 # Default identity-resolution thresholds (MAP-R10) — policy-driven, configurable.
 DEFAULT_START_WINDOW_S = 120.0  # ±120 s start-time overlap
@@ -37,6 +37,7 @@ class ResolvedField:
 
     value: object
     winning_source_descriptor_id: str
+    winning_trust_tier: Fidelity
     disputed: bool
     considered_source_ids: tuple[str, ...]
 
@@ -82,6 +83,7 @@ def resolve_field(
     return ResolvedField(
         value=winner.value,
         winning_source_descriptor_id=winner.source_descriptor_id,
+        winning_trust_tier=winner.trust_tier,
         disputed=disputed,
         considered_source_ids=considered,
     )
@@ -114,16 +116,19 @@ def resolve_activity_identity(
 ) -> bool:
     """Decide whether two activity candidates are the same session (MAP-R10).
 
-    A shared strong fingerprint (device/file UUID, FIT fingerprint) matches
-    regardless of the time window. Otherwise: compatible sport AND start-time
-    overlap within ``start_window_s`` AND duration similarity within the looser of
-    ``duration_tol_frac`` or ``duration_tol_s``. Conservative (DEDUP-R7): anything
+    COMPATIBLE SPORT is required FIRST: two incompatible-sport candidates are never the
+    same session, even if they share a fingerprint (a shared fingerprint must never
+    short-circuit the sport gate — two unrelated sessions that collide on a fingerprint
+    token must stay separate). Then, with compatible sport: a shared strong fingerprint
+    (device/file UUID, FIT fingerprint) matches regardless of the time window; otherwise
+    start-time overlap within ``start_window_s`` AND duration similarity within the looser
+    of ``duration_tol_frac`` or ``duration_tol_s``. Conservative (DEDUP-R7): anything
     short of these stays separate.
     """
-    if a_fingerprint is not None and b_fingerprint is not None and a_fingerprint == b_fingerprint:
-        return True
     if a_sport != b_sport:
         return False
+    if a_fingerprint is not None and b_fingerprint is not None and a_fingerprint == b_fingerprint:
+        return True
     if abs((a_start - b_start).total_seconds()) > start_window_s:
         return False
     tol = max(duration_tol_s, duration_tol_frac * max(a_duration_s, b_duration_s))

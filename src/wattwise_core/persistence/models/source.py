@@ -22,7 +22,7 @@ import datetime as _dt
 import uuid
 
 from sqlalchemy import Boolean, Index, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from wattwise_core.domain.enums import (
     AuthArchetype,
@@ -31,6 +31,7 @@ from wattwise_core.domain.enums import (
     SourceKind,
 )
 from wattwise_core.persistence.base import Base, TimestampMixin
+from wattwise_core.persistence.models.athlete_preference import ensure_ranked_tier
 from wattwise_core.persistence.types import (
     enum_column,
     fk_uuid_column,
@@ -62,6 +63,33 @@ class SourceDescriptor(Base, TimestampMixin):
     # default_fidelity (LIN-R1). Stored as portable JSON config.
     trust_profile: Mapped[dict[str, object]] = json_column(nullable=False, default=dict)
     default_fidelity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    @validates("default_fidelity")
+    def _validate_default_fidelity(self, _key: str, value: object) -> str | None:
+        """Reject a non-ranked-tier ``default_fidelity`` (bare String, NO CHECK) (CONF-R2).
+
+        ``default_fidelity`` is the whole-source declared base tier; only the 5 ranked
+        tiers are valid. ``None`` is allowed (no declared base). A non-tier token would
+        otherwise flow into the effective tier and abort ingest, so it is rejected here.
+        """
+        if value is None:
+            return None
+        return ensure_ranked_tier(value, field="default_fidelity").value
+
+    @validates("trust_profile")
+    def _validate_trust_profile(self, _key: str, value: object) -> dict[str, object]:
+        """Reject any non-ranked-tier token among a ``trust_profile``'s tier values.
+
+        ``trust_profile`` maps channel (or ``"*"``) -> tier token; every value must be one
+        of the 5 ranked tiers (CONF-R2). A ``None``/empty profile is the seeded default.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise TypeError(f"trust_profile must be a dict, got {type(value).__name__}")
+        for channel, token in value.items():
+            ensure_ranked_tier(token, field=f"trust_profile[{channel!r}]")
+        return dict(value)
 
 
 class Connection(Base, TimestampMixin):

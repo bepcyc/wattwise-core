@@ -9,6 +9,8 @@ The clusters (and their owning GBO-R* IDs) are:
 
 * :mod:`.athlete`   — ``Athlete``, ``Sport``, ``SubSport``, ``TrainingZoneSet``.
 * :mod:`.source`    — ``SourceDescriptor``, ``Connection``, ``SourceCandidate``.
+* :mod:`.athlete_preference` — ``AthleteSourcePreference`` (per-athlete trust
+  override, PRV-R7).
 * :mod:`.activity`  — ``Activity``, ``ActivityLap``, ``ActivityStreamSet``,
   ``StreamChannel``, ``ActivityFile``.
 * :mod:`.wellness`  — ``DailyWellness``, ``WellnessStreamSet``.
@@ -34,6 +36,9 @@ from wattwise_core.persistence.models.athlete import (
     Sport,
     SubSport,
     TrainingZoneSet,
+)
+from wattwise_core.persistence.models.athlete_preference import (
+    AthleteSourcePreference,
 )
 from wattwise_core.persistence.models.derived import (
     DerivedActivityMetric,
@@ -67,6 +72,7 @@ __all__ = [
     "ActivityLap",
     "ActivityStreamSet",
     "Athlete",
+    "AthleteSourcePreference",
     "Base",
     "Connection",
     "DailyWellness",

@@ -10,12 +10,22 @@ transaction (UPS-R6); re-ingesting unchanged content is a value-level no-op (UPS
 
 Ingestion (L3) is the ONLY writer to the canonical store (L4, ARCH-R3); it imports
 persistence inward toward the canonical core.
+
+Identity resolution here is WINDOWED-ONLY (conservative, DEDUP-R7): a NEW candidate is
+matched against existing activities whose ``start_time`` is within ``_IDENTITY_WINDOW``
+(±2h) via the fuzzy start/duration/sport path. Genuine cross-source strong-fingerprint
+matching REGARDLESS of the window (MAP-R10) requires a TYPED ``strong_fingerprint``
+distinct from ``source_native_id`` — a real shared device/file UUID, not the per-source
+dedup key (two unrelated sessions, or two stripped FITs yielding a degenerate file_id,
+can collide on ``source_native_id`` and must NOT merge). That typed cross-window
+fingerprint match is DEFERRED and is NOT implemented via the per-source native id.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -27,7 +37,9 @@ from wattwise_core.domain.enums import Fidelity, GboType, trust_rank
 from wattwise_core.ingestion import _canonical as _cw
 from wattwise_core.ingestion._canonical import OriginalFile
 from wattwise_core.ingestion.dedup import resolve_activity_identity, resolve_field
+from wattwise_core.ingestion.trust import TrustPolicy, load_trust_policy
 from wattwise_core.persistence.models import Activity, SourceCandidate
+from wattwise_core.persistence.models.athlete_preference import WHOLE_SOURCE_CHANNEL
 from wattwise_core.persistence.types import utcnow, uuid7
 from wattwise_core.storage import ObjectStore, create_object_store
 
@@ -120,41 +132,50 @@ class IngestService:
     async def _resolve_activity_id(self, athlete: uuid.UUID, cand: GboCandidate) -> uuid.UUID:
         """Resolve a NEW candidate to a canonical activity id (MAP-R9..R12, DEDUP-R7).
 
-        Reuses an existing canonical activity when the conservative matcher (start-time
-        window + duration tolerance + compatible sport, OR a shared fingerprint derived
-        from a stored candidate, MAP-R10) is satisfied; otherwise mints a new id.
+        WINDOWED-ONLY (conservative): considers only existing activities whose
+        ``start_time`` is within ``_IDENTITY_WINDOW`` (±2h) of the candidate, in a stable
+        order (start_time, then activity_id), and runs the fuzzy start/duration/sport
+        matcher per windowed candidate; reuses the first match, else mints a new id.
+
+        A cross-source strong-fingerprint match REGARDLESS of the window (MAP-R10) is
+        DEFERRED: it needs a TYPED ``strong_fingerprint`` (a real shared device/file UUID),
+        NOT the per-source ``source_native_id`` dedup key (which can falsely collide across
+        unrelated sessions). Same-source re-ingest is already handled upstream by
+        candidate-key id reuse (``resolved_activity_id``, ING-R6) BEFORE this runs.
         """
         start = _parse_start_time(cand.payload["start_time"])
         duration = float(cast("float", cand.payload.get("elapsed_time_s") or 0))
         sport = str(cand.payload.get("sport") or "other")
-        fingerprint = cand.source_native_id
-        lo, hi = start - _IDENTITY_WINDOW, start + _IDENTITY_WINDOW
-        stmt = select(Activity).where(
-            Activity.athlete_id == athlete,
-            Activity.start_time >= lo,
-            Activity.start_time <= hi,
-        )
-        for act in (await self._session.execute(stmt)).scalars().all():
+        for act in await self._windowed_activities(athlete, start):
             # SQLite returns tz-naive datetimes; coerce to UTC for the matcher (GBO-R32).
             act_start = _parse_start_time(act.start_time)
-            act_fp = await self._activity_fingerprint(athlete, act.activity_id)
             if resolve_activity_identity(
-                start, duration, sport, fingerprint,
-                act_start, float(act.elapsed_time_s or 0), act.sport, act_fp,
+                start, duration, sport, None,
+                act_start, float(act.elapsed_time_s or 0), act.sport, None,
             ):
                 return act.activity_id
         return uuid7()
 
-    async def _activity_fingerprint(
-        self, athlete: uuid.UUID, activity_id: uuid.UUID
-    ) -> str | None:
-        """The stored activity's identity fingerprint from a resolved candidate (MAP-R10)."""
-        stmt = select(SourceCandidate.source_native_id).where(
-            SourceCandidate.athlete_id == athlete,
-            SourceCandidate.resolved_activity_id == activity_id,
-            SourceCandidate.is_superseded.is_(False),
+    async def _windowed_activities(
+        self, athlete: uuid.UUID, start: _dt.datetime
+    ) -> list[Activity]:
+        """Existing activities whose ``start_time`` falls within ±2h of ``start``.
+
+        Returns them in a stable order (start_time, then activity_id) so identity
+        resolution is deterministic (CONF-R4). The fuzzy start/duration/sport matcher
+        is run per candidate; nothing outside the window is considered (DEDUP-R7).
+        """
+        lo, hi = start - _IDENTITY_WINDOW, start + _IDENTITY_WINDOW
+        stmt = (
+            select(Activity)
+            .where(
+                Activity.athlete_id == athlete,
+                Activity.start_time >= lo,
+                Activity.start_time <= hi,
+            )
+            .order_by(Activity.start_time, Activity.activity_id)
         )
-        return (await self._session.execute(stmt)).scalars().first()
+        return list((await self._session.execute(stmt)).scalars().all())
 
     async def _write_activity_canonical(
         self, athlete: uuid.UUID, activity_id: uuid.UUID
@@ -163,7 +184,8 @@ class IngestService:
         candidates = await self._activity_candidates(athlete, activity_id)
         if not candidates:
             return
-        scalars, coverage = _resolve_scalars(candidates, _ACTIVITY_SCALARS)
+        policy = await load_trust_policy(self._session, athlete, candidates)
+        scalars, coverage = _resolve_scalars(candidates, _ACTIVITY_SCALARS, policy)
         act = await self._session.get(Activity, activity_id)
         if act is None:
             act = Activity(activity_id=activity_id, athlete_id=athlete, sport="other")
@@ -171,7 +193,9 @@ class IngestService:
         _apply_activity_scalars(act, scalars)
         act.coverage = coverage
         await self._session.flush()
-        streams = _cw.resolve_streams(candidates, _tier_of)  # per-channel trust (CONF-R3)
+        # Streams resolve PER CHANNEL under each channel's effective tier (CONF-R3/SF-3);
+        # an empty policy makes this the candidate's adapter tier (the prior behaviour).
+        streams = _cw.resolve_streams(candidates, policy)
         best = _highest_trust(candidates)
         laps = cast("list[dict[str, Any]]", best.payload.get("laps") or [])
         if streams:
@@ -181,8 +205,11 @@ class IngestService:
     async def _write_wellness(self, athlete: uuid.UUID, local_date: _dt.date) -> None:
         """Resolve daily wellness across ALL candidates for the date (CONF-R2/ING-UPS-R5)."""
         candidates = await self._wellness_candidates(athlete, local_date)
+        policy = await load_trust_policy(self._session, athlete, candidates)
+        # Wellness fields resolve under the whole-source effective tier; an empty policy
+        # makes this the candidate's adapter tier (byte-identical to the prior behaviour).
         await _cw.write_wellness_canonical(
-            self._session, athlete, local_date, candidates, _tier_of
+            self._session, athlete, local_date, candidates, _whole_source_tier_of(policy)
         )
 
     async def _capture_original(
@@ -311,24 +338,29 @@ def _new_candidate(
 
 
 def _resolve_scalars(
-    candidates: list[SourceCandidate], fields: tuple[str, ...]
+    candidates: list[SourceCandidate], fields: tuple[str, ...], policy: TrustPolicy
 ) -> tuple[dict[str, Any], dict[str, object]]:
     """Resolve each scalar field across candidates + build its coverage (CONF-R2/R5).
 
-    Returns ``(resolved_values, coverage)``. A field whose >=2 contributors materially
-    disagree beyond the per-field dispute tolerance gets ``coverage.disputed=True`` —
-    the best value is still selected, the disagreement is surfaced not hidden (CONF-R5).
+    Returns ``(resolved_values, coverage)``. Each field is resolved with its EFFECTIVE
+    per-channel trust tier (``policy.tier(candidate, fname)`` — the configurable PRV-R7
+    re-rank, defaulting to the adapter tier when unconfigured). A field whose >=2
+    contributors materially disagree beyond the per-field dispute tolerance gets
+    ``coverage.disputed=True`` — the best value is still selected, the disagreement is
+    surfaced not hidden (CONF-R5).
     """
     resolved: dict[str, Any] = {}
     coverage: dict[str, object] = {}
     for fname in fields:
-        contributors = _cw.field_candidates(candidates, fname, _tier_of)
+        tier_of = _channel_tier_of(policy, fname)  # effective per-channel tier (PRV-R7)
+        contributors = _cw.field_candidates(candidates, fname, tier_of)
         winner = resolve_field(contributors, dispute_tolerance=_cw.dispute_tolerance(fname))
         if winner is None:
             continue
         resolved[fname] = winner.value
+        # Badge the RESOLVED WINNER's tier, NOT an arbitrary scanned contributor (PRV-R6).
         coverage[fname] = _cw.coverage_for(
-            True, contributors[0].trust_tier, disputed=winner.disputed
+            True, winner.winning_trust_tier, disputed=winner.disputed
         ).to_jsonable()
     return resolved, coverage
 
@@ -345,7 +377,36 @@ def _apply_activity_scalars(act: Activity, scalars: dict[str, Any]) -> None:
     act.updated_at = utcnow()
 
 
+def _channel_tier_of(
+    policy: TrustPolicy, channel: str
+) -> Callable[[SourceCandidate], Fidelity]:
+    """A channel-bound effective-tier seam ``(candidate) -> Fidelity`` for ``_canonical``.
+
+    Binds the channel so the single-arg ``tier_of`` the ``_canonical`` helpers call
+    resolves the EFFECTIVE per-channel tier (PRV-R7), keeping ``dedup.resolve_field`` and
+    the ``_canonical`` helpers free of any DB read — the policy is already in memory.
+    """
+    return lambda candidate: policy.tier(candidate, channel)
+
+
+def _whole_source_tier_of(policy: TrustPolicy) -> Callable[[SourceCandidate], Fidelity]:
+    """The effective-tier seam bound to the whole-source channel (``"*"``).
+
+    Used for record-level surfaces (streams, wellness) that resolve under the
+    whole-source effective tier: per-athlete ``"*"`` override → descriptor ``"*"`` /
+    ``default_fidelity`` → the candidate's adapter tier (the prior behaviour when
+    unconfigured).
+    """
+    return lambda candidate: policy.tier(candidate, WHOLE_SOURCE_CHANNEL)
+
+
 def _tier_of(candidate: SourceCandidate) -> Fidelity:
+    """The candidate's ACTUAL adapter-assigned tier (NOT re-ranked by config).
+
+    Used only for config-independent candidate selection (e.g. which candidate's ``laps``
+    payload to take, ``_highest_trust``) — never for field-level conflict resolution,
+    which goes through the configurable :class:`TrustPolicy`.
+    """
     raw = candidate.trust_profile.get("tier", Fidelity.PLATFORM_COMPUTED.value)
     return Fidelity(str(raw))
 

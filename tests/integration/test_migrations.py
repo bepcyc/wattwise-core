@@ -26,14 +26,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 if TYPE_CHECKING:
     from _pytest.mark.structures import ParameterSet
 
-from wattwise_core.domain.enums import ActivityFileFormat, SourceKind
+from wattwise_core.config import get_settings
+from wattwise_core.domain.candidate import GboCandidate
+from wattwise_core.domain.enums import ActivityFileFormat, Fidelity, SourceKind
 from wattwise_core.identity import OWNER_ATHLETE_ID
 from wattwise_core.ingestion.adapters.file_upload import FileUploadAdapter, decode, native_id
 from wattwise_core.ingestion.base import FetchContext, SourceDescriptorRef
 from wattwise_core.ingestion.ingest import IngestService, OriginalFile
-from wattwise_core.persistence.models import ActivityFile, SourceDescriptor
+from wattwise_core.persistence.models import (
+    Activity,
+    ActivityFile,
+    AthleteSourcePreference,
+    SourceDescriptor,
+)
 from wattwise_core.security.crypto import EnvelopeCipher
-from wattwise_core.storage import LocalObjectStore
+from wattwise_core.storage import LocalObjectStore, content_hash
 
 pytestmark = pytest.mark.integration
 
@@ -47,6 +54,10 @@ def _alembic_cfg(dsn: str, monkeypatch: pytest.MonkeyPatch) -> Config:
     monkeypatch.setenv("WATTWISE_DATABASE_DSN", dsn)
     monkeypatch.setenv("WATTWISE_ENCRYPTION_ROOT_KEY", EnvelopeCipher.generate_root_key())
     monkeypatch.setenv("WATTWISE_TOKEN_SIGNING_KEY", "migration-test-signing-key-0123456789")
+    # ``env.py`` resolves the DSN through the lru_cached ``get_settings``; clear it so each
+    # upgrade in the same process rebinds to THIS test's DSN (a second in-process upgrade test
+    # would otherwise inherit the first test's cached settings and migrate the wrong database).
+    get_settings.cache_clear()
     cfg = Config(str(_REPO / "alembic.ini"))
     cfg.set_main_option("script_location", str(_REPO / "migrations"))
     return cfg
@@ -113,6 +124,125 @@ def test_pwx_persists_under_the_migrated_format_check(
     activity_file = asyncio.run(_ingest_pwx(dsn, tmp_path / "objects"))
     assert activity_file is not None, "the PWX activity_file row must persist on the migrated DB"
     assert activity_file.format is ActivityFileFormat.PWX
+
+
+# --- per-athlete source override on the MIGRATED schema (PRV-R7, ARCH-P2-03) ----------------
+#
+# test_ingestion_findings proves the resolver honours an ``athlete_source_preference`` override
+# on a ``create_all`` schema; that never inserts the row through the REAL migration 0005 table
+# — its UNIQUE/FK/CHECK constraints, its named Fidelity CHECK, the enum-text round-trip. This
+# exercises the WHOLE override path end to end on the Alembic-migrated DB: INSERT the row, then
+# re-resolve through ``IngestService`` and prove the winning source for a contested field flips.
+
+_RIDE_START = _dt.datetime(2026, 6, 1, 8, 0, tzinfo=_dt.UTC)
+
+
+def _ride(*, native_id: str, watts: float, tier: Fidelity, seconds: int = 3600) -> GboCandidate:
+    """A constant-power cycling candidate (same start/sport/duration ⇒ one identity)."""
+    payload = {
+        "start_time": _RIDE_START,
+        "sport": "cycling",
+        "elapsed_time_s": seconds,
+        "moving_time_s": seconds,
+        "avg_power_w": watts,
+        "streams": {
+            "power_w": {"values": [watts] * seconds, "sample_basis": "time", "sample_rate_hz": 1.0}
+        },
+    }
+    return GboCandidate(
+        gbo_type="activity",
+        source_descriptor_id="placeholder",
+        source_native_id=native_id,
+        content_hash=content_hash(f"{native_id}:{watts}".encode()),
+        payload=payload,
+        trust_tier=tier,
+        fetched_at=_dt.datetime(2026, 6, 1, 9, 0, tzinfo=_dt.UTC),
+    )
+
+
+async def _override_flips_winner(dsn: str) -> tuple[float, float]:
+    """On the migrated DB: contest avg_power_w across two sources; return (before, after).
+
+    ``file_import`` (RAW_STREAM, 200 W; seeded by migration 0001) out-ranks a second
+    PLATFORM_COMPUTED source (320 W) by adapter tier, so the no-config winner is 200 W.
+    Then INSERT an ``athlete_source_preference`` row demoting file_import's ``avg_power_w``
+    to SUMMARY_ONLY and RE-INGEST: ``load_trust_policy`` reads that row and the winner must
+    flip to the 320 W source — proving the migrated table's row drives real resolution.
+    """
+    engine = create_async_engine(dsn)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    try:
+        async with factory() as session:
+            athlete_id = OWNER_ATHLETE_ID  # seeded by migration 0001
+            file_src = (
+                await session.execute(
+                    select(SourceDescriptor).where(SourceDescriptor.source_key == "file_import")
+                )
+            ).scalar_one()  # seeded by migration 0001
+            api_src = SourceDescriptor(
+                source_key="platform_api", display_name="Platform API", kind="oauth_api"
+            )
+            session.add(api_src)
+            await session.flush()
+
+            ingest = IngestService(session)
+            await ingest.ingest(
+                str(athlete_id),
+                file_src.source_descriptor_id,
+                [_ride(native_id="file-1", watts=200.0, tier=Fidelity.RAW_STREAM)],
+            )
+            await ingest.ingest(
+                str(athlete_id),
+                api_src.source_descriptor_id,
+                [_ride(native_id="api-1", watts=320.0, tier=Fidelity.PLATFORM_COMPUTED)],
+            )
+            await session.commit()
+            before = float((await session.execute(select(Activity))).scalars().one().avg_power_w)
+
+            # INSERT the override into the REAL migrated table, demoting file_import (the
+            # current winner) so api_src now out-ranks it. This row goes through migration
+            # 0005's FK -> athlete + source, its named Fidelity CHECK, and the
+            # (athlete, source, channel) UNIQUE at runtime.
+            session.add(
+                AthleteSourcePreference(
+                    athlete_id=athlete_id,
+                    source_descriptor_id=file_src.source_descriptor_id,
+                    channel="avg_power_w",
+                    trust_tier=Fidelity.SUMMARY_ONLY,
+                )
+            )
+            await session.commit()
+
+            # ... then RE-INGEST file_import: resolution re-reads the override row and flips.
+            await ingest.ingest(
+                str(athlete_id),
+                file_src.source_descriptor_id,
+                [_ride(native_id="file-1", watts=200.0, tier=Fidelity.RAW_STREAM)],
+            )
+            await session.commit()
+            after = float((await session.execute(select(Activity))).scalars().one().avg_power_w)
+            return before, after
+    finally:
+        await engine.dispose()
+
+
+def test_athlete_source_override_flips_winner_on_migrated_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A migrated ``athlete_source_preference`` row flips the contested-field winner (PRV-R7).
+
+    End-to-end on the Alembic-migrated SQLite schema (NOT ``create_all``): two sources contest
+    ``avg_power_w``; the RAW_STREAM source wins by adapter tier (200 W). After INSERTing a real
+    override row through migration 0005's table — exercising its FK to athlete/source, its named
+    Fidelity CHECK, and the (athlete, source, channel) UNIQUE at runtime — the resolver honours
+    it and the 320 W source wins. Proves the override path works against the production schema,
+    not just the live-ORM ``create_all`` schema the rest of the suite builds.
+    """
+    dsn = f"sqlite+aiosqlite:///{tmp_path / 'override.db'}"
+    _upgrade_to_head(dsn, monkeypatch)
+    before, after = asyncio.run(_override_flips_winner(dsn))
+    assert before == pytest.approx(200.0), "no override -> RAW_STREAM source wins by adapter tier"
+    assert after == pytest.approx(320.0), "the migrated override row flips the winner to api_src"
 
 
 # --- migration <-> model parity gate (BOOT-R3) ---------------------------------------------

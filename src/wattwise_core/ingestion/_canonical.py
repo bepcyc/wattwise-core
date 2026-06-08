@@ -33,6 +33,7 @@ from wattwise_core.domain.enums import (
     trust_rank,
 )
 from wattwise_core.ingestion.dedup import resolve_field
+from wattwise_core.ingestion.trust import TrustPolicy
 from wattwise_core.persistence.models import (
     ActivityFile,
     ActivityLap,
@@ -119,27 +120,46 @@ def field_candidates(
 
 
 def resolve_streams(
-    candidates: list[SourceCandidate], tier_of: Any
+    candidates: list[SourceCandidate], policy: TrustPolicy
 ) -> dict[str, dict[str, Any]]:
-    """Resolve each stream channel across candidates by the trust order (CONF-R3/PRV-R6).
+    """Resolve each stream channel across candidates by per-channel trust (CONF-R3/PRV-R6).
 
-    Per-channel (not per-record): a channel is taken from its HIGHEST-trust contributor,
-    so a channel a higher-trust source lacks is filled from a lower-trust one rather than
-    dropped, and a higher-trust channel is never regressed. Each winning channel carries
-    its contributor's ``_fidelity`` so the channel write can trust-guard the overwrite
-    (ING-UPS-R5). Ties break on the stable source_descriptor_id (deterministic, CONF-R4).
+    Per-channel (not per-record) AND per-channel TRUST: each channel is resolved under its
+    OWN effective tier ``policy.tier(candidate, channel)`` (mirroring the scalar path,
+    PRV-R7/SF-3), so a descriptor ``trust_profile {power_w: SUMMARY_ONLY}`` or a per-athlete
+    ``power_w`` override changes which source wins THAT stream channel — not just the
+    whole-source ``"*"`` tier. A channel a higher-trust source lacks is filled from a
+    lower-trust one rather than dropped, and a higher-trust channel is never regressed.
+    Each winning channel carries its effective ``_fidelity`` plus a safe ``_coverage`` built
+    through :class:`Coverage` (present/fidelity invariant enforced uniformly, D5). Ties
+    break on the stable source_descriptor_id (deterministic, CONF-R4).
     """
-    ordered = sorted(
-        candidates, key=lambda c: (trust_rank(tier_of(c)), str(c.source_descriptor_id))
-    )
     out: dict[str, dict[str, Any]] = {}
-    for c in ordered:  # highest-trust first; first writer per channel wins, never overwritten
-        streams = cast("dict[str, Any]", c.payload.get("streams") or {})
-        fidelity = tier_of(c)
-        for name, chan in streams.items():
-            if name not in out:
-                out[name] = {**chan, "_fidelity": fidelity.value}
+    # Discover every channel any candidate carries, then resolve each independently under
+    # its own effective per-channel tier (the whole-source "*" tier no longer decides).
+    names = {n for c in candidates for n in _candidate_streams(c)}
+    for name in names:
+        ordered = sorted(
+            candidates,
+            key=lambda c: (trust_rank(policy.tier(c, name)), str(c.source_descriptor_id)),
+        )
+        for c in ordered:  # highest-trust-for-this-channel first; first writer wins
+            chan = _candidate_streams(c).get(name)
+            if chan is None:
+                continue
+            fidelity = policy.tier(c, name)
+            out[name] = {
+                **chan,
+                "_fidelity": fidelity.value,
+                "_coverage": coverage_for(True, fidelity, disputed=False).to_jsonable(),
+            }
+            break
     return out
+
+
+def _candidate_streams(candidate: SourceCandidate) -> dict[str, Any]:
+    """The candidate's per-channel ``streams`` payload mapping (``{}`` when absent)."""
+    return cast("dict[str, Any]", candidate.payload.get("streams") or {})
 
 
 async def upsert_stream_set(
@@ -163,6 +183,16 @@ async def upsert_stream_set(
         await _upsert_channel(session, stream_set.stream_set_id, name, chan)
 
 
+def _coerce_fidelity(raw: object) -> Fidelity:
+    """Coerce a stored ``_fidelity`` token to ``Fidelity`` (worst tier on absence/garbage)."""
+    if not isinstance(raw, str):
+        return Fidelity.SUMMARY_ONLY
+    try:
+        return Fidelity(raw)
+    except ValueError:
+        return Fidelity.SUMMARY_ONLY
+
+
 def _channel_rank(coverage: dict[str, object] | None) -> int:
     """The trust rank persisted on a channel's coverage (worst if absent)."""
     fid = (coverage or {}).get("fidelity")
@@ -183,8 +213,12 @@ async def _upsert_channel(
     )
     existing = (await session.execute(stmt)).scalar_one_or_none()
     values = chan.get("values", [])
-    fidelity = chan.get("_fidelity", Fidelity.SUMMARY_ONLY.value)
-    coverage = {"present": True, "fidelity": fidelity}
+    # D5: route channel coverage through Coverage(...).to_jsonable() so the
+    # present/fidelity invariant is enforced uniformly (never a raw {present, fidelity}
+    # dict that could persist a self-contradictory present=True + absent_* fidelity).
+    coverage = chan.get("_coverage") or coverage_for(
+        True, _coerce_fidelity(chan.get("_fidelity")), disputed=False
+    ).to_jsonable()
     if existing is None:
         session.add(
             StreamChannel(
@@ -253,9 +287,9 @@ async def write_wellness_canonical(
         if winner is None:
             continue
         setattr(row, fname, winner.value)
+        # Badge the RESOLVED WINNER's tier, NOT an arbitrary scanned contributor (PRV-R6).
         coverage[fname] = coverage_for(
-            True, contributors[0].trust_tier if contributors else Fidelity.SUMMARY_ONLY,
-            disputed=winner.disputed,
+            True, winner.winning_trust_tier, disputed=winner.disputed
         ).to_jsonable()
     if coverage:
         row.coverage = coverage
