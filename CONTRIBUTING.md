@@ -166,15 +166,15 @@ a threshold may only ratchet upward (ROAD-R5).
 
 ## 6. Scope boundaries (what belongs in this repo)
 
-`wattwise-core` ships the **bare OSS engine** + schemas + a minimal example/
+`wattwise-core` ships the **bare engine** + schemas + a minimal example/
 default config bundle (DELIV-R2). Proprietary IP — coach persona/voice, system/
 agent prompts, named skills/playbooks, model-routing policy, metric-equivalence
 thresholds, grounding-rules text — is **externalized to runtime config** and does
-**not** live here; the engine embeds none of it inline. Out of OSS scope (and not
-to be added to this repo): multi-user subscription/billing, a coach marketplace,
-the web client, and the Telegram bot — those are the commercial `athload` layer
-built additively on this engine. Keep the extension **seams** clean and green;
-don't re-architect to add commercial behavior.
+**not** live here; the engine embeds none of it inline. Out of scope for this repo
+(and not to be added here): multi-user subscription/billing, a coach marketplace, a
+bundled web client, and a chat-bot front-end. Those are downstream concerns built
+**on top of** the engine through its extension **seams** — keep the seams clean and
+green; don't re-architect the engine to embed them inline.
 
 ---
 
@@ -185,5 +185,38 @@ two workflow files (`.github/workflows/ci.yml`, `.forgejo/workflows/ci.yml`) are
 thin schedulers that reference an **identical set of `just` recipes** — verified
 by `just test-forge-portable`. If you add a gate to one forge's workflow, add it
 to the other; the portability check fails otherwise.
+
+---
+
+## 8. Documentation hygiene — no context leakage
+
+Public-facing documentation is a **product surface**, not a development artifact. The
+README, anything under `docs/`, the project website, and release notes MUST read as the
+product to an outside reader and MUST NOT leak the project's internal program structure.
+Specifically, **public docs must never contain**:
+
+- Internal **development-phase, milestone, or roadmap codenames** (e.g. a "Phase-N",
+  a roadmap/launch-stage codename, a milestone code).
+- Internal **role or principle codenames** (developer-role labels, lettered "principle"
+  codenames, team-internal nicknames).
+- **Specification requirement IDs** (tokens shaped like `ABC-R12`) or references to "the
+  spec"/internal design docs or the internal build/review process.
+- The **name of, or any framing of this engine as a sub-part of, a separate
+  product/offering.** This project is presented as exactly what it is — a complete,
+  self-hostable, open-source engine. It is fine (and good) to say it is open-source,
+  Apache-2.0, and self-hostable; it is **not** fine to describe it as the open-source
+  slice/layer of something larger, or to name any such larger thing.
+
+Contributor-facing files (this `CONTRIBUTING`, ADRs under `docs/decisions/`, in-code
+comments) MAY cite requirement IDs for traceability, but they too MUST NOT expose
+role/phase/milestone codenames or any separate-product name/relationship.
+
+**Why this matters:** leaking the internal program shape — who the roles are, what the
+phases are, that the engine is one piece of a wider commercial plan — into public docs is
+a real context-leak hazard. The public face of the project is the product, full stop. When
+in doubt, describe **what the software does for its user**, never how or by whom it was
+built.
+
+---
 
 Thank you for contributing.
