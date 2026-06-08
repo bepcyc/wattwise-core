@@ -42,6 +42,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from wattwise_core.agent.state_store import (
@@ -134,7 +135,15 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
         return thread
 
     async def _ensure_thread(self, session: AsyncSession, thread_id: str) -> AgentThread:
-        """Get-or-create the durable thread for the saver's bound (athlete, conversation)."""
+        """Get-or-create the durable thread for the saver's bound (athlete, conversation).
+
+        Concurrency-safe (CKPT-R1): a single graph run makes the langgraph runtime call
+        ``aput``/``aput_writes`` on SEPARATE sessions that can race to create the thread —
+        both ``SELECT`` miss, both ``INSERT``, and the loser hits the
+        ``(athlete_id, conversation_id)`` unique constraint. The losing insert is caught and
+        the now-committed thread re-resolved (still athlete-scoped, CKPT-R3), so the
+        get-or-create is idempotent and never fails a run on the benign race.
+        """
         thread = await self._resolve_thread(session, thread_id)
         if thread is not None:
             return thread
@@ -144,7 +153,14 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
             conversation_id=self._conversation_id,
         )
         session.add(thread)
-        await session.flush()
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            existing = await self._resolve_thread(session, thread_id)
+            if existing is None:  # the conflict was not the benign concurrent-create race
+                raise
+            return existing
         return thread
 
     def _check_schema_version(self, row: AgentCheckpoint) -> None:

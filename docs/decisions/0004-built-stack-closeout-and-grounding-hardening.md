@@ -64,12 +64,26 @@ demonstrated holes deterministically:
 
 ## 5. Accepted residuals (recorded, not yet closed)
 
-- **Multi-turn follow-up / durable resume.** `GraphAgentEngine` uses a fresh `InMemorySaver`
-  per call and `answer_question` does not thread the API `thread_id`/`follow_up` into the
-  run, so a follow-up turn does not resume a prior durable thread. This matches the OSS
-  Phase-1 scope (grounded Q&A + weekly load review; the durable SQLAlchemy checkpointer + the
-  follow-up trigger are wired in a later phase). Single-turn grounded Q&A is correct and
-  fail-closed today; durable multi-turn is deferred, not silently broken.
+- **Multi-turn follow-up / durable resume — attempted, then deferred to ROAD-R2.**
+  `GraphAgentEngine` uses a fresh `InMemorySaver` per call and `answer_question` does not
+  thread the API `thread_id`/`follow_up` into the run, so a follow-up turn does not resume a
+  prior durable thread. An attempt to wire the durable `SqlAlchemyCheckpointSaver` per
+  conversation was made and then **reverted** after an Opus-4.8 adversarial convergence panel
+  found it is a graph-state redesign, not a wiring task: the graph's `AgentState` mixes
+  RUN-scoped working channels (`node_visits`/`reflection_count`/`redraft_count` —
+  monotonic-accumulator reducers — plus `retrieved`/`draft`) with conversational state in one
+  checkpointed schema. Resuming the checkpoint therefore carries the per-run node-visit and
+  recovery budgets across turns, so every conversation force-degrades after ~8 turns
+  (reproduced), and prior-turn evidence leaks into a later turn; separately, the saver's
+  per-checkpoint sessions on the shared engine pool nested-deadlock under concurrency. Both
+  require ROAD-R2 work (split run-scoped vs conversational channels with a per-turn reset; a
+  dedicated checkpointer pool / the ARCH-R13 separate store), which is also where the spec
+  scopes durable resume + HITL. Single-turn grounded Q&A is correct and fail-closed today;
+  durable multi-turn is deferred, not silently broken. The panel's one standalone-correct
+  finding — the `SqlAlchemyCheckpointSaver` thread get-or-create racing on its
+  `(athlete_id, conversation_id)` unique constraint under a real graph run — was kept: it is
+  now idempotent (catch the `IntegrityError`, re-resolve the committed thread, still
+  athlete-scoped, CKPT-R3), readying the saver for the ROAD-R2 wiring.
 - **Number-extraction completeness.** Deterministic verification still covers the claims the
   model extracts; a numeric span the model neither extracts nor labels is bounded by the
   voice number-cap (`VOICE-R7`, enforced in `deliverables`), the leads-with-state projection,

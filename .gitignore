@@ -45,5 +45,11 @@ local.db
 # generated typed client (built in CI; artifact, not source-of-truth)
 /clients/ts/node_modules/
 
+# local-only architecture diagrams (kept on disk, intentionally NOT published —
+# they carry internal program structure; see CONTRIBUTING §8 documentation hygiene)
+/ARCHITECTURE_DIAGRAM.md
+/ARCHITECTURE_DIAGRAM_SIMPLIFIED.md
+/ARCHITECTURE_DIAGRAM_SIMPLIFIED_4DUMMIES.md
+
 # OS
 .DS_Store
