@@ -234,6 +234,21 @@ class AcwrStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ReadinessVerdict(StrEnum):
+    """Canonical readiness/form assessment VERDICT (SCHEMA-R3 / COACH-R1 #2).
+
+    A typed coaching state, NOT a numeric score: there is deliberately no numeric
+    ``readiness`` metric. The verdict is a deterministic function of canonical
+    metrics (notably TSB/form), so the engine — not the LLM — decides it
+    (QA-EVAL-R2.4 / COACH-R3 / EVAL-R5).
+    """
+
+    GO = "go"
+    MAINTAIN = "maintain"
+    EASE = "ease"
+    REST = "rest"
+
+
 class WorkoutTargetType(StrEnum):
     """Target type of a single workout step (GBO-R29)."""
 

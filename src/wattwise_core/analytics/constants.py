@@ -66,5 +66,23 @@ INTENSITY_CLASS_LABELS: Final[tuple[str, ...]] = (
     "recovery", "endurance", "tempo", "threshold", "vo2",
 )
 
+# --- readiness/form verdict bands (QA-EVAL-R2.4) ---
+# The spec pins only the DIRECTION (QA-EVAL-R2.4): deep-negative form must NOT yield
+# a hard "go" day. These TSB-zone cutoffs are a defensible default banding of canonical
+# form (TSB), overridable like the τ constants above; the consistency invariant lives in
+# the direction, not in any one cutoff. HRV only ever nudges toward MORE caution (never
+# toward GO) — fail-safe (COACH-R1 #2 / GROUND-R7).
+READINESS_FRESH_FORM: Final = 5.0  # form (TSB) above this => fresh => GO
+READINESS_NEUTRAL_FLOOR: Final = -10.0  # -10 <= form <= 5 => MAINTAIN
+READINESS_FATIGUE_FLOOR: Final = -20.0  # -20 <= form < -10 => EASE ; form < -20 => REST
+READINESS_HRV_SUPPRESSION_FRAC: Final = 0.10  # hrv >=10% below baseline => one step more cautious
+# Minimum chronic fitness (CTL) for the form signal to be trustworthy enough to read a verdict
+# (GROUND-R6 / PMC-R3/R5). An experienced athlete always carries ctl > 0; only a brand-new
+# (0,0)-seed cold-start (PMC-R3/R5 honest origin) sits at ~0 ctl, where form is ~0 and would
+# otherwise yield a confident MAINTAIN on NO training base — and a fully-detrained athlete
+# legitimately reads "not enough recent fitness signal". Below this epsilon the gather treats
+# form as UNAVAILABLE so the deliverable abstains rather than guessing.
+READINESS_MIN_FITNESS_CTL: Final = 1.0  # GROUND-R6 / PMC-R3/R5
+
 # --- generic numeric tolerance ---
 DEFAULT_CLOSED_FORM_ABS_TOL: Final = 1e-9  # ANL-R31 (× max(1,|x|))  # noqa: RUF003 - math notation

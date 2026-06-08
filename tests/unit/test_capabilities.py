@@ -298,6 +298,22 @@ async def test_metric_value_reads_pmc_scalar_verbatim() -> None:
     assert svc.athlete_calls == [_ATHLETE]
 
 
+async def test_metric_value_form_is_a_verbatim_alias_of_canonical_tsb() -> None:
+    """GROUND-R7: ``form`` is the athlete-facing alias of TSB -> same canonical PmcDay.tsb.
+
+    The seeded PMC day has ``tsb=10.0``; a ``form`` NUMBER claim must ground to the IDENTICAL
+    value as a ``tsb`` claim (a pure alias, never a second/different number), and stays
+    scoped to the constructed athlete only.
+    """
+    svc = _svc()
+    ev = CanonicalEvidence(svc, _ATHLETE)
+    form = await ev.metric_value("form", _DAY.isoformat())
+    assert form == 10.0
+    assert form == await ev.metric_value("tsb", _DAY.isoformat())
+    # GROUND-R7 / PLAN-R5: every canonical read stays scoped to the constructed athlete.
+    assert set(svc.athlete_calls) == {_ATHLETE}
+
+
 async def test_metric_value_reads_critical_power_fields_verbatim() -> None:
     ev = CanonicalEvidence(_svc(), _ATHLETE)
     assert await ev.metric_value("critical_power_w", _DAY.isoformat()) == 280.0

@@ -17,6 +17,7 @@ of which the model-key-less smoke could reach:
 from __future__ import annotations
 
 import datetime as _dt
+import math
 from collections.abc import AsyncIterator
 
 import pytest
@@ -25,6 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from wattwise_core.agent.capabilities import CanonicalEvidence
 from wattwise_core.agent.contracts import ClaimKind, GroundDecision, RunStatus
+from wattwise_core.agent.deliverables import (
+    HRV_UNAVAILABLE_CLAUSE,
+    Readiness,
+    _ReadinessNarration,
+    first_sentence,
+    leads_with_state,
+    readiness_assessment,
+)
 from wattwise_core.agent.engine import (
     ClaimGrounder,
     GraphAgentEngine,
@@ -37,16 +46,18 @@ from wattwise_core.agent.model import FakeModel
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.config import load_settings
 from wattwise_core.domain.candidate import GboCandidate
-from wattwise_core.domain.enums import Fidelity, SignatureOrigin
+from wattwise_core.domain.enums import Fidelity, HrvMethod, ReadinessVerdict, SignatureOrigin
 from wattwise_core.identity import OWNER_ATHLETE_ID, OWNER_SUBJECT
 from wattwise_core.ingestion.ingest import IngestService
 from wattwise_core.persistence.models import (
     Athlete,
     Base,
+    DailyWellness,
     FitnessSignature,
     SourceDescriptor,
     Sport,
 )
+from wattwise_core.persistence.types import utcnow
 from wattwise_core.storage import content_hash
 
 pytestmark = pytest.mark.integration
@@ -303,3 +314,410 @@ def test_build_agent_engine_is_none_without_model_key() -> None:
         pass
 
     assert build_agent_engine(_Db(), settings) is None  # type: ignore[arg-type]
+
+
+# --- readiness/form deliverable (QA-EVAL-R2.4 / API-R41) --------------------------
+#
+# These drive the REAL :meth:`GraphAgentEngine.readiness` against a self-dating canonical
+# store (rides are seeded relative to ``utcnow()`` so the latest computed TSB lands on
+# "today" regardless of the wall clock), so the delivered verdict is deterministic.
+
+
+def _watt_ride(native_id: str, day: _dt.date, *, watts: float) -> GboCandidate:
+    """A constant-``watts``, 1 h cycling ride. TSS == (watts/250)^2 * 100 at FTP 250."""
+    seconds = 3600
+    payload = {
+        "start_time": _dt.datetime(day.year, day.month, day.day, 8, 0, tzinfo=UTC),
+        "sport": "cycling",
+        "elapsed_time_s": seconds,
+        "moving_time_s": seconds,
+        "avg_power_w": watts,
+        "streams": {
+            "power_w": {"values": [watts] * seconds, "sample_basis": "time", "sample_rate_hz": 1.0}
+        },
+        "laps": [
+            {"lap_index": 0, "start_offset_s": 0, "duration_s": seconds, "avg_power_w": watts}
+        ],
+    }
+    return GboCandidate(
+        gbo_type="activity",
+        source_descriptor_id="placeholder",
+        source_native_id=native_id,
+        content_hash=content_hash(native_id.encode()),
+        payload=payload,
+        trust_tier=Fidelity.RAW_STREAM,
+        fetched_at=_dt.datetime(2026, 6, 4, 9, 0, tzinfo=UTC),
+    )
+
+
+async def _seed_store(
+    rides: list[tuple[_dt.date, float]],
+    *,
+    hrv_day_rmssd: tuple[_dt.date, float] | None = None,
+    hrv_baseline_band: tuple[float, float] | None = None,
+) -> tuple[_DatabaseStub, AnalyticsService, AsyncSession]:
+    """Seed a fresh canonical store with the owner + FTP signature + given rides (+HRV).
+
+    Each ride is ``(day, watts)``; an optional ``hrv_day_rmssd`` adds a summary-only HRV
+    wellness row (RMSSD ms) for that day so the readiness gather can read a canonical HRV.
+    ``hrv_baseline_band`` sets the ``(low_ms, high_ms)`` HRV-baseline band on that same
+    wellness row so the readiness gather can read a live baseline (its midpoint) and the
+    oracle's HRV-suppression nudge can fire end-to-end (COACH-R1 #2).
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    session = factory()
+    session.add(Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True))
+    session.add(Athlete(athlete_id=OWNER_ATHLETE_ID, sex="male", reference_timezone="UTC"))
+    descriptor = SourceDescriptor(
+        source_key="file_import", display_name="Activity files", kind="file_upload"
+    )
+    session.add(descriptor)
+    session.add(
+        FitnessSignature(
+            athlete_id=OWNER_ATHLETE_ID,
+            signature_type="cycling",
+            effective_date=_dt.date(2024, 1, 1),
+            ftp_w=250.0,
+            origin=SignatureOrigin.MEASURED,
+        )
+    )
+    if hrv_day_rmssd is not None:
+        day, rmssd = hrv_day_rmssd
+        low, high = hrv_baseline_band if hrv_baseline_band is not None else (None, None)
+        session.add(
+            DailyWellness(
+                athlete_id=OWNER_ATHLETE_ID,
+                local_date=day,
+                hrv_rmssd_ms=rmssd,
+                hrv_baseline_low_ms=low,
+                hrv_baseline_high_ms=high,
+                hrv_method=HrvMethod.RMSSD,
+            )
+        )
+    await session.flush()
+    ingest = IngestService(session)
+    descriptor_id = str(descriptor.source_descriptor_id)
+    for i, (day, watts) in enumerate(rides):
+        await ingest.ingest(
+            str(OWNER_ATHLETE_ID), descriptor_id, [_watt_ride(f"k{i}", day, watts=watts)]
+        )
+    await session.commit()
+    return _DatabaseStub(factory), AnalyticsService(session), session
+
+
+def _rest_narrator() -> FakeModel:
+    """A FakeModel scripting a coherent state-first 'rest' narration + claim extraction."""
+    return FakeModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text="You're carrying deep fatigue, so today is for rest.",
+                verdict=ReadinessVerdict.REST,
+            ),
+            "_ClaimSchema": _ClaimSchema(claims=[]),
+        }
+    )
+
+
+def _maintain_narrator() -> FakeModel:
+    """A FakeModel scripting a coherent state-first 'maintain' narration + claim extraction."""
+    return FakeModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text="You're in a steady place — keep things as planned.",
+                verdict=ReadinessVerdict.MAINTAIN,
+            ),
+            "_ClaimSchema": _ClaimSchema(claims=[]),
+        }
+    )
+
+
+def _no_numeric_readiness_field(readiness: Readiness) -> bool:
+    """True iff the deliverable exposes no numeric ``readiness`` KPI/score attribute (API-R41)."""
+    return not any(
+        name in {"readiness", "readiness_score", "score"} for name in Readiness.__slots__
+    )
+
+
+async def test_readiness_deep_negative_form_is_rest_state_first() -> None:
+    """Deep-negative form -> a metric-consistent 'rest' verdict, state-first (QA-EVAL-R2.4).
+
+    Five hard rides ending today drive TSB well below the fatigue floor, so the delivered
+    verdict is ``rest``; the summary leads with a number-LESS state sentence and there is no
+    numeric readiness field on the deliverable.
+    """
+    today = utcnow().date()
+    rides = [(today - _dt.timedelta(days=4 - i), 320.0) for i in range(5)]
+    database, _, _ = await _seed_store(rides)
+    engine = GraphAgentEngine(database, _rest_narrator())  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.REST
+    assert not any(ch.isdigit() for ch in first_sentence(readiness.summary_text))
+    assert _no_numeric_readiness_field(readiness)
+
+
+async def test_readiness_form_number_surfaces_only_as_grounded_citation() -> None:
+    """A form NUMBER in the narration grounds VERBATIM against canonical form (GROUND-R5/R7).
+
+    The summary still LEADS with a number-less state sentence (COACH-R7); the form number
+    appears only in a later sentence and survives as a grounded ``form`` citation — the
+    on-demand backing — never as a hero readiness number. The verdict stays the canonical
+    ``rest``, and there is no numeric readiness field on the deliverable (API-R41).
+    """
+    today = utcnow().date()
+    rides = [(today - _dt.timedelta(days=4 - i), 320.0) for i in range(5)]
+    database, svc, _ = await _seed_store(rides)
+    series = await svc.pmc(str(OWNER_ATHLETE_ID), today - _dt.timedelta(days=14), today)
+    form = series[-1].value.tsb  # the canonical form the claim must match within tolerance
+    iso = today.isoformat()
+    model = FakeModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text=(
+                    f"You're deep in fatigue, so today is for rest. Your form sits at {form:.1f}."
+                ),
+                verdict=ReadinessVerdict.REST,
+            ),
+            "_ClaimSchema": _ClaimSchema(
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text=f"Your form sits at {form:.1f}",
+                        metric="form",
+                        value=form,
+                        as_of=iso,
+                    )
+                ]
+            ),
+        }
+    )
+    engine = GraphAgentEngine(database, model)  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.REST
+    assert not any(ch.isdigit() for ch in first_sentence(readiness.summary_text))  # state-first
+    assert readiness.citations, "the form number must reach the deliverable as a grounded citation"
+    assert readiness.citations[0].metric == "form"
+    assert readiness.citations[0].record_id == f"form@{iso}"
+    assert _no_numeric_readiness_field(readiness)
+
+
+async def test_readiness_fresh_form_is_go() -> None:
+    """A tapered, fresh canonical form (TSB > fresh threshold) -> a 'go' verdict (QA-EVAL-R2.4)."""
+    today = utcnow().date()
+    # A 10-day block of solid rides ~4 weeks ago, then a full taper to today -> CTL > ATL.
+    rides = [(today - _dt.timedelta(days=37 - i), 274.0) for i in range(10)]
+    database, _, _ = await _seed_store(rides)
+    model = FakeModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text="You're fresh and ready for a hard day.",
+                verdict=ReadinessVerdict.GO,
+            ),
+            "_ClaimSchema": _ClaimSchema(claims=[]),
+        }
+    )
+    engine = GraphAgentEngine(database, model)  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.GO
+    assert not any(ch.isdigit() for ch in first_sentence(readiness.summary_text))
+
+
+async def test_readiness_consistency_gate_overrides_model_go_to_rest() -> None:
+    """A model proposing 'go' under deep-negative form is overridden to 'rest' (COACH-R3 / EVAL-R5).
+
+    The deterministic gate (``readiness_consistent``) rejects the model verdict; the delivered
+    verdict is the canonical ``rest`` and a coverage caveat records the override (fail-closed).
+    """
+    today = utcnow().date()
+    rides = [(today - _dt.timedelta(days=4 - i), 320.0) for i in range(5)]
+    database, _, _ = await _seed_store(rides)
+    model = FakeModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text="You're fresh and ready to crush a hard one.",
+                verdict=ReadinessVerdict.GO,  # contradicts deep-negative form
+            ),
+            "_ClaimSchema": _ClaimSchema(claims=[]),
+        }
+    )
+    engine = GraphAgentEngine(database, model)  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.REST  # canonical wins, not the model's 'go'
+    assert readiness.coverage is not None
+    assert readiness.coverage["verdict_override"] == "model_inconsistent_with_metrics"
+    # the delivered lead describes the canonical (rest) state, not the model's 'go' prose
+    assert "fresh" not in readiness.summary_text.lower()
+
+
+async def test_readiness_abstains_truthfully_without_form() -> None:
+    """Unavailable form -> verdict None + a truthful insufficient-data summary (GROUND-R6).
+
+    Exercises the real :func:`readiness_assessment` abstain branch with an unavailable form
+    (the fail-closed input the engine's gather yields when no PMC day is computable): no
+    verdict, no number, an honest state sentence, no model call needed, nothing to cite.
+    """
+    readiness = await readiness_assessment(
+        OWNER_SUBJECT,
+        form=None,  # canonical form unavailable -> the oracle abstains
+        as_of=None,
+        hrv_rmssd=None,
+        hrv_baseline=None,
+        narrate=None,
+        grounder=None,
+    )
+    assert readiness.verdict is None
+    assert "enough" in readiness.summary_text.lower()
+    assert not readiness.citations  # nothing grounded to cite
+    assert _no_numeric_readiness_field(readiness)
+
+
+async def test_readiness_hrv_unavailable_states_so_and_uses_form() -> None:
+    """Form present, HRV absent -> verdict from form, summary states HRV unavailable (GROUND-R7)."""
+    today = utcnow().date()
+    rides = [(today - _dt.timedelta(days=4 - i), 320.0) for i in range(5)]
+    database, _, _ = await _seed_store(rides)  # no HRV wellness row seeded
+    engine = GraphAgentEngine(database, _rest_narrator())  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.REST  # from form alone
+    assert "hrv" in readiness.summary_text.lower()
+    assert readiness.coverage is not None
+    assert "hrv" in readiness.coverage["inputs_unavailable"]
+
+
+# A constant-watts ride at ~50 TSS (NP/FTP = sqrt(0.5)); a steady block of these ending a few
+# rest days before today lands the canonical form (TSB) in the MAINTAIN band with a real CTL.
+_MAINTAIN_WATTS = 250.0 * math.sqrt(0.5)
+
+
+def _maintain_band_rides(today: _dt.date) -> list[tuple[_dt.date, float]]:
+    """A 40-ride steady block ending 3 rest days before today -> MAINTAIN-band form, CTL>0.
+
+    The taper-into-rest brings ATL back toward CTL so the latest computed TSB sits in the
+    neutral (MAINTAIN) band while a real chronic base (CTL well above the cold-start epsilon)
+    has accumulated — the setup the HRV-suppression nudge needs to be visible.
+    """
+    return [(today - _dt.timedelta(days=42 - i), _MAINTAIN_WATTS) for i in range(40)]
+
+
+async def test_readiness_cold_start_abstains_not_confident_maintain() -> None:
+    """Zero rides -> (0,0)-seed cold-start abstains, never a confident MAINTAIN (GROUND-R6).
+
+    A brand-new athlete with NO activities still gets the honest (0,0) PMC origin seed, so the
+    latest computed day reads ctl≈atl≈tsb≈0. The cold-start epsilon (READINESS_MIN_FITNESS_CTL)
+    treats that ~0 CTL as "no real fitness signal", so the REAL engine flow yields verdict None
+    + a DEGRADED status + the truthful insufficient-data summary — not a "keep training" verdict
+    on an empty base. This exercises the abstain path through the engine's gather, not just a
+    direct ``readiness_assessment(form=None)`` call.
+    """
+    database, _, _ = await _seed_store([])  # no rides at all
+    engine = GraphAgentEngine(database, FakeModel())  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is None  # abstains rather than emitting MAINTAIN on no data
+    assert readiness.status is RunStatus.DEGRADED
+    assert "enough" in readiness.summary_text.lower()  # the truthful _ABSTAIN_SENTENCE
+    assert not readiness.citations
+    assert _no_numeric_readiness_field(readiness)
+
+
+async def test_readiness_live_hrv_baseline_nudges_maintain_to_ease() -> None:
+    """A live HRV baseline + suppressed RMSSD nudges MAINTAIN one step to EASE (COACH-R1 #2).
+
+    Form sits in the MAINTAIN band; the seeded wellness row carries an HRV baseline band whose
+    midpoint (50 ms) is read live by the gather, and an RMSSD (30 ms) clearly below baseline*0.9.
+    The oracle's HRV-suppression nudge therefore fires end-to-end and the delivered verdict is
+    EASE, proving the previously-dead live HRV-baseline path is wired (the gather no longer
+    hardcodes baseline=None).
+    """
+    today = utcnow().date()
+    rides = _maintain_band_rides(today)
+    database, _, _ = await _seed_store(
+        rides,
+        hrv_day_rmssd=(today, 30.0),  # suppressed: 30 < midpoint(50) * 0.9 = 45
+        hrv_baseline_band=(40.0, 60.0),  # midpoint 50 ms read live by the gather
+    )
+    model = FakeModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text="You're carrying some fatigue, so ease off a little today.",
+                verdict=ReadinessVerdict.EASE,
+            ),
+            "_ClaimSchema": _ClaimSchema(claims=[]),
+        }
+    )
+    engine = GraphAgentEngine(database, model)  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.EASE  # MAINTAIN nudged toward REST by live HRV
+    assert readiness.coverage is not None
+    assert "hrv" in readiness.coverage["inputs_used"]  # the live baseline made HRV usable
+
+
+async def test_readiness_baseline_absent_stays_maintain_from_form_alone() -> None:
+    """Same suppressed RMSSD but NO baseline -> HRV unusable, verdict stays MAINTAIN (control).
+
+    The control for the live-baseline nudge: identical MAINTAIN-band form and a low RMSSD, but
+    no baseline band on the wellness row, so the gather reads baseline=None, HRV is recorded
+    unavailable, and the verdict is read from form alone (MAINTAIN). This isolates the baseline
+    as the cause of the EASE nudge above.
+    """
+    today = utcnow().date()
+    rides = _maintain_band_rides(today)
+    database, _, _ = await _seed_store(
+        rides,
+        hrv_day_rmssd=(today, 30.0),  # low RMSSD, but no baseline to compare against
+    )
+    engine = GraphAgentEngine(database, _maintain_narrator())  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.MAINTAIN  # no baseline -> no nudge
+    assert readiness.coverage is not None
+    assert "hrv" in readiness.coverage["inputs_unavailable"]
+
+
+async def test_readiness_state_first_lead_rejects_digit_anywhere_in_first_sentence() -> None:
+    """A number in the FIRST sentence of the model lead is rejected; the lead falls back (COACH-R7).
+
+    The model narrates a state-led first sentence that nonetheless carries a digit
+    ("Your form of 12 looks strong today."). COACH-R7 wants the first sentence number-LIGHT, so
+    the tightened gate falls back to the deterministic per-verdict state sentence. Driven through
+    the REAL deliverable/engine, the DELIVERED summary's first sentence carries no digit.
+    """
+    today = utcnow().date()
+    rides = [(today - _dt.timedelta(days=4 - i), 320.0) for i in range(5)]  # deep-negative -> REST
+    database, _, _ = await _seed_store(rides)
+    model = FakeModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text="Your form of 12 looks strong today. Take it easy.",
+                verdict=ReadinessVerdict.REST,  # consistent with deep-negative form (no override)
+            ),
+            "_ClaimSchema": _ClaimSchema(claims=[]),
+        }
+    )
+    engine = GraphAgentEngine(database, model)  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.REST
+    lead = first_sentence(readiness.summary_text)
+    assert not any(ch.isdigit() for ch in lead)  # digit-laden lead fell back to the state sentence
+    assert leads_with_state(readiness.summary_text)
+    assert "12" not in lead
+
+
+async def test_readiness_hrv_unavailable_clause_is_matchable_and_voice_clean() -> None:
+    """The HRV-unavailable case emits the PUBLIC clause verbatim, state-led + digit-free (FIX 7).
+
+    Drives the REAL deliverable for an HRV-unavailable case (form present, no wellness row at
+    all) and asserts the delivered summary CONTAINS the exact public ``HRV_UNAVAILABLE_CLAUSE``
+    (so the sibling eval voice grader can import + match it), while the FIRST sentence stays
+    state-led and digit-free.
+    """
+    today = utcnow().date()
+    rides = [(today - _dt.timedelta(days=4 - i), 320.0) for i in range(5)]
+    database, _, _ = await _seed_store(rides)  # no HRV wellness row
+    engine = GraphAgentEngine(database, _rest_narrator())  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
+    assert readiness.verdict is ReadinessVerdict.REST
+    assert HRV_UNAVAILABLE_CLAUSE in readiness.summary_text  # exact public prod phrasing
+    lead = first_sentence(readiness.summary_text)
+    assert leads_with_state(readiness.summary_text)
+    assert not any(ch.isdigit() for ch in lead)

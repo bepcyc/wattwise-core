@@ -21,6 +21,7 @@ Tier: T-INTEGRATION (offline, in-process ASGI via the FastAPI ``TestClient``).
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -253,3 +254,76 @@ def test_activities_surface_is_wired_and_auth_enforced() -> None:
     resp = _client().get(f"{API_PREFIX}/activities")
     assert resp.status_code == 401
     assert resp.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+
+
+# --- API-R41 / AUTH-R13: GET /v1/agent/readiness is wired and gated --------------
+#
+# The readiness endpoint (API-R41) shares the agent router's bearer + scope gates,
+# but the factory-level "wired and auth enforced" coverage its sibling surfaces have
+# (test_performance_surface_is_wired_and_auth_enforced /
+# test_activities_surface_is_wired_and_auth_enforced) was missing for it. These three
+# assert the real gate over the assembled create_app (no override of the scope/identity
+# seams), so a tokenless call fails 401 and a token lacking ``agent`` fails 403 — the
+# real authn/authz seam, not the router's unwired fail-closed default. Deterministic:
+# the factory's agent engine falls back to the unconfigured (no-model) engine, so the
+# served 200 needs no live model.
+
+#: Numeric readiness KPI/score field names that must never appear on the response
+#: (API-R41 / COACH-R7: readiness is a typed verdict, never a number).
+_FORBIDDEN_READINESS_KPI_FIELDS = ("readiness", "readiness_score", "score")
+#: Thread/continuation field names — the readiness surface is stateless this phase
+#: (no thread_id, no continuation follow-up chip), so none may appear on the response.
+_FORBIDDEN_READINESS_THREAD_FIELDS = ("thread_id", "continuation", "follow_up")
+
+
+def test_agent_readiness_without_token_is_401() -> None:
+    """A tokenless GET /v1/agent/readiness hits the real bearer gate -> 401 (AUTH-R1/R13).
+
+    The factory wires the agent scope gate + server-derived identity, so an unauthenticated
+    call yields the uniform ``401 unauthenticated`` (the real bearer gate, AUTH-R1), never
+    the router's unwired fail-closed 401/403 seam default.
+    """
+    resp = _client().get(f"{API_PREFIX}/agent/readiness")
+    assert resp.status_code == 401
+    assert resp.json()["type"].endswith("/unauthenticated")
+    assert resp.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+
+
+def test_agent_readiness_with_wrong_scope_is_403() -> None:
+    """A valid token lacking the ``agent`` scope is 403 insufficient-scope (AUTH-R7/R13).
+
+    Authentication passes (a real, well-formed bearer with the ``read`` scope), so the
+    failure is an authorization gap on the wired ``require_scopes(Scope.AGENT)`` gate — a
+    403 listing the required scope, not a 401.
+    """
+    resp = _client().get(f"{API_PREFIX}/agent/readiness", headers=_auth(scopes=["read"]))
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["type"].endswith("/insufficient-scope")
+    # the machine-readable required-scope hint names the missing capability (AUTH-R7/R9)
+    assert any(err.get("message") == "agent" for err in body.get("errors", []))
+
+
+def test_agent_readiness_with_agent_scope_is_200_typed_verdict_no_kpi_no_thread() -> None:
+    """A valid ``agent``-scoped token gets 200 with a typed verdict, no KPI, no thread (API-R41).
+
+    Over the assembled factory (the agent engine falls back to the unconfigured no-model
+    engine, so this is deterministic without a live model), an authorized readiness read
+    returns the typed :class:`ReadinessResponse`: a verdict member (``null`` here, since the
+    engine is unconfigured) and NO numeric readiness KPI, NO ``thread_id``, and NO
+    continuation follow-up chip — readiness is a stateless typed verdict this phase.
+    """
+    resp = _client().get(f"{API_PREFIX}/agent/readiness", headers=_auth(scopes=["agent"]))
+    assert resp.status_code == 200
+    body = resp.json()
+    # a typed verdict member (null when unassessable), never a number (API-R41 / COACH-R7)
+    assert "verdict" in body
+    assert body["verdict"] in (None, "go", "maintain", "ease", "rest")
+    assert isinstance(body["summary_text"], str) and body["summary_text"]
+    flat = json.dumps(body)
+    for field in _FORBIDDEN_READINESS_KPI_FIELDS:
+        assert f'"{field}"' not in flat, f"numeric readiness field {field!r} leaked (API-R41)"
+    for field in _FORBIDDEN_READINESS_THREAD_FIELDS:
+        assert f'"{field}"' not in flat, f"stateful thread/continuation field {field!r} leaked"
+    # no continuation chip is promised on the stateless readiness surface this phase
+    assert body.get("suggested_followups", []) == []

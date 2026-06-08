@@ -81,6 +81,12 @@ class Scorecard:
                 "passed": g.judge.passed,
                 "failures": list(g.judge.failures),
             },
+            "readiness": {
+                "consistency_rate": g.readiness.consistency_rate,
+                "voice_rate": g.readiness.voice_rate,
+                "passed": g.readiness.passed,
+                "failures": list(g.readiness.failures),
+            },
         }
 
 

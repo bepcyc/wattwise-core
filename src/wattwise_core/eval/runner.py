@@ -356,7 +356,7 @@ def grade_suite(suite: str, outcomes: Sequence[RunnerOutcome]) -> SuiteGrades:
 # Suites driven by the production graph/planner/judge (EVAL-R2a/-R3/-R5/-R7), in addition
 # to the claim-level grounding/abstention/injection suites above.
 _ENGINE_SUITES: frozenset[str] = frozenset(
-    {"termination", "intent_plan", "multilingual", "judge"}
+    {"termination", "intent_plan", "multilingual", "judge", "readiness"}
 )
 
 
@@ -370,6 +370,7 @@ def list_suites() -> tuple[str, ...]:
         "intent_plan",
         "multilingual",
         "judge",
+        "readiness",
     )
 
 
@@ -383,6 +384,8 @@ async def _run_engine_suite(name: str, mode: EvalMode) -> Scorecard:
         grades = SuiteGrades(intent_plan=suites.grade_intent_plan())
     elif name == "judge":
         grades = SuiteGrades(judge=await suites.grade_judge())
+    elif name == "readiness":
+        grades = SuiteGrades(readiness=suites.grade_readiness())
     elif name == "multilingual":
         total, failures = suites.grade_multilingual()
         # Multilingual rendering is a parity check; express pass/fail via the termination

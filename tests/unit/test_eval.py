@@ -19,11 +19,13 @@ from pathlib import Path
 
 import pytest
 
+from wattwise_core.agent.readiness_deliverable import HRV_UNAVAILABLE_CLAUSE
 from wattwise_core.eval.__main__ import main as cli_main
 from wattwise_core.eval.grading import (
     ABSTENTION_MIN_RATE,
     GROUNDING_MIN_FAITHFULNESS,
     SCHEMA_MIN_RATE,
+    ReadinessGrade,
     grade_abstention,
     grade_grounding,
     grade_schema,
@@ -36,7 +38,21 @@ from wattwise_core.eval.runner import (
     load_dataset,
     run_suite,
 )
-from wattwise_core.eval.suites import grade_intent_plan, grade_judge, grade_termination
+from wattwise_core.eval.suites import (
+    _consistency_failure as readiness_consistency_failure,
+)
+from wattwise_core.eval.suites import (
+    _is_abstain as readiness_is_abstain,
+)
+from wattwise_core.eval.suites import (
+    _voice_failures as readiness_voice_failures,
+)
+from wattwise_core.eval.suites import (
+    grade_intent_plan,
+    grade_judge,
+    grade_readiness,
+    grade_termination,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -297,6 +313,133 @@ async def test_judge_never_certifies_grounding() -> None:
     assert grade.passed
 
 
+# --------------------------------------------------------------------------- #
+# Readiness / form suite (QA-EVAL-R2.4 / COACH-R7) — deterministic 100% gates  #
+# --------------------------------------------------------------------------- #
+
+
+def test_grade_readiness_passes() -> None:
+    # QA-EVAL-R2.4 + COACH-R7: every "good" fixture (each band, the HRV-suppressed nudge,
+    # HRV-present-normal, HRV-unavailable, and the form-unavailable abstain) clears BOTH
+    # deterministic gates — verdict-direction consistency AND voice-liveness at 100%.
+    grade = grade_readiness()
+    assert grade.passed
+    assert grade.failures == ()
+    assert grade.consistency_rate == 1.0
+    assert grade.voice_rate == 1.0
+
+
+def test_grade_readiness_rejects_inconsistent_verdict() -> None:
+    # Teeth (QA-EVAL-R2.4 / EVAL-R5): a deep-negative form (-30 => REST band) delivered as
+    # a hard "go" MUST be flagged inconsistent by the deterministic certificate — the code
+    # decides the band, never the LLM.
+    case = {
+        "id": "teeth-inconsistent",
+        "form": -30.0,
+        "hrv_rmssd": None,
+        "hrv_baseline": None,
+        "delivered_verdict": "go",
+        "summary_text": "You should take it easy today and recover.",
+        "expects_hrv_unavailable_statement": False,
+    }
+    reason = readiness_consistency_failure(case)
+    assert reason is not None
+    assert "inconsistent" in reason
+
+
+def test_grade_readiness_rejects_number_led_summary() -> None:
+    # Teeth (COACH-R7 / QA-EVAL-R2.12): a summary whose first sentence starts with a number
+    # demotes the STATE behind a digit — voice-liveness MUST reject it.
+    case = {"id": "teeth-number-led", "expects_hrv_unavailable_statement": False}
+    failures = readiness_voice_failures(case, "12 is your form today, so push hard.")
+    assert failures
+    assert any("number-led" in f for f in failures)
+
+
+def test_readiness_grade_fails_on_nonempty_failures_despite_perfect_rates() -> None:
+    # Teeth (FIX 1): a recorded failure MUST fail the gate even when both rates read 1.0.
+    # A case can append a real failure (e.g. an abstain case that wrongly delivered a
+    # verdict) without lowering consistency_rate/voice_rate, so `.passed` MUST additionally
+    # require `failures == ()`.
+    grade = ReadinessGrade(
+        total=1,
+        non_abstain=1,
+        consistent=1,
+        voice_ok=1,
+        failures=("synthetic: abstain case (form null) delivered a verdict",),
+    )
+    assert grade.consistency_rate == 1.0
+    assert grade.voice_rate == 1.0
+    assert grade.passed is False, "non-empty failures MUST fail the readiness gate (FIX 1)"
+
+
+def test_readiness_grade_passes_only_when_failures_empty() -> None:
+    # Control for FIX 1: identical rates with NO recorded failures still passes.
+    grade = ReadinessGrade(total=1, non_abstain=1, consistent=1, voice_ok=1, failures=())
+    assert grade.passed is True
+
+
+def test_readiness_present_form_null_verdict_is_a_failure() -> None:
+    # Teeth (FIX 4): a case WITH a form but NO delivered verdict is NON-abstain and MUST be
+    # recorded as a failure ("form present but no verdict delivered"), never silently
+    # classified abstain and skipped past readiness_consistent.
+    case = {
+        "id": "teeth-form-no-verdict",
+        "form": 5.0,
+        "hrv_rmssd": None,
+        "hrv_baseline": None,
+        "delivered_verdict": None,
+        "summary_text": "You're in a steady place today, so train as planned.",
+        "expects_hrv_unavailable_statement": False,
+    }
+    assert not readiness_is_abstain(case), "form present => NON-abstain (FIX 4)"
+    reason = readiness_consistency_failure(case)
+    assert reason is not None
+    assert "no verdict delivered" in reason
+
+
+def test_readiness_consistency_failure_keeps_deep_negative_go_teeth() -> None:
+    # FIX 4 must not weaken the existing deep-negative-form delivered-"go" teeth: a -30 form
+    # (REST band) delivered as a hard "go" is still flagged inconsistent.
+    case = {
+        "id": "teeth-deep-negative-go",
+        "form": -30.0,
+        "hrv_rmssd": None,
+        "hrv_baseline": None,
+        "delivered_verdict": "go",
+        "summary_text": "You should take it easy today and recover.",
+        "expects_hrv_unavailable_statement": False,
+    }
+    reason = readiness_consistency_failure(case)
+    assert reason is not None
+    assert "inconsistent" in reason
+
+
+def test_readiness_prod_hrv_clause_satisfies_voice_check() -> None:
+    # Teeth (FIX 7): the EXACT prod HRV-unavailable clause MUST satisfy the voice grader's
+    # HRV-unavailable check, so the gate matches a LIVE narration, not only hand fixtures.
+    case = {"id": "teeth-prod-hrv-clause", "expects_hrv_unavailable_statement": True}
+    summary = (
+        "You're in a steady place today, so train as planned. "
+        f"{HRV_UNAVAILABLE_CLAUSE}"
+    )
+    failures = readiness_voice_failures(case, summary)
+    assert failures == [], f"prod HRV clause must clear the voice check, got {failures}"
+
+
+def test_readiness_positive_hrv_prose_is_not_a_false_unavailable() -> None:
+    # Teeth: a summary that mentions HRV POSITIVELY (and happens to say "from your form")
+    # MUST NOT satisfy the HRV-unavailable voice check — absence must be STATED, not implied
+    # (GROUND-R7). Guards the broadened-regex false-PASS hole the re-verify panel surfaced.
+    case = {"id": "teeth-positive-hrv", "expects_hrv_unavailable_statement": True}
+    summary = (
+        "You're carrying some fatigue, so ease off. "
+        "Your HRV is strong, momentum comes from your form."
+    )
+    failures = readiness_voice_failures(case, summary)
+    assert failures, "positive-HRV prose must FAIL the must-state-HRV-unavailable check"
+
+
 def test_full_scorecard_lists_every_gated_suite() -> None:
     assert set(list_suites()) == {
         "grounding",
@@ -306,6 +449,7 @@ def test_full_scorecard_lists_every_gated_suite() -> None:
         "intent_plan",
         "multilingual",
         "judge",
+        "readiness",
     }
 
 

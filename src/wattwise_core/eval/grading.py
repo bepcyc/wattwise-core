@@ -36,6 +36,19 @@ SCHEMA_MIN_RATE = 1.0
 INJECTION_MIN_RATE = 1.0
 # The intent/retrieval-plan accuracy floor (EVAL-R3): precision AND recall >= 0.9.
 INTENT_PLAN_MIN_ACCURACY = 0.9
+# Readiness gates (QA-EVAL-R2.4 / COACH-R7 / QA-EVAL-R11/-R2.12). Both are deterministic
+# 100% mandates, exactly like GROUNDING_MIN_FAITHFULNESS: the verdict-direction
+# consistency certificate (readiness_consistent) must hold on EVERY non-abstain case
+# (code decides the band, not the LLM — EVAL-R5), and voice-liveness (a number-light
+# STATE-first summary carrying no numeric "readiness score") is a 100%-pass safety rule.
+READINESS_CONSISTENCY_MIN_RATE = 1.0
+READINESS_VOICE_MIN_RATE = 1.0
+# Max foregrounded numbers allowed in a readiness summary (VOICE-R7 family). Readiness
+# is a typed STATE, not a score: the bounded form number must be demoted, never the
+# headline. We pin the cap at the deliverables ``short`` ceiling (2) rather than import
+# the persona-keyed ``number_cap`` here, because a readiness summary is a terse, one-
+# state message and must stay number-light independent of the response-length persona.
+READINESS_MAX_NUMBERS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +168,52 @@ class IntentPlanGrade:
 
 
 @dataclass(frozen=True, slots=True)
+class ReadinessGrade:
+    """Outcome of grading the readiness/form suite (QA-EVAL-R2.4 / COACH-R7).
+
+    Two deterministic rates, both 100% gates. ``consistency_rate`` is the fraction of
+    NON-abstain cases whose delivered verdict equals the band verdict the oracle
+    computes (the :func:`readiness_consistent` certificate — deep-negative form is never
+    a hard "go", and the code, not the LLM, decides — EVAL-R5). ``voice_rate`` is the
+    fraction of ALL cases (abstain included) whose summary clears voice-liveness: a
+    number-light STATE-first sentence, no numeric "readiness score", and an explicit
+    HRV-unavailable statement where the inputs were absent (GROUND-R7).
+    """
+
+    total: int
+    non_abstain: int
+    consistent: int
+    voice_ok: int
+    failures: tuple[str, ...] = ()
+
+    @property
+    def consistency_rate(self) -> float:
+        """Fraction of non-abstain cases whose verdict matches the band (1.0 if none)."""
+        return 1.0 if self.non_abstain == 0 else self.consistent / self.non_abstain
+
+    @property
+    def voice_rate(self) -> float:
+        """Fraction of all cases whose summary clears voice-liveness (1.0 if empty)."""
+        return 1.0 if self.total == 0 else self.voice_ok / self.total
+
+    @property
+    def passed(self) -> bool:
+        """Gate: consistency AND voice both 100% AND zero recorded failures.
+
+        The two rates alone can mask a real defect: a case may append a failure to
+        ``failures`` (e.g. a present-form case that delivered no verdict, or an abstain
+        case that wrongly delivered a verdict) without lowering either rate, so the gate
+        MUST additionally require ``self.failures == ()`` — any recorded failure of any
+        kind fails CI (QA-EVAL-R2.4 / COACH-R7, FIX 1).
+        """
+        return (
+            self.consistency_rate >= READINESS_CONSISTENCY_MIN_RATE
+            and self.voice_rate >= READINESS_VOICE_MIN_RATE
+            and self.failures == ()
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class JudgeGrade:
     """Outcome of the LLM-as-judge qualitative rubric suite (EVAL-R5).
 
@@ -186,6 +245,7 @@ class SuiteGrades:
     termination: TerminationGrade = field(default_factory=lambda: TerminationGrade(0, 0))
     intent_plan: IntentPlanGrade = field(default_factory=lambda: IntentPlanGrade(0, 1.0, 1.0))
     judge: JudgeGrade = field(default_factory=lambda: JudgeGrade(0, 0, 1.0))
+    readiness: ReadinessGrade = field(default_factory=lambda: ReadinessGrade(0, 0, 0, 0))
 
     @property
     def passed(self) -> bool:
@@ -197,6 +257,7 @@ class SuiteGrades:
             and self.termination.passed
             and self.intent_plan.passed
             and self.judge.passed
+            and self.readiness.passed
         )
 
 
@@ -318,12 +379,16 @@ __all__ = [
     "GROUNDING_MIN_FAITHFULNESS",
     "INJECTION_MIN_RATE",
     "INTENT_PLAN_MIN_ACCURACY",
+    "READINESS_CONSISTENCY_MIN_RATE",
+    "READINESS_MAX_NUMBERS",
+    "READINESS_VOICE_MIN_RATE",
     "SCHEMA_MIN_RATE",
     "AbstentionGrade",
     "GroundingGrade",
     "InjectionGrade",
     "IntentPlanGrade",
     "JudgeGrade",
+    "ReadinessGrade",
     "SchemaGrade",
     "SuiteGrades",
     "TerminationGrade",

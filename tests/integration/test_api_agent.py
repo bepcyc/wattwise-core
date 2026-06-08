@@ -30,7 +30,7 @@ from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from wattwise_core.agent.contracts import RunStatus
-from wattwise_core.agent.deliverables import AgentAnswer, Citation, Observation
+from wattwise_core.agent.deliverables import AgentAnswer, Citation, Observation, Readiness
 from wattwise_core.api.agent_stream import problem_event
 from wattwise_core.api.app import create_app
 from wattwise_core.api.auth import Scope, issue_access_token
@@ -40,6 +40,7 @@ from wattwise_core.api.redaction import contains_pii, redact_payload, redact_tex
 from wattwise_core.api.routers import agent_routes
 from wattwise_core.api.sanitize import is_inert, sanitize_html
 from wattwise_core.config import Environment, load_settings
+from wattwise_core.domain.enums import ReadinessVerdict
 
 
 def _fake_request(path: str = "/v1/agent/ask") -> Request:
@@ -72,8 +73,9 @@ class _FakeEngine:
     passes the server-derived id, never a client value.
     """
 
-    def __init__(self, answer: AgentAnswer) -> None:
+    def __init__(self, answer: AgentAnswer, readiness: Readiness | None = None) -> None:
         self._answer = answer
+        self._readiness = readiness
         self.seen_athlete_id: str | None = None
 
     async def answer(
@@ -88,6 +90,13 @@ class _FakeEngine:
     ) -> AgentAnswer:
         self.seen_athlete_id = athlete_id
         return self._answer
+
+    async def readiness(
+        self, *, athlete_id: str, locale: str, response_length: str
+    ) -> Readiness:
+        self.seen_athlete_id = athlete_id
+        assert self._readiness is not None, "test did not script a readiness deliverable"
+        return self._readiness
 
 
 def _grounded_answer(
@@ -107,8 +116,31 @@ def _grounded_answer(
     )
 
 
+def _readiness(
+    *,
+    verdict: ReadinessVerdict | None = ReadinessVerdict.REST,
+    summary_text: str = "You're deep in fatigue, so today is for rest.",
+    coverage: dict[str, Any] | None = None,
+    citations: tuple[Citation, ...] = (),
+) -> Readiness:
+    """A typed readiness deliverable: a state-first verdict with no numeric readiness field."""
+    return Readiness(
+        verdict=verdict,
+        status=RunStatus.COMPLETED,
+        as_of="2026-06-08",
+        summary_html=f"<p>{summary_text}</p>",
+        summary_text=summary_text,
+        citations=citations,
+        coverage=coverage or {"inputs_used": ["form"], "inputs_unavailable": ["hrv"]},
+        suggested_followups=("Show me the numbers behind that",) if citations else (),
+    )
+
+
 def _build_app(
-    answer: AgentAnswer, *, limiter: RateLimiter | None = None
+    answer: AgentAnswer,
+    *,
+    limiter: RateLimiter | None = None,
+    readiness: Readiness | None = None,
 ) -> tuple[FastAPI, _FakeEngine]:
     """Assemble the app with the agent router mounted and its seams overridden.
 
@@ -122,7 +154,7 @@ def _build_app(
     )
     app = create_app(settings)
     app.include_router(agent_routes.router)
-    engine = _FakeEngine(answer)
+    engine = _FakeEngine(answer, readiness)
     bucket = limiter or RateLimiter()
     app.dependency_overrides[agent_routes.require_agent_scope] = lambda: None
     app.dependency_overrides[agent_routes.current_athlete_id] = lambda: "owner"
@@ -367,6 +399,86 @@ def test_server_derived_identity_passed_to_engine() -> None:
     with TestClient(app) as client:
         client.post("/v1/agent/ask", json={"question": "Ready?"}, headers=_auth(app))
     assert engine.seen_athlete_id == "owner"
+
+
+# --- GET /v1/agent/readiness (API-R41) -------------------------------------------
+
+#: The forbidden numeric-readiness KPI/score fields — none may appear on the readiness
+#: response (API-R41 / COACH-R7: readiness is a typed verdict, never a number).
+FORBIDDEN_READINESS_FIELDS = ("readiness", "readiness_score", "score")
+
+
+def test_readiness_returns_typed_verdict_state_first_no_numeric_kpi() -> None:
+    """The readiness endpoint returns a typed verdict + state-first summary, no number (API-R41)."""
+    app, _ = _build_app(
+        _grounded_answer(),
+        readiness=_readiness(
+            citations=(Citation(record_id="form@2026-06-08", metric="form", value=-21.4,
+                                as_of="2026-06-08"),),
+        ),
+    )
+    with TestClient(app) as client:
+        resp = client.get("/v1/agent/readiness", headers=_auth(app))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] == "rest"  # a typed verdict, not a number
+    assert body["summary_text"]
+    assert not any(ch.isdigit() for ch in _first_sentence(body["summary_text"]))  # state-first
+    # the form number is on-demand backing only: a grounded citation, never a hero KPI
+    assert body["citations"][0]["metric"] == "form"
+    flat = json.dumps(body)
+    for field in FORBIDDEN_READINESS_FIELDS:
+        assert f'"{field}"' not in flat, f"numeric readiness field {field!r} leaked (API-R41)"
+    for field in FORBIDDEN_FIELDS:
+        assert f'"{field}"' not in flat  # no billing/model machinery either (API-R11c)
+
+
+def test_readiness_html_is_sanitized_inert() -> None:
+    """The readiness summary_html is server-side sanitized before return (API-R13 / SCHEMA-R7)."""
+    payload = "You're set.<script>alert(1)</script>"
+    app, _ = _build_app(
+        _grounded_answer(),
+        readiness=_readiness(verdict=ReadinessVerdict.GO, summary_text=payload),
+    )
+    with TestClient(app) as client:
+        resp = client.get("/v1/agent/readiness", headers=_auth(app))
+    assert resp.status_code == 200
+    assert "<script" not in resp.json()["summary_html"].lower()
+
+
+def test_readiness_graceful_when_unconfigured_returns_null_verdict() -> None:
+    """An unconfigured agent yields a graceful readiness: null verdict + sentence (RUN-R4.1)."""
+    app, _ = _build_app(
+        _grounded_answer(),
+        readiness=_readiness(
+            verdict=None,
+            summary_text="Coaching isn't switched on for this account yet.",
+            coverage={"reason": "agent_unconfigured"},
+        ),
+    )
+    with TestClient(app) as client:
+        resp = client.get("/v1/agent/readiness", headers=_auth(app))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] is None  # typed graceful response, not an error
+    assert body["summary_text"]
+
+
+def test_readiness_passes_server_derived_identity_to_engine() -> None:
+    """The readiness route passes the server-derived athlete id to the engine (AUTH-R3)."""
+    app, engine = _build_app(_grounded_answer(), readiness=_readiness())
+    with TestClient(app) as client:
+        client.get("/v1/agent/readiness", headers=_auth(app))
+    assert engine.seen_athlete_id == "owner"
+
+
+def _first_sentence(text: str) -> str:
+    """The leading sentence of a plain-text summary (for the state-first digit check)."""
+    for end in (". ", "! ", "? "):
+        idx = text.find(end)
+        if idx != -1:
+            return text[: idx + 1]
+    return text
 
 
 # --- sanitize.py (SCHEMA-R7) -----------------------------------------------------

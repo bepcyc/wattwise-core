@@ -42,8 +42,14 @@ from wattwise_core.agent.contracts import (
 from wattwise_core.agent.deliverables import (
     AgentAnswer,
     CoachGraph,
+    Readiness,
     answer_question,
+    readiness_assessment,
     weekly_digest,
+)
+from wattwise_core.agent.engine_readiness import (
+    gather_readiness_inputs,
+    readiness_narrator,
 )
 from wattwise_core.agent.graph import DEFAULT_NODE_VISIT_CEILING, build_graph
 from wattwise_core.agent.model import OpenAICompatibleModel
@@ -337,6 +343,34 @@ class GraphAgentEngine:
         async with self._db.session() as session:
             return await weekly_digest(self._graph(AnalyticsService(session)), athlete_id, week_end)
 
+    async def readiness(
+        self, *, athlete_id: str, locale: str = "en", response_length: str = "standard"
+    ) -> Readiness:
+        """Build the readiness/form deliverable from canonical inputs (QA-EVAL-R2.4).
+
+        Mirrors :meth:`answer`: opens a canonical session, builds the analytics service,
+        gathers the readiness inputs DETERMINISTICALLY (the fixed readiness JTBD does NOT
+        route through the retrieval planner) — latest canonical TSB (form) + its date, and
+        latest HRV — then drives :func:`readiness_assessment` with the same model-backed
+        narrator + canonical grounder the answers use. The delivered verdict is always the
+        deterministic oracle's (canonical wins); numbers surface only as grounded citations.
+        ``locale`` is accepted for parity with :meth:`answer` (the OSS narration prompt is
+        English; localized copy is a commercial layer).
+        """
+        async with self._db.session() as session:
+            svc = AnalyticsService(session)
+            form, as_of, rmssd, baseline = await gather_readiness_inputs(svc, athlete_id)
+            return await readiness_assessment(
+                athlete_id,
+                form=form,
+                as_of=as_of,
+                hrv_rmssd=rmssd,
+                hrv_baseline=baseline,
+                narrate=readiness_narrator(self._model),
+                grounder=ClaimGrounder(self._model, svc),
+                response_length=response_length,  # type: ignore[arg-type]
+            )
+
 
 class UnconfiguredAgentEngine:
     """Graceful no-op engine when the OSS deployment has no LLM configured (RUN-R4.1).
@@ -369,6 +403,25 @@ class UnconfiguredAgentEngine:
             answer_html=f"<p>{text}</p>",
             answer_text=text,
             coverage_caveat={"reason": "agent_unconfigured"},
+        )
+
+    async def readiness(
+        self, *, athlete_id: str, locale: str = "en", response_length: str = "standard"
+    ) -> Readiness:
+        """Typed graceful readiness when no LLM is configured (RUN-R4.1, mirrors :meth:`answer`).
+
+        No model and no canonical read: returns an abstaining :class:`Readiness` with no
+        verdict and a jargon-free "not switched on" state sentence (no internals leaked,
+        VOICE-R2/-R3), so the readiness endpoint degrades gracefully rather than erroring.
+        """
+        text = self._MESSAGE.get((locale or "en").split("-", 1)[0].lower(), self._MESSAGE["en"])
+        return Readiness(
+            verdict=None,
+            status=RunStatus.DEGRADED,
+            as_of=None,
+            summary_html=f"<p>{text}</p>",
+            summary_text=text,
+            coverage={"reason": "agent_unconfigured"},
         )
 
 

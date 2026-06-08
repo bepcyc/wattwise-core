@@ -137,6 +137,37 @@ async def _load_wellness_hrv_summary(
     return None if dw is None else _f(dw.hrv_rmssd_ms)
 
 
+async def _load_wellness_hrv_baseline(
+    session: AsyncSession, athlete_id: str, local_date: _dt.date
+) -> float | None:
+    """The athlete's HRV baseline (RMSSD ms) for a day, or ``None`` (fail-closed).
+
+    Reads the source-reported ``hrv_baseline_low_ms`` / ``hrv_baseline_high_ms`` band on the
+    day's :class:`DailyWellness` row and returns the MIDPOINT when both bounds are present
+    (else whichever single bound is present, else ``None``). No row, both bounds absent, or a
+    non-finite value all fail closed to ``None`` (GBO-R24c band → one comparable baseline).
+    """
+    stmt = select(DailyWellness).where(
+        DailyWellness.athlete_id == _uid(athlete_id),
+        DailyWellness.local_date == local_date,
+    )
+    dw = (await session.execute(stmt)).scalar_one_or_none()
+    if dw is None:
+        return None
+    return _hrv_baseline_midpoint(_f(dw.hrv_baseline_low_ms), _f(dw.hrv_baseline_high_ms))
+
+
+def _hrv_baseline_midpoint(low: float | None, high: float | None) -> float | None:
+    """Midpoint of a low/high HRV-baseline band, a single present bound, or ``None``.
+
+    Non-finite bounds are dropped before combining so no NaN/Inf escapes (fail-closed).
+    """
+    bounds = [b for b in (low, high) if b is not None and np.isfinite(b)]
+    if not bounds:
+        return None
+    return sum(bounds) / len(bounds)
+
+
 class AnalyticsService:  # noqa: size-limits
     """Computes canonical analytics for one athlete from the canonical store.
 
@@ -380,6 +411,18 @@ class AnalyticsService:  # noqa: size-limits
         rr = await _load_wellness_rr(self._session, athlete_id, local_date)
         summary = await _load_wellness_hrv_summary(self._session, athlete_id, local_date)
         return _hrv.time_domain_hrv(rr_intervals_ms=rr, summary_rmssd_ms=summary)
+
+    async def hrv_baseline(self, athlete_id: str, local_date: _dt.date) -> float | None:
+        """The athlete's source-reported HRV baseline (RMSSD ms) for a day, or ``None``.
+
+        Reads the ``hrv_baseline_low_ms`` / ``hrv_baseline_high_ms`` band on the day's
+        :class:`DailyWellness` row and returns the MIDPOINT when both bounds are present (else
+        whichever single bound is present, else ``None``). No row / both bounds absent /
+        non-finite all fail closed to ``None``. This feeds the readiness HRV-suppression nudge
+        (COACH-R1 #2): the nudge can only fire when a real baseline is available, so without
+        one the verdict is read from form alone — never against a fabricated baseline.
+        """
+        return await _load_wellness_hrv_baseline(self._session, athlete_id, local_date)
 
 
 def _better_mmp(

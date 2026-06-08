@@ -83,6 +83,9 @@ class MetricName(StrEnum):
     CTL = "ctl"
     ATL = "atl"
     TSB = "tsb"
+    # Athlete-facing synonym for canonical TSB (CTL(d-1)-ATL(d-1)); resolves to the SAME
+    # PmcDay.tsb value as TSB (a pure alias, not a second computation).
+    FORM = "form"
     CRITICAL_POWER_W = "critical_power_w"
     W_PRIME_J = "w_prime_j"
     HRV_RMSSD_MS = "hrv_rmssd_ms"
@@ -345,7 +348,7 @@ class CanonicalEvidence:
             name = MetricName(metric)
         except ValueError:
             return None
-        if name in (MetricName.CTL, MetricName.ATL, MetricName.TSB):
+        if name in (MetricName.CTL, MetricName.ATL, MetricName.TSB, MetricName.FORM):
             return await self._pmc_scalar(name, as_of)
         if name in (MetricName.CRITICAL_POWER_W, MetricName.W_PRIME_J):
             return await self._cp_scalar(name, as_of)
@@ -355,8 +358,10 @@ class CanonicalEvidence:
         day = self._date(as_of)
         if day is None:
             return None
+        # FORM is the athlete-facing alias of TSB: both read the canonical PmcDay.tsb field.
+        field = MetricName.TSB.value if name is MetricName.FORM else name.value
         series = await self._svc.pmc(self._athlete_id, day, day)
-        return _latest_pmc_scalar(series, name.value)
+        return _latest_pmc_scalar(series, field)
 
     async def _cp_scalar(self, name: MetricName, as_of: str | None) -> float | None:
         day = self._date(as_of)

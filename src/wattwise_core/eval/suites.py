@@ -43,10 +43,48 @@ from wattwise_core.agent.contracts import (
 )
 from wattwise_core.agent.graph import MAX_REDRAFTS, MAX_REFLECTIONS, AgentServices, build_graph
 from wattwise_core.agent.model import FakeModel
-from wattwise_core.eval.grading import IntentPlanGrade, JudgeGrade, TerminationGrade
+from wattwise_core.agent.readiness_deliverable import HRV_UNAVAILABLE_CLAUSE
+from wattwise_core.analytics.readiness import readiness_consistent
+from wattwise_core.domain.enums import ReadinessVerdict
+from wattwise_core.eval.grading import (
+    READINESS_MAX_NUMBERS,
+    IntentPlanGrade,
+    JudgeGrade,
+    ReadinessGrade,
+    TerminationGrade,
+)
 
 _DATASETS_DIR = Path(__file__).parent / "datasets"
 _INTERNAL_TOKEN = re.compile(r"(ctl|atl|tsb|rmssd|coverage_gaps|__truncated__)", re.IGNORECASE)
+# A foregrounded numeric value in athlete-facing prose (mirrors the deliverables
+# number-density regex): plain signed integers/decimals, standalone so words/dates are
+# not miscounted. Used by the readiness voice-liveness count (COACH-R7 / QA-EVAL-R11).
+_SUMMARY_NUMBER_RE = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?(?![\w.])")
+# A leading STATE sentence must contain NO digit at all (the bounded form number is
+# demoted, never the headline — COACH-R7 / QA-EVAL-R2.12).
+_FIRST_SENTENCE_RE = re.compile(r"^[^.!?]*")
+# A numeric "readiness score" is forbidden: readiness is a typed STATE, not a number
+# (SCHEMA-R3). Catch "readiness score", "readiness: <n>", "readiness <n>", "readiness=<n>".
+_READINESS_SCORE_RE = re.compile(
+    r"readiness\s*(?:score|[:=]\s*[+-]?\d|\s+[+-]?\d)", re.IGNORECASE
+)
+# An HRV-unavailable summary must SAY HRV/heart-rate-variability is unknown (GROUND-R7).
+_HRV_MENTION_RE = re.compile(r"\bhrv\b|heart[- ]rate[- ]variability", re.IGNORECASE)
+# The HRV-absent phrasing the grader accepts. FIX 7: the REAL prod clause
+# (``HRV_UNAVAILABLE_CLAUSE`` = "I don't have a recent HRV reading, so this is from your
+# form.") was NOT matched by the old pattern, so the check only ever passed on hand-written
+# fixtures. The PRIMARY match is the exact canonical clause (substring, in
+# ``_states_hrv_unavailable``); this regex is the fallback for hand-fixture phrasings and
+# carries only genuine ABSENCE tokens. We deliberately do NOT include the bare token
+# "from your form": it false-positives on prose that mentions HRV POSITIVELY (e.g.
+# "Your HRV is strong, momentum comes from your form") — absence must be stated, not implied.
+_HRV_ABSENT_RE = re.compile(
+    r"\b(?:unavailable|not available|wasn't available|was not available|"
+    r"wasn't recorded|was not recorded|no hrv|unknown|not guessing|"
+    r"leans on form|don't have a recent hrv|do not have a recent hrv|"
+    r"no recent hrv|without (?:a |an )?(?:recent )?hrv)\b",
+    re.IGNORECASE,
+)
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -152,6 +190,169 @@ async def grade_termination() -> TerminationGrade:
         else:
             failures.append(f"{cid}: {reason}")
     return TerminationGrade(len(cases), bounded, tuple(failures))
+
+
+# --- readiness / form suite (QA-EVAL-R2.4) ---------------------------------------------
+
+
+def _first_sentence(text: str) -> str:
+    """The leading athlete-facing sentence (up to the first . ! or ?)."""
+    match = _FIRST_SENTENCE_RE.match(text.strip())
+    return match.group(0) if match else text.strip()
+
+
+def _state_leads(summary: str) -> bool:
+    """True iff the FIRST sentence is number-light: it carries NO digit (COACH-R7).
+
+    The bounded form number must be demoted out of the headline, so a leading sentence
+    with any digit fails (QA-EVAL-R2.12 / VOICE — readiness leads with STATE, not a
+    number).
+    """
+    return not any(ch.isdigit() for ch in _first_sentence(summary))
+
+
+def _number_density_ok(summary: str) -> bool:
+    """True iff the summary foregrounds <= READINESS_MAX_NUMBERS numeric values."""
+    return len(_SUMMARY_NUMBER_RE.findall(summary)) <= READINESS_MAX_NUMBERS
+
+
+def _no_readiness_score(summary: str) -> bool:
+    """True iff the summary carries NO numeric 'readiness score' (SCHEMA-R3)."""
+    return _READINESS_SCORE_RE.search(summary) is None
+
+
+def _states_hrv_unavailable(summary: str) -> bool:
+    """True iff the summary explicitly says HRV was unavailable/unknown (GROUND-R7).
+
+    FIX 7: a summary carrying the EXACT canonical prod clause
+    (:data:`~wattwise_core.agent.readiness_deliverable.HRV_UNAVAILABLE_CLAUSE`) is
+    recognised directly, so the grader matches a LIVE narration and not only hand-written
+    fixtures; otherwise it falls back to the HRV-mention + HRV-absent token pair (the
+    absent-token pattern now includes that clause's key tokens too).
+    """
+    if HRV_UNAVAILABLE_CLAUSE.lower() in summary.lower():
+        return True
+    mentions_hrv = _HRV_MENTION_RE.search(summary) is not None
+    says_absent = _HRV_ABSENT_RE.search(summary) is not None
+    return mentions_hrv and says_absent
+
+
+def _states_insufficient_data(summary: str) -> bool:
+    """True iff an abstain summary truthfully says it cannot assess (GROUND-R6)."""
+    lowered = summary.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "not enough data",
+            "don't have enough",
+            "insufficient",
+            "can't give you",
+            "can't call",
+            "cannot assess",
+            "hasn't been computed",
+            "not been computed",
+        )
+    )
+
+
+def _voice_failures(case: dict[str, Any], summary: str) -> list[str]:
+    """Deterministic voice-liveness checks on ONE summary (COACH-R7 / QA-EVAL-R11)."""
+    cid = case["id"]
+    out: list[str] = []
+    if not _state_leads(summary):
+        out.append(f"{cid}: summary is number-led (first sentence carries a digit)")
+    if not _number_density_ok(summary):
+        out.append(f"{cid}: summary foregrounds more than {READINESS_MAX_NUMBERS} numbers")
+    if not _no_readiness_score(summary):
+        out.append(f"{cid}: summary carries a numeric 'readiness score'")
+    if case.get("expects_hrv_unavailable_statement") and not _states_hrv_unavailable(summary):
+        out.append(f"{cid}: HRV was unavailable but the summary does not say so")
+    return out
+
+
+def _is_abstain(case: dict[str, Any]) -> bool:
+    """True iff the case is an abstain case — i.e. ``form`` is null (FIX 4).
+
+    Abstain means "we could not read form". The classification is FORM-driven ONLY: a
+    case WITH a form is NON-abstain even if its delivered verdict is null (that is then a
+    failure, not a free pass), and a case with a null form is abstain regardless of the
+    delivered verdict (a delivered verdict on a form-null case is itself a failure).
+    """
+    return case.get("form") is None
+
+
+def _consistency_failure(case: dict[str, Any]) -> str | None:
+    """Certify the delivered verdict against the deterministic band (QA-EVAL-R2.4).
+
+    Classification is FORM-driven (FIX 4): a case is abstain IFF ``form`` is null.
+
+    * Abstain (``form`` null): the delivered verdict MUST be null AND the summary MUST
+      truthfully state insufficient data; a delivered verdict on a form-null case fails.
+    * Non-abstain (``form`` present): the delivered verdict MUST be non-null AND pass the
+      :func:`readiness_consistent` certificate (the code, not the LLM, decides — EVAL-R5).
+      A present-form case with a NULL delivered verdict is a FAILURE ("form present but no
+      verdict delivered"), never a silent abstain.
+
+    Returns a reason string on failure, or ``None`` when the case is consistent.
+    """
+    cid = case["id"]
+    delivered = case.get("delivered_verdict")
+    form = case.get("form")
+    # Abstain IFF form is null (FORM-driven, FIX 4). The explicit ``form is None`` check
+    # (equivalent to ``_is_abstain(case)``) also narrows ``form`` to non-None below.
+    if form is None:
+        if delivered is not None:
+            return f"{cid}: abstain case (form null) delivered a verdict ({delivered!r})"
+        if not _states_insufficient_data(str(case.get("summary_text", ""))):
+            return f"{cid}: abstain summary does not state insufficient data"
+        return None
+    if delivered is None:
+        return f"{cid}: form present but no verdict delivered"
+    consistent = readiness_consistent(
+        ReadinessVerdict(str(delivered)),
+        form=float(form),
+        hrv_rmssd=case.get("hrv_rmssd"),
+        hrv_baseline=case.get("hrv_baseline"),
+    )
+    if not consistent:
+        return f"{cid}: delivered verdict {delivered!r} is inconsistent with the metrics"
+    return None
+
+
+def grade_readiness() -> ReadinessGrade:
+    """Grade the readiness/form fixtures deterministically (QA-EVAL-R2.4 / COACH-R7).
+
+    Classification is FORM-driven (FIX 4): a case is abstain IFF ``form`` is null. For
+    each NON-abstain case (``form`` present) the delivered verdict MUST be non-null and is
+    certified against the deterministic band via :func:`readiness_consistent` (deep-negative
+    form is never a hard "go"; the code decides, not the LLM — EVAL-R5) — a present-form
+    case with a null delivered verdict is a FAILURE, never a silent abstain. Abstain cases
+    (``form`` null) must deliver NO verdict and a summary that says it cannot assess. EVERY
+    case's summary is checked for voice-liveness: a number-light STATE-first sentence, number
+    density within the cap, no numeric "readiness score", and an explicit HRV-unavailable
+    statement where the inputs were absent (GROUND-R7).
+    """
+    cases = _load("readiness")["cases"]
+    failures: list[str] = []
+    non_abstain = 0
+    consistent = 0
+    voice_ok = 0
+    for case in cases:
+        is_abstain = _is_abstain(case)  # FORM-driven only (FIX 4): abstain IFF form null.
+        if not is_abstain:
+            non_abstain += 1
+        reason = _consistency_failure(case)
+        if reason is None:
+            if not is_abstain:
+                consistent += 1
+        else:
+            failures.append(reason)
+        voice_problems = _voice_failures(case, str(case.get("summary_text", "")))
+        if voice_problems:
+            failures.extend(voice_problems)
+        else:
+            voice_ok += 1
+    return ReadinessGrade(len(cases), non_abstain, consistent, voice_ok, tuple(failures))
 
 
 # --- intent / retrieval-plan suite (EVAL-R3) -------------------------------------------
@@ -268,5 +469,6 @@ __all__ = [
     "grade_intent_plan",
     "grade_judge",
     "grade_multilingual",
+    "grade_readiness",
     "grade_termination",
 ]

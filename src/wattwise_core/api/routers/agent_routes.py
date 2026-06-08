@@ -36,15 +36,14 @@ AUTH-R13, SCHEMA-R7, LIMIT-R2, PERF-R10(b), ERR-R8, ERR-R9.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Annotated, Any, Final, Literal, Protocol, runtime_checkable
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
 
 from wattwise_core.agent.contracts import RunStatus
-from wattwise_core.agent.deliverables import AgentAnswer
+from wattwise_core.agent.deliverables import AgentAnswer, Citation, Readiness
 from wattwise_core.api.agent_stream import (
     SSE_HEADERS,
     SSE_TERMINAL_DONE,
@@ -55,13 +54,20 @@ from wattwise_core.api.agent_stream import (
 )
 from wattwise_core.api.errors import FieldError, ProblemError, resolve_trace_id
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
+from wattwise_core.api.routers.agent_schemas import (
+    AgentAskRequest,
+    AgentAskResponse,
+    CitationOut,
+    DegradedOut,
+    GroundingOut,
+    ObservationOut,
+    ReadinessResponse,
+    ResponseLength,
+    SuggestedFollowupOut,
+)
 from wattwise_core.api.sanitize import sanitize_html
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
-
-#: The athlete-facing answer-length enum (API-R11f); default ``standard``.
-ResponseLength = Literal["short", "standard", "detailed"]
-FollowUpKind = Literal["expand", "drill", "reveal_numbers"]
 
 #: The per-language warm reason_text for a degraded outcome (API-R11a / API-R37). The
 #: structured ``coverage_caveat`` carries the machine basis; this is its human gloss in
@@ -98,6 +104,14 @@ class AgentEngine(Protocol):
         follow_up: dict[str, Any] | None,
         locale: str,
     ) -> AgentAnswer: ...
+
+    async def readiness(
+        self,
+        *,
+        athlete_id: str,
+        locale: str,
+        response_length: ResponseLength,
+    ) -> Readiness: ...
 
 
 # --- dependency seams (overridden by the app factory) ----------------------------
@@ -145,108 +159,6 @@ Engine = Annotated[AgentEngine, Depends(agent_engine)]
 Limiter = Annotated[RateLimiter, Depends(rate_limiter)]
 
 
-# --- wire shapes -----------------------------------------------------------------
-
-
-class FollowUp(BaseModel):
-    """Typed conversational follow-up over the durable thread (API-R11e).
-
-    ``additionalProperties:false`` (SCHEMA-R4) rejects any unknown nested property so a
-    forged/misnamed field can never be silently accepted.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    kind: FollowUpKind
-    target_ref: str | None = None
-
-
-class AgentAskRequest(BaseModel):
-    """``POST /v1/agent/ask`` request body (API-R11).
-
-    ``question`` is required UNLESS a ``follow_up`` is present (API-R11e); it is bounded
-    to 2000 chars (LIMIT-R5). Identity is NOT a field here — it is server-derived
-    (AUTH-R3); a client cannot name the athlete it acts as. ``additionalProperties:false``
-    (SCHEMA-R4) rejects any unknown body property (e.g. a forged ``athlete_id``) with a
-    ``422`` rather than silently dropping it. ``response_length`` is optional: when
-    omitted the engine applies the athlete's persisted preference, else ``standard``
-    (API-R11f).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    question: str | None = Field(default=None, min_length=1, max_length=2000)
-    thread_id: str | None = None
-    response_length: ResponseLength | None = None
-    follow_up: FollowUp | None = None
-    language: Literal["en", "de", "ru"] | None = None
-    stream: bool = False
-
-
-class CitationOut(BaseModel):
-    """One on-demand grounded citation (API-R11d): ``{metric, value, as_of}`` only.
-
-    References a canonical metric value/date; NEVER an external provider name
-    (API-R13 / AUTH-R15). ``source_kind`` is the fixed ``canonical`` marker.
-    """
-
-    citation_id: str
-    metric: str | None = None
-    value: float | None = None
-    as_of: str | None = None
-    source_kind: Literal["canonical"] = "canonical"
-
-
-class ObservationOut(BaseModel):
-    """One athlete-facing observation with its stable expand/drill handle (API-R11e)."""
-
-    observation_id: str
-    text: str
-
-
-class GroundingOut(BaseModel):
-    """The grounding block: the grounded flag + on-demand citations (API-R11d)."""
-
-    grounded: bool
-    citations: list[CitationOut]
-
-
-class SuggestedFollowupOut(BaseModel):
-    """An optional athlete-native drill-down chip (API-R11e); jargon-free copy."""
-
-    kind: FollowUpKind
-    label: str
-    target_ref: str | None = None
-
-
-class DegradedOut(BaseModel):
-    """The ``degraded`` member payload: human caveat + typed coverage caveat (API-R11a)."""
-
-    reason_text: str
-    coverage_caveat: dict[str, Any] | None = None
-
-
-class AgentAskResponse(BaseModel):
-    """The status-discriminated ``AgentAskResponse`` union (API-R11a).
-
-    OSS surfaces ``completed`` and ``degraded`` (the engine never produces
-    ``awaiting_approval``/``budget_exceeded`` in OSS). Carries NO billing/budget/model
-    machinery (API-R11c): there is deliberately no ``usage``/``cost_*``/token/
-    ``model_tier``/``reasoning`` field on this schema. ``answer_html`` is already
-    sanitized (API-R13).
-    """
-
-    status: Literal["completed", "degraded"]
-    thread_id: str
-    trace_id: str
-    answer_html: str
-    answer_text: str
-    observations: list[ObservationOut]
-    grounding: GroundingOut
-    suggested_followups: list[SuggestedFollowupOut] = Field(default_factory=list)
-    degraded: DegradedOut | None = None
-
-
 # --- projection helpers ----------------------------------------------------------
 
 
@@ -260,16 +172,16 @@ def _grounded_flag(answer: AgentAnswer) -> bool:
     return answer.status in (RunStatus.COMPLETED, RunStatus.DEGRADED)
 
 
-def _citations_out(answer: AgentAnswer) -> list[CitationOut]:
-    """Project the surviving grounded citations into the wire shape (API-R11d)."""
+def _citations_out(citations: Sequence[Citation]) -> list[CitationOut]:
+    """Project surviving grounded citations into the wire shape (API-R11d).
+
+    Shared by the answer and readiness renders — both project the same canonical
+    ``{metric, value, as_of}`` + record-id citation shape, so neither carries an
+    external provider name (API-R13 / AUTH-R15).
+    """
     return [
-        CitationOut(
-            citation_id=cit.record_id,
-            metric=cit.metric,
-            value=cit.value,
-            as_of=cit.as_of,
-        )
-        for cit in answer.citations
+        CitationOut(citation_id=cit.record_id, metric=cit.metric, value=cit.value, as_of=cit.as_of)
+        for cit in citations
     ]
 
 
@@ -327,9 +239,42 @@ def _render_response(answer: AgentAnswer, trace_id: str, locale: str) -> AgentAs
         answer_html=sanitize_html(answer.answer_html),
         answer_text=answer.answer_text,
         observations=_observations_out(answer),
-        grounding=GroundingOut(grounded=True, citations=_citations_out(answer)),
+        grounding=GroundingOut(grounded=True, citations=_citations_out(answer.citations)),
         suggested_followups=_followups_out(answer),
         degraded=_degraded_out(answer, locale),
+    )
+
+
+def _readiness_followups_out(readiness: Readiness) -> list[SuggestedFollowupOut]:
+    """Project the jargon-free reveal-the-numbers chips (API-R11e / VOICE-R9)."""
+    return [
+        SuggestedFollowupOut(kind="reveal_numbers", label=label)
+        for label in readiness.suggested_followups
+    ]
+
+
+def _render_readiness(readiness: Readiness, trace_id: str) -> ReadinessResponse:
+    """Render the readiness deliverable into the sanitized typed response (API-R41).
+
+    ``summary_html`` is sanitized HERE (API-R13 / SCHEMA-R7) before it leaves the API. The
+    verdict is the StrEnum value (or ``None`` when the deliverable abstained); there is no
+    numeric readiness field. ``coverage`` passes through the engine's typed map unchanged
+    (no invented number).
+    """
+    coverage = dict(readiness.coverage) if readiness.coverage is not None else None
+    return ReadinessResponse(
+        verdict=readiness.verdict.value if readiness.verdict is not None else None,
+        as_of=readiness.as_of,
+        trace_id=trace_id,
+        summary_html=sanitize_html(readiness.summary_html),
+        summary_text=readiness.summary_text,
+        observations=[
+            ObservationOut(observation_id=obs.observation_id, text=obs.text)
+            for obs in readiness.observations
+        ],
+        citations=_citations_out(readiness.citations),
+        coverage=coverage,
+        suggested_followups=_readiness_followups_out(readiness),
     )
 
 
@@ -352,6 +297,22 @@ def _validate_request(body: AgentAskRequest) -> None:
 _SUPPORTED_LOCALES: Final[frozenset[str]] = frozenset({"en", "de", "ru"})
 
 
+def _header_locale(accept_language: str | None) -> str:
+    """The first supported ``Accept-Language`` tag (en/de/ru), else the default ``en``.
+
+    The single header-scan both locale resolvers share (API-R37): it reads the first
+    supported two-letter language tag from the comma-separated header, ignoring quality
+    weights, and falls back to ``en`` (the commercial layer inserts the persisted
+    per-athlete language between the header and this default).
+    """
+    if accept_language:
+        for part in accept_language.split(","):
+            tag = part.split(";", 1)[0].strip().lower()[:2]
+            if tag in _SUPPORTED_LOCALES:
+                return tag
+    return "en"
+
+
 def resolve_locale(body: AgentAskRequest, accept_language: str | None) -> str:
     """Resolve the response language: body ``language`` -> Accept-Language -> ``en`` (API-R37).
 
@@ -362,12 +323,7 @@ def resolve_locale(body: AgentAskRequest, accept_language: str | None) -> str:
     """
     if body.language is not None:
         return body.language
-    if accept_language:
-        for part in accept_language.split(","):
-            tag = part.split(";", 1)[0].strip().lower()[:2]
-            if tag in _SUPPORTED_LOCALES:
-                return tag
-    return "en"
+    return _header_locale(accept_language)
 
 
 def _resolve_response_length(body: AgentAskRequest) -> ResponseLength:
@@ -487,10 +443,46 @@ async def agent_ask(
     return _render_response(answer, trace_id, locale)
 
 
+@router.get(
+    "/readiness",
+    response_model=ReadinessResponse,
+    dependencies=[_Agent],
+    operation_id="agentReadiness",
+)
+async def agent_readiness(
+    request: Request,
+    engine: Engine,
+    athlete_id: AthleteId,
+    limiter: Limiter,
+    accept_language: Annotated[str | None, Header()] = None,
+) -> ReadinessResponse:
+    """Read the athlete's readiness/form state (API-R41); a typed verdict, never a number.
+
+    Requires the ``agent`` scope (AUTH-R13) and debits the per-athlete ``agent`` rate
+    bucket (LIMIT-R2) keyed by the server-derived id (AUTH-R3). The 200 body is the typed
+    :class:`ReadinessResponse`: a verdict ``go|maintain|ease|rest`` (or ``null`` when there
+    is insufficient grounded data, GROUND-R6) with NO numeric readiness KPI (API-R41 /
+    COACH-R7), a state-first ``summary_text``, a server-sanitized ``summary_html``
+    (API-R13), and the form/HRV numbers demoted to on-demand grounded ``citations``
+    (GROUND-R5/R7). When no LLM is configured the engine returns the same typed shape with
+    a ``null`` verdict and a graceful "not switched on" state sentence (RUN-R4.1) — the
+    endpoint never errors on an unconfigured agent. The verdict the API renders is ALWAYS
+    the deterministic, metric-consistent one (COACH-R3 / EVAL-R5).
+    """
+    limiter.check(athlete_id, LimitClass.AGENT)
+    trace_id = resolve_trace_id(request)
+    locale = _header_locale(accept_language)
+    readiness = await engine.readiness(
+        athlete_id=athlete_id, locale=locale, response_length="standard"
+    )
+    return _render_readiness(readiness, trace_id)
+
+
 __all__ = [
     "AgentAskRequest",
     "AgentAskResponse",
     "AgentEngine",
+    "ReadinessResponse",
     "agent_engine",
     "current_athlete_id",
     "rate_limiter",
