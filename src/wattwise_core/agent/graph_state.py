@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import html as _html
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from wattwise_core.agent.contracts import (
     RETRIEVED_MAX_RECORDS,
     RETRIEVED_TRUNCATION_KEY,
+    TURN_COUNTER_FLOOR,
     AgentState,
     ChatModel,
     CoverageCaveat,
@@ -26,12 +27,30 @@ from wattwise_core.agent.contracts import (
     ReflectVerdict,
     RetrievalRequest,
     RunStatus,
+    stamp_coverage_gaps,
+    stamp_retrieved,
+    turn_gaps,
+    turn_records,
 )
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
 
 # Bounded recovery budgets (REFLECT-R4), shared with the graph for routing decisions.
 MAX_REFLECTIONS = 2
 MAX_REDRAFTS = 2
+
+
+@runtime_checkable
+class InterruptRecorder(Protocol):
+    """Seam the interrupt-gate uses to persist a ``live`` AgentInterrupt row (CKPT-R9).
+
+    The durable checkpointer (``SqlAlchemyCheckpointSaver``) satisfies this Protocol via its
+    ``record_interrupt`` method; an in-memory checkpointer (the OSS/test default) does NOT, in
+    which case ``build_graph`` passes ``None`` and the gate raises the interrupt without a
+    ledger row (no durable approval can be consumed against an in-memory saver anyway). Keeping
+    the seam contracts-only preserves ARCH-R21 (the graph never imports the concrete saver).
+    """
+
+    async def record_interrupt(self, thread_id: str, interrupt_id: str) -> None: ...
 
 
 def athlete_id(state: AgentState) -> str:
@@ -57,6 +76,67 @@ def over_ceiling(state: AgentState, ceiling: int) -> bool:
     return state.get("node_visits", 0) >= ceiling
 
 
+# --- turn boundary: the run-scoped reset + turn-keyed accumulator views (CKPT-R5) ---
+
+
+def turn_id(state: AgentState) -> str:
+    """The current turn id (``""`` when none is set, e.g. a legacy single-turn run).
+
+    Minted fresh per normal ``/ask`` ``ainvoke`` by the caller; a ``Command(resume)`` never
+    mints or changes it (the head node does not run on resume). The head node stamps it onto
+    every run-scoped accumulator write so the turn-keyed reducers can self-reset (CKPT-R5).
+    """
+    return state.get("turn_id") or ""
+
+
+def is_new_turn(state: AgentState) -> bool:
+    """True when this invocation opens a NEW turn on a durable thread (CKPT-R5).
+
+    A new turn is one whose ``turn_id`` differs from the ``run_epoch`` the run-scoped channels
+    currently belong to. On the very first turn ``run_epoch`` is the unset sentinel ``""`` so
+    any non-empty ``turn_id`` reads as new (and the reset is a harmless no-op on empty state).
+    A ``Command(resume)`` does not run the head node, so this is never evaluated on resume —
+    the run-scoped channels are preserved across the pause (CKPT-R5 "no recomputation").
+    """
+    tid = turn_id(state)
+    if not tid:
+        return False
+    return tid != (state.get("run_epoch") or "")
+
+
+def read_retrieved(state: AgentState) -> dict[str, Any]:
+    """The ``retrieved`` channel with the in-band turn marker stripped (reader view)."""
+    return turn_records(state.get("retrieved", {}))
+
+
+def read_coverage_gaps(state: AgentState) -> set[str]:
+    """The ``coverage_gaps`` channel with the in-band turn marker stripped (reader view)."""
+    return turn_gaps(state.get("coverage_gaps", set()))
+
+
+def reset_run_scoped(state: AgentState) -> dict[str, Any]:
+    """The head-node partial update that resets every run-scoped channel on a new turn.
+
+    A durable thread reuses ONE checkpoint across many turns, so the single head node MUST
+    reset the RUN-SCOPED channels at a new-turn boundary or turn-1 evidence/counters leak into
+    turn-2 (the reverted force-degrade + leak bug). The three counters go to the sentinel floor
+    ``0`` (the ONLY decrease :func:`~wattwise_core.agent.contracts._turn_monotonic` allows,
+    single-writer = this node); ``retrieved`` / ``coverage_gaps`` are stamped EMPTY with the new
+    ``turn_id`` so the turn-keyed reducers drop the prior turn's value; ``run_epoch`` advances to
+    the new ``turn_id`` so subsequent nodes this turn see ``is_new_turn() is False``. This update
+    is the SINGLE writer of the floor / new epoch — node-local ticks never reset.
+    """
+    tid = turn_id(state)
+    return {
+        "node_visits": TURN_COUNTER_FLOOR,
+        "reflection_count": TURN_COUNTER_FLOOR,
+        "redraft_count": TURN_COUNTER_FLOOR,
+        "retrieved": stamp_retrieved(tid, {}),
+        "coverage_gaps": stamp_coverage_gaps(tid, set()),
+        "run_epoch": tid,
+    }
+
+
 def budget_exceeded(state: AgentState) -> bool:
     """Read whether the cost-admission gate refused this run (COST-R4)."""
     for msg in reversed(state.get("messages", [])):
@@ -75,8 +155,13 @@ def last_plan_requests(state: AgentState) -> list[RetrievalRequest]:
 
 
 def retrieved_truncation_gaps(state: AgentState, incoming: Mapping[str, Any]) -> set[str]:
-    """Surface a STATE-R6 retrieved-truncation as a coverage gap, once (pure read)."""
-    prior = state.get("retrieved", {})
+    """Surface a STATE-R6 retrieved-truncation as a coverage gap, once (pure read).
+
+    ``prior`` is read through :func:`read_retrieved` so the in-band turn marker is stripped
+    before the count check — the marker is bookkeeping, not a retrieved record, and must not
+    inflate the count toward the bound.
+    """
+    prior = read_retrieved(state)
     will_total = {**prior, **incoming}
     will_total.pop(RETRIEVED_TRUNCATION_KEY, None)
     if len(will_total) > RETRIEVED_MAX_RECORDS:
@@ -137,8 +222,8 @@ _REFLECT_SYSTEM = (
 
 async def reflect_decision(model: ChatModel, state: AgentState) -> ReflectDecision:
     """Obtain the structured reflect verdict, fail-closed on a structured-output error."""
-    gaps = sorted(state.get("coverage_gaps", set()))
-    already = sorted(state.get("retrieved", {}).keys())
+    gaps = sorted(read_coverage_gaps(state))
+    already = sorted(read_retrieved(state).keys())
     data = f"open_gaps: {gaps}\nalready_retrieved: {already}"
     try:
         return await run_structured(
@@ -284,12 +369,14 @@ def cost_rollup(state: AgentState, status: RunStatus) -> dict[str, Any]:
 __all__ = [
     "MAX_REDRAFTS",
     "MAX_REFLECTIONS",
+    "InterruptRecorder",
     "athlete_id",
     "budget_exceeded",
     "build_caveat",
     "context_relevance",
     "cost_rollup",
     "estimate_tokens",
+    "is_new_turn",
     "last_ground_decision",
     "last_plan_requests",
     "last_reflect_verdict",
@@ -297,10 +384,14 @@ __all__ = [
     "open_gaps",
     "over_ceiling",
     "plan_requires_approval",
+    "read_coverage_gaps",
+    "read_retrieved",
     "reflect_decision",
     "render_context",
+    "reset_run_scoped",
     "retrieved_truncation_gaps",
     "safe_html",
     "terminal_status",
     "tick_visit",
+    "turn_id",
 ]

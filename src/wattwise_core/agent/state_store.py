@@ -26,6 +26,14 @@ Tables (logical ``agent_state`` category, ARCH-R13):
   (resume lineage, CKPT-R2), and the owning ``athlete_id`` (defence-in-depth scoping).
 * ``agent_write`` — one pending intermediate write produced by a node, replayed on
   resume so a mid-flight-killed run reconstructs identically (CKPT-R2).
+* ``agent_interrupt`` — one human-in-the-loop approval-gate ledger row (CKPT-R9). When
+  the graph raises a langgraph interrupt at an approval-gated plan, the interrupt-gate
+  records a ``live`` row; a ``POST …/decision`` consumes it via an ATOMIC guarded UPDATE
+  (``SET status='consumed' WHERE thread_id=? AND interrupt_id=? AND athlete_id=? AND
+  status='live'``) whose ``rowcount`` decides resume-vs-409 (fail-closed, CKPT-R9). The
+  owning ``athlete_id`` is duplicated (as on ``agent_checkpoint``) as defence-in-depth so
+  a row is independently identity-scoped and joins the per-athlete erasure target set
+  (CKPT-R8 / PRIV-R8).
 """
 
 from __future__ import annotations
@@ -183,9 +191,49 @@ class AgentWrite(AgentStateBase):
     )
 
 
+class AgentInterrupt(AgentStateBase):
+    """One HITL approval-gate ledger row, live until consumed (CKPT-R9 / D-P2).
+
+    The interrupt-gate inserts a ``live`` row when the graph raises a langgraph interrupt
+    at an approval-gated plan; ``POST …/decision`` then consumes it via the ATOMIC guarded
+    UPDATE ``SET status='consumed' WHERE thread_id=? AND interrupt_id=? AND athlete_id=?
+    AND status='live'`` whose ``rowcount`` decides resume (1) vs 409/404 (0) — fail-closed
+    so a double-decision or cross-identity attempt can never resume twice. The
+    ``(thread_id, interrupt_id)`` pair is UNIQUE so a gate raises exactly one live row per
+    interrupt. ``athlete_id`` is duplicated here (as on ``agent_checkpoint``) as
+    defence-in-depth: the consume guard is independently identity-scoped (CKPT-R9) and the
+    row joins the per-athlete erasure target set (CKPT-R8 / PRIV-R8) even outside the
+    thread join.
+    """
+
+    __tablename__ = AGENT_STATE_PREFIX + "interrupt"
+    __table_args__ = (
+        UniqueConstraint(
+            "thread_id",
+            "interrupt_id",
+            name="uq_agent_interrupt_thread_interrupt",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    thread_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey(AGENT_STATE_PREFIX + "thread.thread_id"),
+        nullable=False,
+        index=True,
+    )
+    athlete_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
+    interrupt_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="live")
+    created_at: Mapped[_dt.datetime] = mapped_column(
+        UtcDateTime(), default=utcnow, nullable=False
+    )
+
+
 __all__ = [
     "AGENT_STATE_PREFIX",
     "AgentCheckpoint",
+    "AgentInterrupt",
     "AgentStateBase",
     "AgentThread",
     "AgentWrite",

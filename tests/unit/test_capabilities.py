@@ -27,6 +27,7 @@ from wattwise_core.agent.capabilities import (
     ActivityParams,
     CanonicalEvidence,
     DateRangeParams,
+    MetricEquivalence,
     MetricName,
     WellnessDayParams,
     gather,
@@ -330,10 +331,61 @@ async def test_metric_value_unknown_metric_returns_none() -> None:
     assert await ev.metric_value("vo2max", _DAY.isoformat()) is None
 
 
-async def test_metric_value_missing_as_of_returns_none() -> None:
-    ev = CanonicalEvidence(_svc(), _ATHLETE)
-    assert await ev.metric_value("ctl", None) is None
+async def test_metric_value_no_date_token_falls_back_to_latest_day() -> None:
+    """A claim with NO date token reads the metric's LATEST available day (§16 fallback).
+
+    A real model states a number with no as-of date ("your fitness is 6.7"); rather than
+    failing closed (which would scrub a CORRECT answer), the evidence reads the metric at its
+    latest available PMC day so the natural dateless claim still grounds (GROUND-R7). The seeded
+    fake returns a computed day for any window, so a ``None`` (and an empty/whitespace token,
+    which is also "no date") resolves to that latest value.
+    """
+    ev = CanonicalEvidence(_svc(pmc_ctl=63.5), _ATHLETE)
+    assert await ev.metric_value("ctl", None) == 63.5
+    assert await ev.metric_value("ctl", "   ") == 63.5  # whitespace-only == no date token
+
+
+async def test_metric_value_unparseable_date_fails_closed_not_latest() -> None:
+    """A claim with a date token that fails to parse FAILS CLOSED, never latest (H2 / GROUND-R7).
+
+    The fabrication path: "On May 1 your fitness was 100" extracts as_of="May 1", which is NOT an
+    ISO date and fails to parse. Silently resolving it to the LATEST day would ground a PAST-dated
+    claim against today's value (grounded "100" while May-1 differed). An invalid/unparseable
+    as_of must therefore resolve to ``None`` (scrub), distinct from a truly absent date token.
+    The fake would return 63.5 for any window, so a leak would surface as 63.5; fail-closed is None.
+    """
+    ev = CanonicalEvidence(_svc(pmc_ctl=63.5), _ATHLETE)
     assert await ev.metric_value("ctl", "not-a-date") is None
+    assert await ev.metric_value("ctl", "May 1") is None
+    # The fail-closure spans every metric family, not just PMC (CP / HRV too).
+    assert await ev.metric_value("critical_power_w", "May 1") is None
+    assert await ev.metric_value("hrv_rmssd_ms", "May 1") is None
+
+
+async def test_metric_value_resolves_natural_label_via_equivalence() -> None:
+    """A natural metric label grounds through the config-loaded equivalence layer (§16/GROUND-R2).
+
+    The model emits ``"Chronic Training Load (CTL)"`` / ``"fitness"`` / ``"form"`` — not the
+    canonical key — so without the metric-equivalence bridge every NUMBER claim scrubs and the
+    grounder abstains on a CORRECT answer (the headline bug). With the alias map injected, those
+    labels resolve to their canonical metric and read the same verbatim value.
+    """
+    equiv = MetricEquivalence(
+        {"Chronic Training Load (CTL)": "ctl", "fitness": "ctl", "form": "tsb"}
+    )
+    ev = CanonicalEvidence(_svc(pmc_ctl=63.5), _ATHLETE, equivalence=equiv)
+    assert await ev.metric_value("Chronic Training Load (CTL)", _DAY.isoformat()) == 63.5
+    assert await ev.metric_value("fitness", _DAY.isoformat()) == 63.5
+    # An unmapped, non-canonical label still fails closed (GROUND-R3).
+    assert await ev.metric_value("vibes", _DAY.isoformat()) is None
+
+
+async def test_metric_value_without_equivalence_is_canonical_key_only() -> None:
+    """With no equivalence injected, only exact canonical keys resolve (back-compat)."""
+    ev = CanonicalEvidence(_svc(pmc_ctl=63.5), _ATHLETE)
+    assert await ev.metric_value("ctl", _DAY.isoformat()) == 63.5
+    # A natural label is NOT resolved without the alias layer -> None (fail-closed).
+    assert await ev.metric_value("fitness", _DAY.isoformat()) is None
 
 
 async def test_metric_value_unavailable_canonical_result_returns_none() -> None:
@@ -345,7 +397,9 @@ async def test_metric_value_unavailable_canonical_result_returns_none() -> None:
 
 
 def test_url_allowed_is_a_first_party_https_allow_list() -> None:
-    ev = CanonicalEvidence(_svc(), _ATHLETE)
+    """The allow-list is the config-loaded host set (CFG-R1a), exact-host + https (GROUND-R4)."""
+    hosts = frozenset({"wattwise.app", "www.wattwise.app", "docs.wattwise.app"})
+    ev = CanonicalEvidence(_svc(), _ATHLETE, allowed_hosts=hosts)
     assert ev.url_allowed("https://wattwise.app/training/load") is True
     assert ev.url_allowed("https://docs.wattwise.app/glossary") is True
     # Off-list hosts, plaintext, and look-alikes are all rejected (GROUND-R7).
@@ -353,3 +407,14 @@ def test_url_allowed_is_a_first_party_https_allow_list() -> None:
     assert ev.url_allowed("https://evil.com/wattwise.app") is False
     assert ev.url_allowed("https://wattwise.app.evil.com") is False
     assert ev.url_allowed("not a url") is False
+
+
+def test_url_allowed_with_no_configured_hosts_rejects_all() -> None:
+    """With NO config-loaded host list injected, the allow-list is empty -> every URL fails closed.
+
+    The host set is loaded policy (CFG-R1a) wired in by the CoachBundle; a bare evidence object
+    with no hosts must reject every link (fail-closed, GROUND-R4), never silently re-introduce a
+    code-baked default host.
+    """
+    ev = CanonicalEvidence(_svc(), _ATHLETE)
+    assert ev.url_allowed("https://wattwise.app/training/load") is False

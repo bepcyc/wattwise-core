@@ -1,0 +1,167 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "plan",
+  "qa_eval_suite": "R2.5",
+  "requirement_ids": ["QA-EVAL-R2.5", "COACH-R2", "COACH-R3", "GROUND-R7", "EVAL-R4", "EVAL-R5"],
+  "rationale": "Multi-day-PLAN coach-quality set (QA-EVAL-R2.5): each case carries a concrete multi-day plan whose per-day prescriptions name a canonical workout-library item AND/OR a typed numeric target (a power/HR figure referencing the athlete's canonical CP/zones/threshold), the athlete's canonical pre-plan PMC seed (CTL/ATL carried forward), the stated progression bound, and the readiness verdict + canonical form (TSB) the plan is built against. The grader certifies three things deterministically, the code deciding (EVAL-R5), never the LLM: (1) GROUNDING (COACH-R2) — every prescribed number/name is run through the SHIPPED grounder against canonical evidence, so a planted ungrounded prescription is scrubbed and zero non-canonical figures survive (GROUND-R7/EVAL-R4); (2) PROGRESSION (QA-EVAL-R2.5) — the plan's cumulative projected load, computed via the canonical PMC EWMA from the seed, must keep the weekly CTL ramp within the stated bound; (3) CONSISTENCY (COACH-R3) — the plan's peak day-load intent must be consistent with the readiness verdict (a low-readiness verdict must NOT co-occur with a high-load prescription). Numbers/names are matched VERBATIM against canonical evidence; an unrepresentable workout name fails closed and is scrubbed.",
+  "tolerance": 0.01,
+  "cases": [
+    {
+      "id": "build-week-grounded-go",
+      "readiness_verdict": "go",
+      "form": 8.0,
+      "progression_bound": {"max_ctl_ramp_per_week": 7.0},
+      "seed": {"ctl_prev": 60.0, "atl_prev": 58.0},
+      "evidence": {
+        "metrics": {"cp_w": 280.0, "ftp_w": 265.0, "threshold_hr_bpm": 168.0},
+        "names": {
+          "Sweet Spot 3x12": "workout-ss-3x12",
+          "VO2 5x4": "workout-vo2-5x4",
+          "Endurance Z2 90min": "workout-endz2-90",
+          "Recovery Spin": "workout-recovery"
+        },
+        "allowed_urls": ["https://wattwise.app/workouts/ss-3x12"]
+      },
+      "days": [
+        {"plan_date": "2026-06-09", "intent": "easy", "tss": 45.0,
+         "prescriptions": [
+           {"kind": "name", "text": "Endurance Z2 90min", "ref": "Endurance Z2 90min"},
+           {"kind": "number", "text": "ride at 200 W (about 72% of CP)", "metric": "cp_w", "value": 280.0}
+         ]},
+        {"plan_date": "2026-06-10", "intent": "threshold", "tss": 75.0,
+         "prescriptions": [
+           {"kind": "name", "text": "Sweet Spot 3x12", "ref": "Sweet Spot 3x12"},
+           {"kind": "number", "text": "hold 265 W at threshold", "metric": "ftp_w", "value": 265.0}
+         ]},
+        {"plan_date": "2026-06-11", "intent": "recovery", "tss": 30.0,
+         "prescriptions": [
+           {"kind": "name", "text": "Recovery Spin", "ref": "Recovery Spin"}
+         ]},
+        {"plan_date": "2026-06-12", "intent": "vo2", "tss": 85.0,
+         "prescriptions": [
+           {"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"},
+           {"kind": "number", "text": "cap intervals near 168 bpm threshold HR", "metric": "threshold_hr_bpm", "value": 168.0}
+         ]},
+        {"plan_date": "2026-06-13", "intent": "easy", "tss": 50.0,
+         "prescriptions": [
+           {"kind": "name", "text": "Endurance Z2 90min", "ref": "Endurance Z2 90min"}
+         ]},
+        {"plan_date": "2026-06-14", "intent": "hard", "tss": 110.0,
+         "prescriptions": [
+           {"kind": "number", "text": "long tempo at 240 W (about 86% of CP)", "metric": "cp_w", "value": 280.0}
+         ]},
+        {"plan_date": "2026-06-15", "intent": "rest", "tss": 0.0, "prescriptions": []}
+      ],
+      "expected": {"scrubbed_prescriptions": [], "progression_within_bound": true, "consistent": true}
+    },
+    {
+      "id": "recovery-week-grounded-ease",
+      "readiness_verdict": "ease",
+      "form": -16.0,
+      "progression_bound": {"max_ctl_ramp_per_week": 7.0},
+      "seed": {"ctl_prev": 72.0, "atl_prev": 95.0},
+      "evidence": {
+        "metrics": {"cp_w": 300.0, "threshold_hr_bpm": 172.0},
+        "names": {
+          "Endurance Z2 60min": "workout-endz2-60",
+          "Recovery Spin": "workout-recovery",
+          "Tempo 2x15": "workout-tempo-2x15"
+        },
+        "allowed_urls": []
+      },
+      "days": [
+        {"plan_date": "2026-06-09", "intent": "recovery", "tss": 25.0,
+         "prescriptions": [{"kind": "name", "text": "Recovery Spin", "ref": "Recovery Spin"}]},
+        {"plan_date": "2026-06-10", "intent": "easy", "tss": 40.0,
+         "prescriptions": [
+           {"kind": "name", "text": "Endurance Z2 60min", "ref": "Endurance Z2 60min"},
+           {"kind": "number", "text": "keep it under 210 W (70% of CP)", "metric": "cp_w", "value": 300.0}
+         ]},
+        {"plan_date": "2026-06-11", "intent": "recovery", "tss": 25.0,
+         "prescriptions": [{"kind": "name", "text": "Recovery Spin", "ref": "Recovery Spin"}]},
+        {"plan_date": "2026-06-12", "intent": "moderate", "tss": 55.0,
+         "prescriptions": [
+           {"kind": "name", "text": "Tempo 2x15", "ref": "Tempo 2x15"},
+           {"kind": "number", "text": "tempo blocks near 172 bpm threshold HR", "metric": "threshold_hr_bpm", "value": 172.0}
+         ]},
+        {"plan_date": "2026-06-13", "intent": "easy", "tss": 40.0,
+         "prescriptions": [{"kind": "name", "text": "Endurance Z2 60min", "ref": "Endurance Z2 60min"}]},
+        {"plan_date": "2026-06-14", "intent": "rest", "tss": 0.0, "prescriptions": []},
+        {"plan_date": "2026-06-15", "intent": "easy", "tss": 40.0,
+         "prescriptions": [{"kind": "name", "text": "Endurance Z2 60min", "ref": "Endurance Z2 60min"}]}
+      ],
+      "expected": {"scrubbed_prescriptions": [], "progression_within_bound": true, "consistent": true}
+    },
+    {
+      "id": "ungrounded-prescription-scrubbed",
+      "readiness_verdict": "go",
+      "form": 6.0,
+      "progression_bound": {"max_ctl_ramp_per_week": 7.0},
+      "seed": {"ctl_prev": 55.0, "atl_prev": 54.0},
+      "evidence": {
+        "metrics": {"cp_w": 250.0},
+        "names": {"Endurance Z2 90min": "workout-endz2-90", "Sweet Spot 3x12": "workout-ss-3x12"},
+        "allowed_urls": []
+      },
+      "days": [
+        {"plan_date": "2026-06-09", "intent": "easy", "tss": 45.0,
+         "prescriptions": [{"kind": "name", "text": "Endurance Z2 90min", "ref": "Endurance Z2 90min"}]},
+        {"plan_date": "2026-06-10", "intent": "threshold", "tss": 70.0,
+         "prescriptions": [
+           {"kind": "name", "text": "Sweet Spot 3x12", "ref": "Sweet Spot 3x12"},
+           {"kind": "number", "text": "hold 999 W at threshold", "metric": "cp_w", "value": 999.0}
+         ]},
+        {"plan_date": "2026-06-11", "intent": "recovery", "tss": 30.0,
+         "prescriptions": [{"kind": "name", "text": "Galactic Power Blaster", "ref": "Galactic Power Blaster"}]},
+        {"plan_date": "2026-06-12", "intent": "easy", "tss": 45.0,
+         "prescriptions": [{"kind": "name", "text": "Endurance Z2 90min", "ref": "Endurance Z2 90min"}]},
+        {"plan_date": "2026-06-13", "intent": "rest", "tss": 0.0, "prescriptions": []},
+        {"plan_date": "2026-06-14", "intent": "easy", "tss": 45.0,
+         "prescriptions": [{"kind": "name", "text": "Endurance Z2 90min", "ref": "Endurance Z2 90min"}]},
+        {"plan_date": "2026-06-15", "intent": "rest", "tss": 0.0, "prescriptions": []}
+      ],
+      "expected": {
+        "scrubbed_prescriptions": ["cp_w@999.0", "Galactic Power Blaster"],
+        "progression_within_bound": true,
+        "consistent": true
+      }
+    }
+  ],
+  "negative_cases": [
+    {
+      "id": "ramp-too-steep",
+      "rationale": "A plan stacking seven hard days that drives the weekly CTL ramp past the stated bound MUST be flagged out-of-bound by the canonical-PMC progression certificate (QA-EVAL-R2.5).",
+      "readiness_verdict": "go",
+      "form": 9.0,
+      "progression_bound": {"max_ctl_ramp_per_week": 5.0},
+      "seed": {"ctl_prev": 50.0, "atl_prev": 48.0},
+      "evidence": {"metrics": {"cp_w": 260.0}, "names": {"VO2 5x4": "workout-vo2-5x4"}, "allowed_urls": []},
+      "days": [
+        {"plan_date": "2026-06-09", "intent": "vo2", "tss": 150.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]},
+        {"plan_date": "2026-06-10", "intent": "vo2", "tss": 150.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]},
+        {"plan_date": "2026-06-11", "intent": "vo2", "tss": 150.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]},
+        {"plan_date": "2026-06-12", "intent": "vo2", "tss": 150.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]},
+        {"plan_date": "2026-06-13", "intent": "vo2", "tss": 150.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]},
+        {"plan_date": "2026-06-14", "intent": "vo2", "tss": 150.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]},
+        {"plan_date": "2026-06-15", "intent": "vo2", "tss": 150.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]}
+      ],
+      "expected": {"scrubbed_prescriptions": [], "progression_within_bound": false, "consistent": true}
+    },
+    {
+      "id": "low-readiness-high-load-inconsistent",
+      "rationale": "An 'ease' (low-readiness) verdict prescribed alongside a VO2/HARD peak day is the COACH-R3 forbidden co-occurrence and MUST be flagged inconsistent by the deterministic verdict-load certificate.",
+      "readiness_verdict": "ease",
+      "form": -17.0,
+      "progression_bound": {"max_ctl_ramp_per_week": 7.0},
+      "seed": {"ctl_prev": 70.0, "atl_prev": 90.0},
+      "evidence": {"metrics": {"cp_w": 290.0}, "names": {"VO2 5x4": "workout-vo2-5x4", "Recovery Spin": "workout-recovery"}, "allowed_urls": []},
+      "days": [
+        {"plan_date": "2026-06-09", "intent": "recovery", "tss": 25.0, "prescriptions": [{"kind": "name", "text": "Recovery Spin", "ref": "Recovery Spin"}]},
+        {"plan_date": "2026-06-10", "intent": "vo2", "tss": 95.0, "prescriptions": [{"kind": "name", "text": "VO2 5x4", "ref": "VO2 5x4"}]},
+        {"plan_date": "2026-06-11", "intent": "rest", "tss": 0.0, "prescriptions": []},
+        {"plan_date": "2026-06-12", "intent": "recovery", "tss": 25.0, "prescriptions": [{"kind": "name", "text": "Recovery Spin", "ref": "Recovery Spin"}]}
+      ],
+      "expected": {"scrubbed_prescriptions": [], "progression_within_bound": true, "consistent": false}
+    }
+  ]
+}

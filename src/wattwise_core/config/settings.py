@@ -4,12 +4,21 @@ Config layering (CFG-R*, doc 10): packaged ``defaults.toml`` -> optional operato
 file (``WATTWISE_CONFIG_FILE``) -> environment variables (``WATTWISE_*``). Each
 later layer overrides an earlier one.
 
-Secret handling (BOOT-R4, SEC-R*): the service/infra secrets — the database DSN,
-the LLM provider key, the token signing key, and the encryption root key — come
-ONLY from the environment / a secret manager. They are never baked into images or
-committed config. A required secret being absent fails the boot **closed**
-(RUN-R4.1): :func:`load_settings` raises rather than starting in an undefined or
-insecure state.
+Schema-only code (CFG-R1a): this module declares ONLY the typed schema and its
+validation constraints (``ge``/``le``/``gt``/enum). It carries **no** concrete
+configuration value — not even as a field default. Every non-secret value lives in
+the packaged ``defaults.toml`` (the lowest config layer), overridable by the
+operator file / environment. A non-secret field is therefore *required*: a
+``Field`` with constraints but no ``default=`` (pydantic treats it as required),
+satisfied by ``defaults.toml`` for a clean dev boot. If a key is absent from every
+layer, validation fails **closed** rather than reintroducing a hardcoded fallback.
+
+Secret handling (CFG-R2, BOOT-R4, SEC-R*): the service/infra secrets — the database
+DSN, the LLM provider key, the token signing key, and the encryption root key — are
+the sole exception to CFG-R1a: they come ONLY from the environment / a secret
+manager, never from ``defaults.toml`` or any committed config, and are never baked
+into images. A required secret being absent fails the boot **closed** (RUN-R4.1):
+:func:`load_settings` raises rather than starting in an undefined or insecure state.
 """
 
 from __future__ import annotations
@@ -56,14 +65,27 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(fh)
 
 
+# TOML tables whose VALUE is itself dict-shaped config (a free-form key->value map the
+# engine consumes whole, e.g. the metric-equivalence aliases of §16) rather than a nested
+# set of scalar settings. The flattener stops at these and assigns the whole sub-mapping to
+# the single ``section__key`` field, so a free-form alias table is one ``dict[str, str]``
+# setting (CFG-R1a) instead of one settings key per alias.
+_LEAF_TABLE_KEYS: frozenset[str] = frozenset({"agent__metric_aliases"})
+
+
 def _flatten(prefix: str, value: Mapping[str, Any], out: dict[str, Any]) -> None:
-    """Flatten a nested TOML table into ``section__key`` settings keys."""
+    """Flatten a nested TOML table into ``section__key`` settings keys.
+
+    A table whose composite key is a declared leaf table (:data:`_LEAF_TABLE_KEYS`) is NOT
+    recursed into: its whole sub-mapping becomes one dict-valued setting, so a free-form
+    map (metric aliases, §16) is a single typed ``dict`` field, not one key per entry.
+    """
     for key, val in value.items():
         composite = f"{prefix}__{key}" if prefix else key
-        if isinstance(val, Mapping):
+        if isinstance(val, Mapping) and composite.lower() not in _LEAF_TABLE_KEYS:
             _flatten(composite, val, out)
         else:
-            out[composite.lower()] = val
+            out[composite.lower()] = dict(val) if isinstance(val, Mapping) else val
 
 
 class _LayeredFileSource(PydanticBaseSettingsSource):
@@ -102,36 +124,60 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
+    # Non-secret fields below carry NO value default (CFG-R1a): only the type +
+    # validation constraints. Each is required and is resolved from defaults.toml
+    # (overridable by the operator file / env). Absence from every layer fails closed.
+
     # --- app ---
-    app__environment: Environment = Environment.PRODUCTION
-    app__log_level: str = "INFO"
+    app__environment: Environment
+    app__log_level: str
 
     # --- api ---
-    api__host: str = "0.0.0.0"  # noqa: S104 (bind-all is intended for the containerized service)
-    api__port: int = Field(default=8000, ge=1, le=65535)
-    api__rate_limit_per_minute: int = Field(default=60, ge=1)
-    api__request_max_bytes: int = Field(default=33_554_432, ge=1)
+    api__host: str  # value (incl. bind-all 0.0.0.0) lives in defaults.toml, not here
+    api__port: int = Field(ge=1, le=65535)
+    api__rate_limit_per_minute: int = Field(ge=1)
+    api__request_max_bytes: int = Field(ge=1)
 
     # --- object store (verbatim original-file retention, RAW-R*) ---
-    object_store__kind: str = "local"
-    object_store__local_root: Path = Path("/var/lib/wattwise/objects")
+    object_store__kind: str
+    object_store__local_root: Path
+    # s3_* are genuinely optional (only used when kind='s3'); TOML cannot express
+    # null, so absence == not-configured is modelled as the ``None`` sentinel rather
+    # than a concrete value default (CFG-R1a is about VALUES, not absence).
     object_store__s3_endpoint: str | None = None
     object_store__s3_bucket: str | None = None
 
     # --- analytics (doc 40 constants) ---
-    analytics__ctl_time_constant_days: float = Field(default=42.0, gt=0)
-    analytics__atl_time_constant_days: float = Field(default=7.0, gt=0)
+    analytics__ctl_time_constant_days: float = Field(gt=0)
+    analytics__atl_time_constant_days: float = Field(gt=0)
 
     # --- agent (model-routing seam, grounding) ---
-    agent__base_url: str = "https://openrouter.ai/api/v1"
-    agent__model: str = "deepseek/deepseek-chat"
-    agent__temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    agent__max_output_tokens: int = Field(default=1024, ge=1)
-    agent__grounding_min_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
-    agent__request_timeout_seconds: float = Field(default=60.0, gt=0)
+    agent__base_url: str
+    # 2026 default model + budget live in defaults.toml (MODEL-R5a); the budget is
+    # sized for reasoning models (reasoning tokens are billed against the completion
+    # budget and emitted before the answer), so a small allowance starves the answer.
+    agent__model: str
+    agent__temperature: float = Field(ge=0.0, le=2.0)
+    agent__max_output_tokens: int = Field(ge=1)
+    agent__grounding_min_coverage: float = Field(ge=0.0, le=1.0)
+    agent__request_timeout_seconds: float = Field(gt=0)
+    # First-party URL allow-list (GROUND-R4): the exact hosts whose links the grounder may keep.
+    # Loaded policy content (CFG-R1a), never a host literal baked into code.
+    agent__allowed_hosts: list[str]
+    # The OSS default coach-config bundle (SKILL-R1 / §16): the compose-node system prompt,
+    # the numeric-grounding thresholds, the canonical-value display precision, the dateless-claim
+    # lookback window, and the metric-equivalence (natural term -> canonical key) aliases the
+    # grounder resolves through (GROUND-R2/-R7). All are loaded CONTENT, never inline engine
+    # literals (CFG-R1a) — values live in defaults.toml, overridable by the operator/private bundle.
+    agent__coach__system_prompt: str
+    agent__coach__grounding_rel_tolerance: float = Field(ge=0.0)
+    agent__coach__grounding_abs_tolerance: float = Field(ge=0.0)
+    agent__coach__grounding_display_decimals: int = Field(ge=0, le=6)
+    agent__coach__latest_lookback_days: int = Field(ge=1)
+    agent__metric_aliases: dict[str, str]
 
     # --- retention ---
-    retention__raw_file_days: int = Field(default=0, ge=0)
+    retention__raw_file_days: int = Field(ge=0)
 
     # --- SECRETS (env / secret-manager only; BOOT-R4) ---
     database_dsn: SecretStr | None = None

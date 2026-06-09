@@ -43,6 +43,31 @@ RETRIEVED_MAX_BYTES = 256 * 1024
 # gather node lifts it into ``coverage_gaps`` (a binop reducer cannot reach that field).
 RETRIEVED_TRUNCATION_KEY = "__truncated__"
 
+# --- turn-keying (CKPT-R5; the run-scoped self-reset backstop) ---
+#
+# TURN-KEYING INVARIANT (read before touching ``retrieved``/``coverage_gaps``):
+# A langgraph channel reducer only sees ``(stored, incoming)`` — it cannot reach
+# ``turn_id`` from sibling channels. So the *run-scoped accumulators* carry their owning
+# turn id IN-BAND, under a reserved double-underscore key (mirroring
+# ``RETRIEVED_TRUNCATION_KEY``). Their reducers (``_turn_keyed_merge`` / ``_turn_keyed_union``)
+# compare the incoming turn marker to the stored one: a DIFFERENT marker REPLACES (resets)
+# the whole channel; the SAME marker merges exactly as before (``_keyed_merge`` /
+# ``_set_union`` semantics). This is the backstop against an evidence LEAK across turns — a
+# missed head-node reset cannot silently carry turn-1 records into turn-2, because the first
+# turn-2 write (carrying turn-2's marker) drops the stale value at the reducer.
+#
+# Every write to these two channels MUST be stamped with the current ``turn_id`` via
+# ``stamp_retrieved`` / ``stamp_coverage_gaps`` (the head node and every node that writes
+# evidence). An UNSTAMPED write inherits the stored turn (no reset) and merges — safe within
+# a turn, but it forfeits the cross-turn reset, so always stamp.
+#
+# Do NOT add a plain-accumulator channel (``_append``/``_keyed_merge``/``_set_union`` without
+# turn-keying) for anything that must reset per turn — it would silently reintroduce the leak
+# this invariant exists to prevent.
+RETRIEVED_TURN_KEY = "__turn__"
+# Reserved token prefix carrying the owning turn id inside the ``coverage_gaps`` set.
+COVERAGE_GAPS_TURN_PREFIX = "__turn__:"
+
 
 def _append(left: list[Any], right: list[Any]) -> list[Any]:
     """messages reducer: append-only (STATE-R3)."""
@@ -106,11 +131,134 @@ def _set_union(left: set[str], right: set[str]) -> set[str]:
     return left | right
 
 
+# --- turn-keyed self-resetting accumulators (CKPT-R5 leak backstop) ---
+
+
+def stamp_retrieved(turn_id: str, records: dict[str, Any]) -> dict[str, Any]:
+    """Stamp a ``retrieved`` update with the owning turn id (CKPT-R5 turn-keying).
+
+    Every write to the ``retrieved`` channel MUST go through this so :func:`_turn_keyed_merge`
+    can reset across a turn boundary. The marker rides under :data:`RETRIEVED_TURN_KEY`
+    in-band (like :data:`RETRIEVED_TRUNCATION_KEY`); readers strip it via :func:`turn_records`.
+    """
+    payload = {k: v for k, v in records.items() if k != RETRIEVED_TURN_KEY}
+    return {**payload, RETRIEVED_TURN_KEY: turn_id}
+
+
+def turn_records(stored: dict[str, Any]) -> dict[str, Any]:
+    """The ``retrieved`` payload with the turn marker stripped (reader helper)."""
+    return {k: v for k, v in stored.items() if k != RETRIEVED_TURN_KEY}
+
+
+def _turn_keyed_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """``retrieved`` reducer: merge within a turn, REPLACE across a turn (CKPT-R5).
+
+    Carries the owning ``turn_id`` in-band under :data:`RETRIEVED_TURN_KEY`. If the incoming
+    update names a turn DIFFERENT from the stored one, the prior turn's records are dropped
+    (self-reset) and only the incoming records survive; otherwise the merge is exactly
+    :func:`_keyed_merge` (later-by-key wins, bounded by count + size). An unstamped incoming
+    update inherits the stored turn and merges (safe within a turn). This reducer is the
+    backstop that makes a missed head-node reset non-leaking — turn-2's first stamped write
+    discards turn-1 evidence here, at the channel boundary.
+    """
+    incoming_turn = right.get(RETRIEVED_TURN_KEY)
+    stored_turn = left.get(RETRIEVED_TURN_KEY)
+    if incoming_turn is not None and incoming_turn != stored_turn:
+        base: dict[str, Any] = {}
+        carry_turn = incoming_turn
+    else:
+        base = {k: v for k, v in left.items() if k != RETRIEVED_TURN_KEY}
+        carry_turn = incoming_turn if incoming_turn is not None else stored_turn
+    merged = _keyed_merge(base, {k: v for k, v in right.items() if k != RETRIEVED_TURN_KEY})
+    if carry_turn is not None:
+        merged[RETRIEVED_TURN_KEY] = carry_turn
+    return merged
+
+
+def stamp_coverage_gaps(turn_id: str, gaps: set[str]) -> set[str]:
+    """Stamp a ``coverage_gaps`` update with the owning turn id (CKPT-R5 turn-keying).
+
+    Every write to ``coverage_gaps`` MUST go through this so :func:`_turn_keyed_union` can
+    reset across a turn boundary. The marker rides as a reserved
+    :data:`COVERAGE_GAPS_TURN_PREFIX` token inside the set; readers strip it via
+    :func:`turn_gaps`.
+    """
+    real = {g for g in gaps if not g.startswith(COVERAGE_GAPS_TURN_PREFIX)}
+    return {f"{COVERAGE_GAPS_TURN_PREFIX}{turn_id}", *real}
+
+
+def turn_gaps(stored: set[str]) -> set[str]:
+    """The ``coverage_gaps`` payload with the turn marker stripped (reader helper)."""
+    return {g for g in stored if not g.startswith(COVERAGE_GAPS_TURN_PREFIX)}
+
+
+def _turn_marker(values: set[str]) -> str | None:
+    """The owning turn id encoded in a ``coverage_gaps`` set, if any."""
+    for value in values:
+        if value.startswith(COVERAGE_GAPS_TURN_PREFIX):
+            return value[len(COVERAGE_GAPS_TURN_PREFIX) :]
+    return None
+
+
+def _turn_keyed_union(left: set[str], right: set[str]) -> set[str]:
+    """``coverage_gaps`` reducer: union within a turn, REPLACE across a turn (CKPT-R5).
+
+    Mirrors :func:`_turn_keyed_merge` for the gap set: the owning ``turn_id`` rides as a
+    :data:`COVERAGE_GAPS_TURN_PREFIX` token. An incoming update naming a DIFFERENT turn drops
+    the prior turn's gaps (self-reset); a same-turn (or unstamped) update unions as before.
+    """
+    incoming_turn = _turn_marker(right)
+    stored_turn = _turn_marker(left)
+    base = set() if incoming_turn is not None and incoming_turn != stored_turn else turn_gaps(left)
+    merged = base | turn_gaps(right)
+    carry_turn = incoming_turn if incoming_turn is not None else stored_turn
+    if carry_turn is not None:
+        merged.add(f"{COVERAGE_GAPS_TURN_PREFIX}{carry_turn}")
+    return merged
+
+
 def _monotonic(left: int, right: int) -> int:
     """count reducer: strictly non-decreasing (STATE-R3); raises on a decrease."""
     if right < left:
         raise ValueError("reflection/redraft counters are monotonic (STATE-R3)")
     return right
+
+
+# Sentinel floor the head node may reset a run-scoped counter to on a NEW turn (CKPT-R5).
+TURN_COUNTER_FLOOR = 0
+
+
+def _turn_monotonic(left: int, right: int) -> int:
+    """Run-scoped counter reducer: monotonic WITHIN a turn, resettable to 0 at a turn boundary.
+
+    EVAL-R7 bounded-termination needs the counter to be strictly non-decreasing *inside* a
+    turn (so a reflect/redraft/visit loop cannot evade its budget by rewinding). But a durable
+    thread reuses the same checkpoint across turns, so the single head node MUST be able to
+    reset the counter at a new-turn boundary (CKPT-R5) — otherwise the next turn's first write
+    of ``count=1`` decreases below the stored ``count=N`` and the strict ``_monotonic`` guard
+    raises (the cross-turn force-degrade bug).
+
+    The compromise: allow an increase (or no change), and allow a decrease ONLY to the
+    sentinel floor :data:`TURN_COUNTER_FLOOR` (``0``) — the head node's reset write. Any OTHER
+    decrease (e.g. ``5 -> 3``) is a mid-turn rewind and still raises. Single writer of the
+    floor = the head node on a new turn, so a node cannot smuggle a mid-turn reset.
+    """
+    if right == TURN_COUNTER_FLOOR:
+        return TURN_COUNTER_FLOOR
+    if right < left:
+        raise ValueError("run-scoped counter decreased mid-turn (EVAL-R7); only reset-to-0 allowed")
+    return right
+
+
+def _last_write_wins(left: str, right: str) -> str:
+    """``run_epoch`` reducer: last non-empty write wins (CKPT-R5 turn boundary).
+
+    The single writer is the head node, which stamps ``run_epoch = turn_id`` when it resets
+    the run-scoped channels on a new turn. An empty incoming write (no update) keeps the prior
+    epoch. Explicit reducer (over langgraph's implicit last-value default) so the turn-boundary
+    intent is documented and the channel reads with a typed binop like its siblings.
+    """
+    return right if right else left
 
 
 def _write_once(left: str, right: str) -> str:
@@ -136,6 +284,20 @@ class AgentState(TypedDict, total=False):
     Immutable inputs are write-once (STATE-R4); accumulating fields carry the reducers
     above; outputs are filled by ``compose``/``ground``/``finalize``. ``athlete_id`` is
     server-derived only (AGT-SEC-R1) and never set by a model/tool output.
+
+    TURN-KEYING (CKPT-R5; the durable-resume run-scoped reset, read before adding a channel):
+    a durable thread reuses ONE checkpoint across many turns. Channels in group (c) below are
+    RUN-SCOPED — they must reset at each new-turn boundary, NOT accumulate forever. ``turn_id``
+    is minted fresh for each normal ``/ask`` ``ainvoke`` (a ``Command(resume)`` NEVER mints or
+    changes it, since the head node does not run on resume); ``run_epoch`` is the turn the
+    run-scoped channels currently belong to (last-write-wins, written by the head node when it
+    resets). The three counters use :func:`_turn_monotonic` (monotonic within a turn, but the
+    head node may reset to ``0`` at a boundary). ``retrieved`` and ``coverage_gaps`` use the
+    TURN-KEYED reducers (:func:`_turn_keyed_merge` / :func:`_turn_keyed_union`): they carry
+    their owning turn id in-band and self-reset when an incoming write names a different turn —
+    the leak backstop. Any NEW run-scoped channel MUST use a turn-keyed/turn-monotonic reducer;
+    a plain ``_append``/``_keyed_merge``/``_set_union`` channel would silently leak turn-1 data
+    into turn-2. See the turn-keying invariant comment near :data:`RETRIEVED_TURN_KEY`.
     """
 
     # (a) immutable inputs (write-once, STATE-R4)
@@ -147,13 +309,18 @@ class AgentState(TypedDict, total=False):
     idempotency_key: Annotated[str, _write_once]
     thread_id: str | None
     response_length: str | None
-    # (b) accumulating working memory
+    # (b) per-turn identity for the run-scoped reset (CKPT-R5)
+    #   turn_id: fresh per normal /ask; never minted/changed on Command(resume).
+    #   run_epoch: the turn the run-scoped channels belong to; head node sets it on reset.
+    turn_id: str
+    run_epoch: Annotated[str, _last_write_wins]
+    # (c) accumulating working memory — RUN-SCOPED, resets each turn (see TURN-KEYING above)
     messages: Annotated[list[dict[str, Any]], _append]
-    retrieved: Annotated[dict[str, Any], _keyed_merge]
-    coverage_gaps: Annotated[set[str], _set_union]
-    reflection_count: Annotated[int, _monotonic]
-    redraft_count: Annotated[int, _monotonic]
-    node_visits: Annotated[int, _monotonic]
+    retrieved: Annotated[dict[str, Any], _turn_keyed_merge]
+    coverage_gaps: Annotated[set[str], _turn_keyed_union]
+    reflection_count: Annotated[int, _turn_monotonic]
+    redraft_count: Annotated[int, _turn_monotonic]
+    node_visits: Annotated[int, _turn_monotonic]
     cost_events: Annotated[list[dict[str, Any]], _append]
     # (c) outputs
     draft: str | None
@@ -339,9 +506,12 @@ class CoachConfig:
 
 
 __all__ = [
+    "COVERAGE_GAPS_TURN_PREFIX",
     "RETRIEVED_MAX_BYTES",
     "RETRIEVED_MAX_RECORDS",
     "RETRIEVED_TRUNCATION_KEY",
+    "RETRIEVED_TURN_KEY",
+    "TURN_COUNTER_FLOOR",
     "AgentState",
     "Capability",
     "ChatModel",
@@ -359,4 +529,8 @@ __all__ = [
     "RetrievalRequest",
     "RunStatus",
     "Trigger",
+    "stamp_coverage_gaps",
+    "stamp_retrieved",
+    "turn_gaps",
+    "turn_records",
 ]

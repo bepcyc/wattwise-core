@@ -49,6 +49,8 @@ from wattwise_core.agent.contracts import (
     GroundDecision,
     ReflectVerdict,
     RunStatus,
+    stamp_coverage_gaps,
+    stamp_retrieved,
 )
 from wattwise_core.agent.seams import (
     AgentServices,
@@ -83,13 +85,16 @@ DEFAULT_NODE_VISIT_CEILING = 60
 
 def _make_ingest_request(svc: AgentServices) -> GraphNode:
     async def ingest_request(state: AgentState) -> dict[str, Any]:
-        """Open the run: cost-admission gate + record the inbound turn (GRAPH-R2 head).
+        """Open the run: run-scoped reset + cost-admission gate + record the inbound turn.
 
-        Calls the cost-admission gate (COST-R2; OSS no-op enforcing only local guards),
-        normalises the request into working memory, and stamps a per-call cost event
-        (STATE-R3 ``cost_events``). A refused admission stops the run at the node boundary
-        -> ``budget_exceeded`` (COST-R4), recorded so ``finalize`` emits it.
-        """
+        GRAPH-R2 head / CKPT-R5: the SINGLE head node, hence the single writer of the new-turn
+        reset. On a NEW turn (``turn_id != run_epoch``) it resets every run-scoped channel via
+        ``gs.reset_run_scoped`` (counters -> floor 0; ``retrieved`` / ``coverage_gaps`` -> empty
+        stamped with the new ``turn_id``; ``run_epoch`` -> ``turn_id``) so a durable thread reused
+        across turns never leaks turn-1 evidence/counters into turn-2; ``Command(resume)`` does
+        NOT run the head, preserving the channels across the pause. Then the cost-admission gate
+        (COST-R2; OSS no-op), request normalisation, a per-call cost event (STATE-R3); a refused
+        admission stops the run -> budget_exceeded (COST-R4)."""
         athlete_id = gs.athlete_id(state)
         admitted = await svc.cost_gate.admit(athlete_id=athlete_id, state=state)
         text = state.get("request_text")
@@ -102,6 +107,12 @@ def _make_ingest_request(svc: AgentServices) -> GraphNode:
             "messages": messages,
             "cost_events": [{"node": "ingest_request", "kind": "admission", "admitted": admitted}],
         }
+        if gs.is_new_turn(state):
+            # Reset FIRST: ``reset_run_scoped`` sets ``node_visits`` to the floor 0 itself, so do
+            # NOT ``tick_visit`` here (a tick would write N+1 and the reducer would reject the
+            # mid-turn rewind). Subsequent nodes this turn tick up from 0.
+            update.update(gs.reset_run_scoped(state))
+            return update
         return gs.tick_visit(state, update)
 
     return ingest_request
@@ -111,8 +122,8 @@ def _make_plan_retrieval(svc: AgentServices) -> GraphNode:
     async def plan_retrieval(state: AgentState) -> dict[str, Any]:
         """Choose the next canonical capability requests (PLAN-R*). Pure update."""
         athlete_id = gs.athlete_id(state)
-        gaps = sorted(state.get("coverage_gaps", set()))
-        already = sorted(state.get("retrieved", {}).keys())
+        gaps = sorted(gs.read_coverage_gaps(state))
+        already = sorted(gs.read_retrieved(state).keys())
         requests = await svc.planner.plan(
             request_text=state.get("request_text"), gaps=gaps, already=already
         )
@@ -140,10 +151,13 @@ def _make_gather(svc: AgentServices) -> GraphNode:
         if not requests:
             return gs.tick_visit(state, {})
         records = await svc.gateway.gather(athlete_id=athlete_id, requests=requests)
-        update: dict[str, Any] = {"retrieved": dict(records)}
+        # Every write to the turn-keyed accumulators MUST be stamped with the current turn_id
+        # so the reducer self-resets across a turn boundary (CKPT-R5 leak backstop).
+        tid = gs.turn_id(state)
+        update: dict[str, Any] = {"retrieved": stamp_retrieved(tid, dict(records))}
         truncated = gs.retrieved_truncation_gaps(state, dict(records))
         if truncated:
-            update["coverage_gaps"] = truncated
+            update["coverage_gaps"] = stamp_coverage_gaps(tid, truncated)
         return gs.tick_visit(state, update)
 
     return gather
@@ -158,10 +172,14 @@ def _make_assess_coverage(svc: AgentServices) -> GraphNode:
         """
         gs.athlete_id(state)
         gaps = svc.coverage.assess(
-            request_text=state.get("request_text"), retrieved=state.get("retrieved", {})
+            request_text=state.get("request_text"), retrieved=gs.read_retrieved(state)
         )
         marker = {"role": "system", "kind": "coverage", "open_gaps": sorted(gaps)}
-        return gs.tick_visit(state, {"coverage_gaps": set(gaps), "messages": [marker]})
+        update: dict[str, Any] = {
+            "coverage_gaps": stamp_coverage_gaps(gs.turn_id(state), set(gaps)),
+            "messages": [marker],
+        }
+        return gs.tick_visit(state, update)
 
     return assess_coverage
 
@@ -198,7 +216,7 @@ def _make_compose(svc: AgentServices, model: ChatModel, coach_system: str) -> Gr
         coverage_gaps. The redraft counter is already spent by the router upstream.
         """
         gs.athlete_id(state)
-        retrieved = state.get("retrieved", {})
+        retrieved = gs.read_retrieved(state)
         context, trimmed = gs.render_context(state.get("request_text"), retrieved)
         draft = await model.compose(system=coach_system, context=context)
         update: dict[str, Any] = {
@@ -206,7 +224,7 @@ def _make_compose(svc: AgentServices, model: ChatModel, coach_system: str) -> Gr
             "messages": [{"role": "assistant", "kind": "draft"}],
         }
         if trimmed:
-            update["coverage_gaps"] = {"context_trimmed"}
+            update["coverage_gaps"] = stamp_coverage_gaps(gs.turn_id(state), {"context_trimmed"})
         return gs.tick_visit(state, update)
 
     return compose
@@ -222,7 +240,7 @@ def _make_ground(svc: AgentServices) -> GraphNode:
         athlete_id = gs.athlete_id(state)
         draft = state.get("draft") or ""
         result = await svc.grounder.ground(
-            athlete_id=athlete_id, draft=draft, retrieved=state.get("retrieved", {})
+            athlete_id=athlete_id, draft=draft, retrieved=gs.read_retrieved(state)
         )
         citations = [gc.citation for gc in result.survivors if gc.citation is not None]
         verdict_msg = {"role": "system", "kind": "ground", "decision": result.decision.value}
@@ -239,44 +257,56 @@ def _make_ground(svc: AgentServices) -> GraphNode:
     return ground
 
 
-def _interrupt_gate(state: AgentState) -> dict[str, Any]:
-    """Approval checkpoint between grounding and finalisation (GRAPH-R2, CKPT-R5).
+def _make_interrupt_gate(recorder: gs.InterruptRecorder | None) -> GraphNode:
+    async def interrupt_gate(state: AgentState) -> dict[str, Any]:
+        """Approval checkpoint between grounding and finalisation (GRAPH-R2, CKPT-R5/-R9).
 
-    When (and ONLY when) the grounded deliverable is a training PLAN that product policy
-    marks as requiring approval, this node PAUSES the run at a durable langgraph
-    ``interrupt`` carrying ``{grounded_plan, thread_id, interrupt_id}`` and emits the
-    ``awaiting_approval`` outcome HERE (it does NOT reach ``finalize``). A grounder
-    abstain is NOT approval (it degrades at finalize). Phase-1 ships no plan, so this gate
-    is a pass-through and the run proceeds straight to ``finalize``.
-    """
-    gs.athlete_id(state)
-    if not gs.plan_requires_approval(state):
-        return gs.tick_visit(state, {})
-    interrupt_id = str(uuid.uuid4())
-    payload = {
-        "status": RunStatus.AWAITING_APPROVAL.value,
-        "interrupt_id": interrupt_id,
-        "thread_id": state.get("thread_id"),
-        "grounded_plan": state.get("grounded_text"),
-    }
-    # Durable pause: yields the awaiting_approval payload and suspends until a matching
-    # approve/reject/edit decision resumes the thread (CKPT-R5/-R9).
-    decision = interrupt(payload)
-    approved = bool(decision.get("approved")) if isinstance(decision, Mapping) else bool(decision)
-    return gs.tick_visit(
-        state,
-        {
+        ONLY when the grounded deliverable is an approval-gated PLAN: it first persists a
+        ``live`` ``AgentInterrupt`` ledger row (via the injected ``recorder`` = the durable
+        checkpointer; CKPT-R9) BEFORE suspending, so a decision arriving against this thread
+        always finds a live row to atomically CONSUME (guarded UPDATE) and can never resume
+        twice. Then it PAUSES at a durable langgraph ``interrupt`` carrying
+        ``{grounded_plan, thread_id, interrupt_id}``, emitting ``awaiting_approval`` HERE (it
+        does not reach ``finalize``). A grounder abstain is NOT approval (it degrades at
+        finalize); with no approval-gated plan the gate is a pass-through. ``recorder is None``
+        (an in-memory checkpointer, the OSS/test default) raises the interrupt but records no
+        row — nothing durable can be consumed against it.
+        """
+        gs.athlete_id(state)
+        if not gs.plan_requires_approval(state):
+            return gs.tick_visit(state, {})
+        interrupt_id = str(uuid.uuid4())
+        thread_id = state.get("thread_id")
+        if recorder is not None and thread_id:
+            await recorder.record_interrupt(thread_id, interrupt_id)
+        payload = {
+            "status": RunStatus.AWAITING_APPROVAL.value,
             "interrupt_id": interrupt_id,
-            "messages": [
-                {
-                    "role": "system",
-                    "kind": "approval",
-                    "interrupt_id": interrupt_id,
-                    "approved": approved,
-                }
-            ],
-        },
-    )
+            "thread_id": thread_id,
+            "grounded_plan": state.get("grounded_text"),
+        }
+        # Durable pause: yields the awaiting_approval payload and suspends until a matching
+        # approve/reject/edit decision resumes the thread (CKPT-R5/-R9).
+        decision = interrupt(payload)
+        approved = (
+            bool(decision.get("approved")) if isinstance(decision, Mapping) else bool(decision)
+        )
+        return gs.tick_visit(
+            state,
+            {
+                "interrupt_id": interrupt_id,
+                "messages": [
+                    {
+                        "role": "system",
+                        "kind": "approval",
+                        "interrupt_id": interrupt_id,
+                        "approved": approved,
+                    }
+                ],
+            },
+        )
+
+    return interrupt_gate
 
 
 def _make_finalize(svc: AgentServices, ceiling: int) -> GraphNode:
@@ -404,6 +434,11 @@ def build_graph(
     """
     builder: StateGraph[AgentState, Any, AgentState, AgentState] = StateGraph(AgentState)
     ceiling = node_visit_ceiling
+    # The interrupt-gate persists its ``live`` AgentInterrupt ledger row through the
+    # checkpointer when (and only when) it satisfies the ``record_interrupt`` seam (CKPT-R9);
+    # an in-memory checkpointer does not, so the gate records nothing (and nothing durable can
+    # be consumed against it). Detected structurally (ARCH-R21: no concrete-saver import).
+    recorder = checkpointer if isinstance(checkpointer, gs.InterruptRecorder) else None
 
     # ``input_schema=AgentState`` binds each node's input type so the strict-typed
     # builder accepts the ``(AgentState) -> partial`` node signatures (GRAPH-R4).
@@ -415,7 +450,7 @@ def build_graph(
     builder.add_node("redraft_tick", _make_redraft_tick(), input_schema=AgentState)
     builder.add_node("compose", _make_compose(svc, model, coach_system), input_schema=AgentState)
     builder.add_node("ground", _make_ground(svc), input_schema=AgentState)
-    builder.add_node("interrupt_gate", _interrupt_gate, input_schema=AgentState)
+    builder.add_node("interrupt_gate", _make_interrupt_gate(recorder), input_schema=AgentState)
     builder.add_node("finalize", _make_finalize(svc, ceiling), input_schema=AgentState)
 
     # Fixed spine (GRAPH-R2). Admission-refused short-circuits ingest -> finalize (COST-R4).

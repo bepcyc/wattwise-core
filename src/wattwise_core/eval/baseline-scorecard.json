@@ -1,0 +1,66 @@
+{
+  "baseline_format_version": "1.0.0",
+  "suites": {
+    "abstention": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "abstention.rate": 1.0,
+        "schema.rate": 1.0
+      },
+      "passed": true
+    },
+    "grounding": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "grounding.faithfulness": 1.0,
+        "schema.rate": 1.0
+      },
+      "passed": true
+    },
+    "injection": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "injection.rate": 1.0,
+        "schema.rate": 1.0
+      },
+      "passed": true
+    },
+    "intent_plan": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "intent_plan.precision": 1.0,
+        "intent_plan.recall": 1.0
+      },
+      "passed": true
+    },
+    "judge": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "judge.passed_cases": 2.0
+      },
+      "passed": true
+    },
+    "multilingual": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "termination.rate": 1.0
+      },
+      "passed": true
+    },
+    "readiness": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "readiness.consistency_rate": 1.0,
+        "readiness.voice_rate": 1.0
+      },
+      "passed": true
+    },
+    "termination": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "termination.rate": 1.0
+      },
+      "passed": true
+    }
+  }
+}

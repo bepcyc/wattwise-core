@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from wattwise_core.agent.contracts import (
@@ -42,13 +43,54 @@ from wattwise_core.agent.contracts import (
     GroundingResult,
     GroundVerdict,
 )
+from wattwise_core.agent.grounding_sweep import (
+    NUMBER_RE,
+    URL_RE,
+    normalize_url,
+    normalize_urls,
+    scrub_uncovered_numbers,
+    scrub_unverified_urls,
+)
 
-# Default numeric tolerance (relative) for matching a claimed metric value against the
-# canonical analytic (GROUND-R7). A claimed number within this fraction of the canonical
-# value is treated as a verbatim re-statement; anything outside is scrubbed/replaced.
-_DEFAULT_REL_TOLERANCE = 1e-3
-# Absolute floor so near-zero canonical values do not make the relative band vanish.
-_DEFAULT_ABS_TOLERANCE = 1e-6
+# Default numeric tolerance for matching a claimed metric value against the canonical
+# analytic (GROUND-R7). A claimed number within this band of the canonical value is treated
+# as a verbatim re-statement; anything outside is scrubbed/replaced. The default REL band is
+# wide enough to accept a model DISPLAYING the canonical value at sane human precision (e.g.
+# "your ctl is 6.7" for a canonical 6.7315, or a whole-number round of a small CTL/ATL/TSB),
+# while a FABRICATED number — wrong by tens of percent — is still scrubbed. The exact
+# threshold is config-loaded content (§16 / SKILL-R1 metric thresholds); this constant is the
+# fallback the OSS engine resolves it from, never a hidden hardcode of policy in the gate.
+_DEFAULT_REL_TOLERANCE = 0.02
+# Absolute floor so near-zero canonical values (e.g. tsb ≈ 0) still admit a 1-decimal
+# display ("0.0" for a canonical 0.004) without the relative band collapsing to nothing.
+_DEFAULT_ABS_TOLERANCE = 0.05
+# Decimal places the canonical value is rounded to when it REPLACES a recognized numeric span
+# in the published text (GROUND-R7). Config-loaded (§16); this is the no-config fallback.
+_DEFAULT_DISPLAY_DECIMALS = 1
+
+
+@dataclass(frozen=True, slots=True)
+class NumericTolerance:
+    """The numeric-match band the grounder accepts for a metric value (GROUND-R7).
+
+    Carried into :func:`ground` so the threshold is config-loaded content (§16 / SKILL-R1),
+    not a literal baked into the gate. ``rel`` is the relative band (a fraction of the
+    canonical magnitude) and ``abs_`` the absolute floor for near-zero canonical values; a
+    claimed value within EITHER band of the canonical value grounds. The defaults accept a
+    human-precision display of the canonical number and scrub a fabrication.
+
+    ``display_decimals`` is the precision the CANONICAL value is rounded to when it is PUBLISHED
+    in place of the model's numeric span (GROUND-R7 verbatim): the model's approximation — even
+    a within-tolerance one like "102" for a canonical 100 — is NEVER what reaches the athlete;
+    the canonical value, rounded for a human display, always is.
+    """
+
+    rel: float = _DEFAULT_REL_TOLERANCE
+    abs_: float = _DEFAULT_ABS_TOLERANCE
+    display_decimals: int = _DEFAULT_DISPLAY_DECIMALS
+
+
+_DEFAULT_TOLERANCE = NumericTolerance()
 
 
 @runtime_checkable
@@ -78,6 +120,8 @@ def ground(
     claims: Sequence[Claim],
     evidence: GroundingEvidence,
     allow_urls: Iterable[str],
+    *,
+    tolerance: NumericTolerance = _DEFAULT_TOLERANCE,
 ) -> GroundingResult:
     """Verify every claim against canonical evidence and scrub the draft (GROUND-R1/R3/R9).
 
@@ -96,44 +140,56 @@ def ground(
     does not itself call a model or a live service, so the same inputs always yield the
     same result (GRAPH-R4).
     """
-    allow_list = _normalize_urls(allow_urls)
+    allow_list = normalize_urls(allow_urls)
     name_library = evidence if isinstance(evidence, NameLibrary) else None
     grounded: list[GroundedClaim] = []
     text = draft_text
+    grounded_numbers: set[str] = set()
     for claim in claims:
-        outcome = _verify_claim(claim, evidence, name_library, allow_list)
+        outcome = _verify_claim(claim, evidence, name_library, allow_list, tolerance)
         grounded.append(outcome.grounded)
-        if outcome.scrub_text is not None:
+        if outcome.scrub_text is None:
+            continue
+        if claim.kind is ClaimKind.NUMBER:
+            # A NUMBER's published figure is rewritten to the CANONICAL value at display precision
+            # (verbatim for grounded, corrected for contradicted, removed for ungrounded). Rewrite
+            # the model's NUMERIC TOKEN within the draft directly, not the whole claim.text span, so
+            # display rewriting is robust to the model not reproducing claim.text verbatim (case /
+            # wording drift). The actual canonical display string is recorded so the numeric sweep
+            # below does NOT scrub the very value the grounder verified (GROUND-R7).
+            text, published = _apply_number_scrub(text, claim, outcome.scrub_text)
+            if published is not None:
+                grounded_numbers.add(published)
+        else:
             text = _scrub_span(text, claim.text, outcome.scrub_text)
     decision = _decide(grounded)
-    text = _scrub_unverified_urls(text, evidence, allow_list)
+    text = scrub_unverified_urls(text, evidence, allow_list)
+    text, swept = scrub_uncovered_numbers(text, grounded_numbers)
+    if swept:
+        # The draft carried a number the claim extractor never surfaced and the deterministic
+        # sweep had to remove (GROUND-R3, mirroring the URL sweep). An unverified number reaching
+        # athlete-facing text is a grounding failure even if every EXTRACTED claim grounded, so the
+        # run must NOT proceed: re-draft if anything grounded survives, else abstain (fail-closed).
+        decision = _downgrade_for_sweep(decision, grounded)
     return GroundingResult(decision=decision, claims=tuple(grounded), scrubbed_text=text)
 
 
-def _scrub_unverified_urls(
-    text: str, evidence: GroundingEvidence, allow_list: frozenset[str]
-) -> str:
-    """Remove every URL in the body not on the allow-list / a matched record (GROUND-R4).
+def _downgrade_for_sweep(
+    decision: GroundDecision, grounded: Sequence[GroundedClaim]
+) -> GroundDecision:
+    """Force a non-``proceed`` decision when the numeric sweep removed an uncovered number (H4).
 
-    A SECOND, extraction-independent net: even a URL the model never surfaced as a claim is
-    scrubbed unless it is first-party allow-listed or accepted by the evidence — so a
-    model-invented link can never reach the athlete just because it went unextracted. A body
-    with no URL is returned untouched; removals collapse the whitespace they leave behind.
+    A swept number means an unverified figure was about to ship despite every EXTRACTED claim
+    grounding — a grounding failure (GROUND-R3). ``proceed`` is downgraded to ``regenerate`` when
+    some grounded claim survives (re-draft without the offending span) or ``abstain`` when nothing
+    publishable survives; an already-recovering/abstaining decision is left as-is (still not
+    ``proceed``).
     """
-    if not _URL_RE.search(text):
-        return text
-
-    def _keep(match: re.Match[str]) -> str:
-        url = match.group(0)
-        if _normalize_url(url) in allow_list or evidence.url_allowed(url):
-            return url
-        return ""
-
-    cleaned = _URL_RE.sub(_keep, text)
-    if cleaned == text:
-        return text
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    return re.sub(r"\s+([.,;:!?])", r"\1", cleaned).strip()
+    if decision is not GroundDecision.PROCEED:
+        return decision
+    if any(_is_publishable(c) for c in grounded):
+        return GroundDecision.REGENERATE
+    return GroundDecision.ABSTAIN
 
 
 class _Outcome:
@@ -156,10 +212,11 @@ def _verify_claim(
     evidence: GroundingEvidence,
     name_library: NameLibrary | None,
     allow_list: frozenset[str],
+    tolerance: NumericTolerance,
 ) -> _Outcome:
     """Dispatch one claim to its kind-specific verifier (GROUND-R2)."""
     if claim.kind is ClaimKind.NUMBER:
-        return _verify_number(claim, evidence)
+        return _verify_number(claim, evidence, tolerance)
     if claim.kind is ClaimKind.NAME:
         return _verify_name(claim, name_library)
     if claim.kind is ClaimKind.URL:
@@ -167,25 +224,36 @@ def _verify_claim(
     return _verify_statement(claim)
 
 
-def _verify_number(claim: Claim, evidence: GroundingEvidence) -> _Outcome:
+def _verify_number(
+    claim: Claim, evidence: GroundingEvidence, tolerance: NumericTolerance
+) -> _Outcome:
     """Match a claimed number against the canonical analytic within tolerance (GROUND-R7).
 
     A claim with no metric/value cannot be checked, so it fails closed (scrubbed). When
     the canonical computation is unavailable the number is scrubbed entirely — never a
-    placeholder or zero (GROUND-R7). A claimed value within tolerance is ``grounded``; a
-    value outside tolerance is ``contradicted`` and replaced by the canonical value
-    (and NEVER published as stated).
+    placeholder or zero (GROUND-R7).
+
+    Tolerance only decides whether a claim is RECOGNIZED as a (rounded/restated) reference to
+    the canonical number — it NEVER lets the model's own figure ship. A claimed value within
+    tolerance is ``grounded``, but the published span is ALWAYS rewritten to the canonical value
+    rounded to display precision (so canonical ctl=100 with a within-band claim of "102" ships
+    "100", never "102" — GROUND-R7 verbatim). A value outside tolerance is ``contradicted`` and
+    likewise replaced by the canonical value, and NEVER published as stated. Either way the
+    number the athlete sees is the canonical analytic, not the model's approximation.
     """
     if claim.metric is None or claim.value is None:
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
     canonical = _canonical_metric(evidence, claim.metric, claim.ref)
     if canonical is None:
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
-    if _within_tolerance(claim.value, canonical):
+    # The PUBLISHED figure is ALWAYS the canonical value rounded to display precision — never the
+    # model's own number (GROUND-R7). ``scrub_text`` carries that bare canonical display token; the
+    # caller (:func:`_apply_number_scrub`) writes it over the model's numeric token in the draft.
+    canonical_display = _render_value(canonical, tolerance.display_decimals)
+    if _within_tolerance(claim.value, canonical, tolerance):
         citation = _metric_citation(claim, canonical)
-        return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), None)
-    replacement = _format_number(canonical, claim.text)
-    return _Outcome(GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), replacement)
+        return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), canonical_display)
+    return _Outcome(GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), canonical_display)
 
 
 def _verify_name(claim: Claim, name_library: NameLibrary | None) -> _Outcome:
@@ -213,7 +281,7 @@ def _verify_url(claim: Claim, evidence: GroundingEvidence, allow_list: frozenset
     every model-invented URL — is scrubbed unconditionally (GROUND-R4).
     """
     url = claim.ref if claim.ref is not None else claim.text
-    normalized = _normalize_url(url)
+    normalized = normalize_url(url)
     if normalized in allow_list or evidence.url_allowed(url):
         citation = {"kind": "url", "canonical_id": url}
         return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), None)
@@ -244,7 +312,7 @@ def _carries_checkable_token(text: str) -> bool:
     non-factual; a number or URL in its span makes it a checkable claim that MUST be
     verified by its kind-specific verifier, never published on a statement's free pass.
     """
-    return bool(_NUMBER_RE.search(text) or _URL_RE.search(text))
+    return bool(NUMBER_RE.search(text) or URL_RE.search(text))
 
 
 def _scrubbed(claim: Claim, verdict: GroundVerdict) -> _Outcome:
@@ -331,15 +399,17 @@ def _as_float(raw: Any) -> float | None:
     return None
 
 
-def _within_tolerance(claimed: float, canonical: float) -> bool:
+def _within_tolerance(
+    claimed: float, canonical: float, tolerance: NumericTolerance = _DEFAULT_TOLERANCE
+) -> bool:
     """True iff a claimed number matches the canonical value within tolerance (GROUND-R7)."""
     if not (math.isfinite(claimed) and math.isfinite(canonical)):
         return False
     return math.isclose(
         claimed,
         canonical,
-        rel_tol=_DEFAULT_REL_TOLERANCE,
-        abs_tol=_DEFAULT_ABS_TOLERANCE,
+        rel_tol=tolerance.rel,
+        abs_tol=tolerance.abs_,
     )
 
 
@@ -361,56 +431,46 @@ def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
     }
 
 
-def _format_number(canonical: float, original: str) -> str:
-    """Render the canonical value into the original span, preserving its surround.
+def _apply_number_scrub(text: str, claim: Claim, replacement: str) -> tuple[str, str | None]:
+    """Rewrite the model's numeric token in ``text`` to the canonical value, or remove it (R7).
 
-    The first numeric token in ``original`` is replaced by the canonical value so units
-    and surrounding words survive (e.g. ``"CTL is 99 today"`` -> ``"CTL is 84 today"``).
-    When no numeric token is found the canonical value is rendered bare.
+    For a NUMBER claim the published figure is ALWAYS the canonical value (``replacement`` =
+    its display string, or ``""`` to remove an ungrounded/unavailable number). This finds the
+    model's own numeric token — the first number in ``claim.text`` (e.g. ``"63.50"`` from
+    ``"your fitness is at 63.50"``) — and replaces THAT token in the draft, so the rewrite is
+    robust to the model not reproducing ``claim.text`` verbatim (case / wording drift). Returns the
+    edited text and the canonical display string actually published (so the numeric-coverage sweep
+    treats it as covered), or ``None`` when nothing was published (removed / token not found).
     """
-    rendered = _render_value(canonical)
-    replaced, count = _NUMBER_RE.subn(rendered, original, count=1)
-    return replaced if count else rendered
+    token_match = NUMBER_RE.search(claim.text)
+    token = token_match.group(0) if token_match is not None else claim.text
+    idx = text.find(token)
+    if idx == -1:
+        # The model's token is not literally in the draft; nothing to publish/remove here. The
+        # numeric sweep is the backstop for any uncovered number that DID reach the draft.
+        return text, replacement or None
+    edited = text[:idx] + replacement + text[idx + len(token) :]
+    if replacement == "":
+        edited = re.sub(r"\s{2,}", " ", edited)
+        edited = re.sub(r"\s+([.,;:!?])", r"\1", edited).strip()
+        return edited, None
+    return edited, replacement
 
 
-def _render_value(value: float) -> str:
-    """Render a float without a trailing ``.0`` for integral values (display parity)."""
-    if value == int(value):
-        return str(int(value))
-    return f"{value:g}"
+def _render_value(value: float, decimals: int) -> str:
+    """Render the canonical value at ``decimals`` precision, dropping a trailing ``.0``.
 
-
-# --- URL + span helpers ---
-
-
-_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
-
-# A URL token in athlete-facing prose; the deterministic URL sweep checks every match
-# against the allow-list / matched-record destinations regardless of model extraction
-# (GROUND-R4: invented URLs are scrubbed unconditionally).
-_URL_RE = re.compile(r"https?://[^\s)>\]]+", re.IGNORECASE)
-
-
-def _normalize_urls(urls: Iterable[str]) -> frozenset[str]:
-    """Normalize an allow-list into a comparable set (GROUND-R4)."""
-    return frozenset(_normalize_url(u) for u in urls)
-
-
-def _normalize_url(url: str) -> str:
-    """Normalize a URL for allow-list comparison: strip whitespace, lowercase scheme/host.
-
-    A conservative normalization: trims surrounding whitespace and a trailing slash, and
-    lowercases the scheme+host portion. Anything ambiguous compares unequal and is
-    scrubbed (fail-closed, GROUND-R4) rather than guessed into the allow-list.
+    Rounds to the configured display precision (so a high-precision canonical value surfaces as
+    the human number a coach would say) and, when the rounded value is integral, renders it
+    without a trailing ``.0`` for display parity (``84.0`` -> ``"84"``).
     """
-    stripped = url.strip().rstrip("/")
-    if "://" not in stripped:
-        return stripped.casefold()
-    scheme, rest = stripped.split("://", 1)
-    if "/" in rest:
-        host, path = rest.split("/", 1)
-        return f"{scheme.casefold()}://{host.casefold()}/{path}"
-    return f"{scheme.casefold()}://{rest.casefold()}"
+    rounded = round(value, decimals)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:.{decimals}f}"
+
+
+# --- span helpers (the URL/number sweep primitives live in ``grounding_sweep``) ---
 
 
 def _scrub_span(text: str, span: str, replacement: str) -> str:
@@ -433,4 +493,4 @@ def _scrub_span(text: str, span: str, replacement: str) -> str:
     return edited.strip() if replacement == "" else edited
 
 
-__all__ = ["NameLibrary", "ground"]
+__all__ = ["NameLibrary", "NumericTolerance", "ground"]

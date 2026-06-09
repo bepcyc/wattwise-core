@@ -220,6 +220,46 @@ async def test_claimgrounder_grounds_number_against_canonical(
     assert grounded[0].citation["value"] == ctl  # verbatim canonical value, never re-derived
 
 
+async def test_claimgrounder_unparseable_past_date_scrubs_not_grounds_latest(
+    seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
+) -> None:
+    """H2 fabrication: a claim with a FAILED-PARSE date is SCRUBBED, never grounded against latest.
+
+    The model says "On June 1 your fitness was <latest-ctl>", extracted with ``as_of="June 1"`` — a
+    date token that does NOT parse as ISO. The OLD behaviour fell back to the LATEST PMC day, so the
+    claim (whose value equals the LATEST ctl) GROUNDED — fabricating a past-dated fact from today's
+    value. The fix fails closed: an unparseable date resolves to ``None``, so the number is SCRUBBED
+    and the run does NOT proceed. The latest ctl must NOT reach the body under a past-date claim.
+    """
+    svc, _, _ = seeded
+    series = await svc.pmc(str(OWNER_ATHLETE_ID), _dt.date(2026, 6, 1), _dt.date(2026, 6, 3))
+    latest_ctl = series[-1].value.ctl
+    model = FakeModel(
+        scripted={
+            "_ClaimSchema": _ClaimSchema(
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text=f"On June 1 your fitness was {latest_ctl:.2f}",
+                        metric="ctl",
+                        value=latest_ctl,
+                        as_of="June 1",  # a date token that FAILS to parse as ISO
+                    )
+                ]
+            )
+        }
+    )
+    grounder = ClaimGrounder(model, svc)
+    result = await grounder.ground(
+        athlete_id=str(OWNER_ATHLETE_ID),
+        draft=f"On June 1 your fitness was {latest_ctl:.2f}.",
+        retrieved={"weekly_load": series},
+    )
+    assert not result.survivors, "an unparseable-date claim must NOT ground against the latest day"
+    assert f"{latest_ctl:.2f}" not in result.scrubbed_text, "the past-dated number must be scrubbed"
+    assert result.decision is not GroundDecision.PROCEED
+
+
 async def test_engine_grounded_number_reaches_answer_citations(
     seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
 ) -> None:
@@ -267,7 +307,15 @@ async def test_engine_grounded_number_reaches_answer_citations(
 async def test_claimgrounder_scrubs_fabricated_number(
     seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
 ) -> None:
-    """A fabricated number with no resolvable canonical value scrubs and abstains (GROUND-R6)."""
+    """A fabricated number is contradicted by canonical and never published (GROUND-R7/R9).
+
+    The seeded athlete HAS a canonical CTL, so a fabricated ``999`` (with no as-of date) is now
+    checked against the latest-available canonical value (the §16 dateless fallback) and comes back
+    CONTRADICTED — the canonical value EXISTS and differs — which drives a bounded REGENERATE
+    (re-draft with the offending span corrected, GROUND-R9), not ABSTAIN. The guarantee under test
+    is unchanged: the fabricated ``999`` is scrubbed/replaced by the canonical value and NEVER
+    published as stated, and a contradicted claim carries no citation.
+    """
     svc, _, _ = seeded
     model = FakeModel(
         scripted={
@@ -284,10 +332,9 @@ async def test_claimgrounder_scrubs_fabricated_number(
     result = await grounder.ground(
         athlete_id=str(OWNER_ATHLETE_ID), draft="Your CTL is 999 and rising.", retrieved={}
     )
-    # Nothing publishable survives the fabricated number -> abstain (the engine's finalize
-    # then replaces the body with an explicit limitation, GROUND-R6); the verbatim span the
-    # model pointed at is scrubbed out of the grounded text here.
-    assert result.decision is GroundDecision.ABSTAIN
+    # The fabricated number is contradicted by the live canonical value and replaced in place;
+    # 999 never reaches the athlete, and the contradicted claim carries no citation (GROUND-R9).
+    assert result.decision is GroundDecision.REGENERATE
     assert all(c.citation is None for c in result.survivors)
     assert "999" not in result.scrubbed_text
 

@@ -1,0 +1,48 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "reflection_termination",
+  "qa_eval_suite": "R2.11",
+  "requirement_ids": ["QA-EVAL-R2.11", "EVAL-R7", "QA-EVAL-R6", "REFLECT-R4", "OUTCOME-R3", "GRAPH-R5"],
+  "rationale": "Reflection/redraft bounded-termination catalog (QA-EVAL-R2.11 / EVAL-R7). Three adversarial fixtures drive the PRODUCTION graph (build_graph) into each pathological recovery loop and assert it terminates GRACEFULLY at the matching monotonic bound with a DEGRADED status -- NEVER an unbounded loop, NEVER an error, and NEVER budget_exceeded (which is reserved for a refused cost admission, COST-R4, and must not be reachable by a coverage/redraft/replan loop). The cost-admission gate ALWAYS admits in these fixtures, so a budget_exceeded outcome here would be a real defect, not a designed exit. QA-EVAL-R6 termination gate: 100% of fixtures terminate at their bound and degrade.",
+  "cases": [
+    {
+      "id": "coverage-loop-bound-degrades",
+      "fixture": "F-COVERAGE-BOUND",
+      "loop": "coverage",
+      "bound": "reflection_count",
+      "ground_decision": "proceed",
+      "reflect_verdict": "replan",
+      "coverage_gaps": ["missing_ftp"],
+      "rationale": "The coverage assessor reports an open gap on every pass and reflect always REPLANs, so the assess_coverage -> reflect -> plan_retrieval cycle would loop forever; it MUST instead spend the reflection budget to MAX_REFLECTIONS and degrade. Asserts status==degraded, reflection_count==MAX_REFLECTIONS, status NOT budget_exceeded.",
+      "expected_status": "degraded",
+      "expected_bound_counter": "reflection_count",
+      "forbidden_statuses": ["budget_exceeded", "completed", "awaiting_approval"]
+    },
+    {
+      "id": "redraft-loop-bound-degrades",
+      "fixture": "F-REDRAFT-BOUND",
+      "loop": "redraft",
+      "bound": "redraft_count",
+      "ground_decision": "regenerate",
+      "reflect_verdict": "replan",
+      "coverage_gaps": [],
+      "rationale": "The grounder asks to REGENERATE on every pass, so the ground -> compose redraft cycle would loop forever; it MUST instead spend the redraft budget to MAX_REDRAFTS and degrade. Asserts status==degraded, redraft_count==MAX_REDRAFTS, status NOT budget_exceeded.",
+      "expected_status": "degraded",
+      "expected_bound_counter": "redraft_count",
+      "forbidden_statuses": ["budget_exceeded", "completed", "awaiting_approval"]
+    },
+    {
+      "id": "ground-replan-loop-bound-degrades",
+      "fixture": "F-GROUNDLOOP-TERMINATES",
+      "loop": "ground_replan",
+      "bound": "reflection_count",
+      "ground_decision": "replan",
+      "reflect_verdict": "replan",
+      "coverage_gaps": [],
+      "rationale": "The grounder asks to REPLAN on every pass, so the ground -> reflect -> plan_retrieval re-plan cycle would loop forever; it MUST instead spend the reflection budget to MAX_REFLECTIONS and degrade. This is the distinct third recovery cycle (GRAPH-R3) and proves a ground-driven loop also terminates. Asserts status==degraded, reflection_count==MAX_REFLECTIONS, status NOT budget_exceeded.",
+      "expected_status": "degraded",
+      "expected_bound_counter": "reflection_count",
+      "forbidden_statuses": ["budget_exceeded", "completed", "awaiting_approval"]
+    }
+  ]
+}

@@ -1,49 +1,39 @@
-"""Production agent runtime: concrete services + the deployable :class:`GraphAgentEngine`.
+"""The deployable :class:`GraphAgentEngine` the API drives (doc 50).
 
-The agent graph, grounding, capabilities, and deliverables are built and tested with
-injected seams; this module supplies the CONCRETE production implementations of those
-seams (a model-driven planner, the canonical capability gateway, a deterministic
-coverage assessor, and a model-extract + code-verify grounder) and assembles them into
-an :class:`AgentEngine` the API drives. ``build_agent_engine`` constructs it from
-settings + the database; when no LLM key is configured the OSS engine boots without a
-model and the agent surface degrades gracefully rather than failing the boot (RUN-R4.1).
-
-Identity is server-derived end to end (AGT-SEC-R1); the model never self-certifies a
-verdict (OUTCOME-R5) — it only emits the structured retrieval plan and candidate claims;
-deterministic code resolves capabilities and verifies every claim against canonical data.
+Assembles the compiled coaching graph over a DURABLE :class:`SqlAlchemyCheckpointSaver` (on a
+dedicated agent-state pool, ARCH-R13/DEPLOY-R4) + the concrete production services (in the focused
+:mod:`engine_services` sibling, re-exported here) and runs the deliverable projection: grounded
+Q&A + COACH-R8 follow-ups, the weekly digest, the multi-day PLAN, and the HITL decision resume.
+``build_agent_engine`` constructs it from settings + the database; with no LLM key the OSS engine
+boots without a model and the agent surface degrades gracefully (RUN-R4.1). Identity is server-
+derived (AGT-SEC-R1); the model never self-certifies (OUTCOME-R5); the durable saver makes
+follow-ups and approval pauses resumable (CKPT-R5/-R9).
 """
 
 from __future__ import annotations
 
-import datetime as _dt
-from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, cast
+import os
+import tempfile
+from dataclasses import replace
+from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel, Field
+from langgraph.types import Command
 
-from wattwise_core.agent import grounding as _grounding
-from wattwise_core.agent.capabilities import (
-    CAPABILITY_BY_KEY,
-    CanonicalEvidence,
-    gather,
-)
-from wattwise_core.agent.contracts import (
-    AgentState,
-    ChatModel,
-    Claim,
-    ClaimKind,
-    GroundingResult,
-    RetrievalRequest,
-    RunStatus,
-)
+# The concrete production agent services + the canonical workout-NAME library live in the focused
+# sibling :mod:`engine_services` (QUAL-R9 size split); the public ones are re-exported below so
+# every historical ``from wattwise_core.agent.engine import ClaimGrounder/ModelPlanner/...`` path
+# stays stable (e.g. the integration tests import ``ClaimGrounder``/``_PlanSchema``).
+from wattwise_core.agent.checkpoint import SqlAlchemyCheckpointSaver
+from wattwise_core.agent.contracts import AgentState, ChatModel, RunStatus
 from wattwise_core.agent.deliverables import (
     AgentAnswer,
-    CoachGraph,
+    Plan,
     Readiness,
     answer_question,
+    conversation_id_of,
+    new_conversation_id,
     readiness_assessment,
     weekly_digest,
 )
@@ -51,18 +41,27 @@ from wattwise_core.agent.engine_readiness import (
     gather_readiness_inputs,
     readiness_narrator,
 )
+from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (historical paths)
+    CANONICAL_WORKOUT_NAMES,
+    ClaimGrounder,
+    CoachBundle,
+    DeterministicCoverage,
+    ModelPlanner,
+    RegistryGateway,
+    _ClaimSchema,
+    _ExtractedClaim,
+    _PlanSchema,
+    build_services,
+)
 from wattwise_core.agent.graph import DEFAULT_NODE_VISIT_CEILING, build_graph
 from wattwise_core.agent.model import OpenAICompatibleModel
-from wattwise_core.agent.seams import AgentServices
-from wattwise_core.agent.structured import StructuredOutputError, run_structured
+from wattwise_core.agent.plan_deliverable import _project_plan, safe_plan_html
+from wattwise_core.agent.plan_deliverable import plan as _plan
+from wattwise_core.agent.plan_regrounding import accept_edit
+from wattwise_core.agent.state_db import AgentStateDatabase, build_agent_state_database
+from wattwise_core.agent.unconfigured import UnconfiguredAgentEngine
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.persistence import Database
-from wattwise_core.persistence.types import utcnow
-
-# Date-range capabilities the headline planner can request without an activity id; the
-# per-activity/per-day capabilities need an id the planner does not have at plan time.
-_DATE_RANGE_CAPABILITIES = ("weekly_load", "critical_power", "power_curve")
-_DEFAULT_WINDOW_DAYS = 42
 
 # The compiled-graph type the deliverables drive through the ``CoachGraph`` seam.
 _CompiledGraph = CompiledStateGraph[AgentState, Any, AgentState, AgentState]
@@ -77,188 +76,30 @@ _NODE_VISIT_CEILING = DEFAULT_NODE_VISIT_CEILING
 _RECURSION_LIMIT = _NODE_VISIT_CEILING + 20
 
 
-class _PlanSchema(BaseModel):
-    """Provider-enforced retrieval plan (PLAN-R2): which canonical capabilities to gather."""
+def _fallback_state_dsn() -> str:
+    """A per-process FILE-sqlite DSN for the lazy agent-state fallback (real pool, not memory).
 
-    model_config = {"extra": "forbid"}
-    capabilities: list[str] = Field(default_factory=list)
-    window_days: int = Field(default=_DEFAULT_WINDOW_DAYS, ge=1, le=365)
-
-
-class _ExtractedClaim(BaseModel):
-    """One candidate claim the model points at (STRUCT-R5); code verifies it, not the model."""
-
-    model_config = {"extra": "forbid"}
-    kind: ClaimKind = ClaimKind.NUMBER
-    text: str = ""
-    metric: str | None = None
-    value: float | None = None
-    as_of: str | None = None
-
-
-class _ClaimSchema(BaseModel):
-    """The structured claim-extraction output (GROUND-R2/STRUCT-R5)."""
-
-    model_config = {"extra": "forbid"}
-    claims: list[_ExtractedClaim] = Field(default_factory=list)
-
-
-_PLAN_SYSTEM = (
-    "You are the coaching agent's retrieval planner. Choose which canonical analytics "
-    "capabilities to gather to answer the athlete, from the closed set "
-    f"{_DATE_RANGE_CAPABILITIES}, plus a window in days. Return ONLY the structured plan."
-)
-_CLAIM_SYSTEM = (
-    "Extract every factual numeric claim in the draft as a candidate claim with its "
-    "metric name, value, and the local date (ISO 8601) it is as-of when the draft states "
-    "one. Do NOT judge correctness — only point at candidates."
-)
-
-
-class ModelPlanner:
-    """Model-driven retrieval planner (PLAN-R1/R2): the structured plan IS the selection."""
-
-    def __init__(self, model: ChatModel, *, reference_date: _dt.date | None = None) -> None:
-        self._model = model
-        self._today = reference_date or utcnow().date()
-
-    async def plan(
-        self, *, request_text: str | None, gaps: Sequence[str], already: Sequence[str]
-    ) -> Sequence[RetrievalRequest]:
-        """Emit the next batch of capability requests; fail-closed to a default on error."""
-        try:
-            plan = await run_structured(
-                self._model,
-                system=_PLAN_SYSTEM,
-                data=f"question: {request_text}\nopen_gaps: {list(gaps)}\nalready: {list(already)}",
-                schema=_PlanSchema,
-            )
-            keys = [k for k in plan.capabilities if k in _DATE_RANGE_CAPABILITIES]
-            window = plan.window_days
-        except (StructuredOutputError, NotImplementedError):
-            keys, window = ["weekly_load"], _DEFAULT_WINDOW_DAYS
-        if not keys:
-            keys = ["weekly_load"]
-        frm = self._today - _dt.timedelta(days=window)
-        params = {"from_date": frm.isoformat(), "to_date": self._today.isoformat()}
-        seen = set(already)
-        return [
-            RetrievalRequest(capability=k, params=dict(params))
-            for k in keys
-            if k in CAPABILITY_BY_KEY and k not in seen
-        ]
-
-
-class RegistryGateway:
-    """Resolves capability requests to canonical evidence via the one registry (TOOL-R1)."""
-
-    def __init__(self, svc: AnalyticsService) -> None:
-        self._svc = svc
-
-    async def gather(
-        self, *, athlete_id: str, requests: Sequence[RetrievalRequest]
-    ) -> Mapping[str, Any]:
-        result = await gather(self._svc, athlete_id, list(requests))
-        return result.records
-
-
-class DeterministicCoverage:
-    """Reports planned capabilities that resolved to no canonical evidence (pure)."""
-
-    def assess(self, *, request_text: str | None, retrieved: Mapping[str, Any]) -> set[str]:
-        # A turn with no retrieved evidence at all is the only structural gap the headline
-        # flow reports; per-capability emptiness is surfaced by the gather records.
-        return set() if retrieved else {"no_canonical_evidence"}
-
-
-class _SnapshotEvidence:
-    """Sync grounding evidence: pre-resolved canonical snapshots + first-party URL gate.
-
-    The deterministic grounder (GROUND-R*) is synchronous and reads canonical values via a
-    sync ``metric_snapshot``; the canonical :class:`CanonicalEvidence` exposes only the
-    async ``metric_value``. This wrapper carries the snapshots an async pass resolved ahead
-    of time over the extracted claims, so a NUMBER claim is verified VERBATIM against
-    canonical analytics (GROUND-R7) WITHOUT the grounder ever awaiting. ``url_allowed`` /
-    ``metric_value`` delegate to the wrapped evidence; no name library is implemented, so
-    NAME claims fail closed (Phase-1 ships no canonical workout library) — the conservative
-    default (GROUND-R3).
+    A unique temp file (not ``:memory:``) so the store runs on a REAL multi-connection pool — the
+    durable saver's benign-race ``_ensure_thread`` rollback poisons a shared single StaticPool
+    connection and FK-fails the checkpoint. Production injects a real pooled ``state_db`` instead.
     """
-
-    def __init__(
-        self,
-        evidence: CanonicalEvidence,
-        snapshots: Mapping[tuple[str, str | None], float | None],
-    ) -> None:
-        self._evidence = evidence
-        self._snapshots = snapshots
-
-    def metric_snapshot(self, metric: str, as_of: str | None) -> float | None:
-        """The pre-resolved canonical value for ``(metric, as_of)``, or ``None`` (GROUND-R7)."""
-        return self._snapshots.get((metric, as_of))
-
-    async def metric_value(self, metric: str, as_of: str | None) -> float | None:
-        """Satisfy the async :class:`GroundingEvidence` contract by delegating (GROUND-R2)."""
-        return await self._evidence.metric_value(metric, as_of)
-
-    def url_allowed(self, url: str) -> bool:
-        """First-party URL allow-list, delegated to the canonical evidence (GROUND-R4)."""
-        return self._evidence.url_allowed(url)
+    fd, path = tempfile.mkstemp(prefix="wattwise-agent-state-", suffix=".sqlite")
+    os.close(fd)
+    return f"sqlite+aiosqlite:///{path}"
 
 
-class ClaimGrounder:
-    """Model-extract + code-verify grounder over canonical evidence (GROUND-R1/R2/R7)."""
+def _conversation_id(athlete_id: str, thread_id: str | None) -> str:
+    """The saver-bound conversation id for a run, REVERSIBLE with the thread_id (CKPT-R3).
 
-    def __init__(self, model: ChatModel, svc: AnalyticsService) -> None:
-        self._model = model
-        self._svc = svc
-
-    async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
-    ) -> GroundingResult:
-        try:
-            extracted = await run_structured(
-                self._model, system=_CLAIM_SYSTEM, data=draft, schema=_ClaimSchema
-            )
-            claims = [
-                Claim(kind=c.kind, text=c.text, metric=c.metric, value=c.value, ref=c.as_of)
-                for c in extracted.claims
-            ]
-        except (StructuredOutputError, NotImplementedError):
-            claims = []
-        evidence = CanonicalEvidence(self._svc, athlete_id)
-        snapshots = await _resolve_snapshots(evidence, claims)
-        snapshot_evidence = _SnapshotEvidence(evidence, snapshots)
-        return _grounding.ground(draft, claims, snapshot_evidence, allow_urls=())
-
-
-async def _resolve_snapshots(
-    evidence: CanonicalEvidence, claims: Sequence[Claim]
-) -> dict[tuple[str, str | None], float | None]:
-    """Resolve each NUMBER claim's canonical value ahead of the synchronous grounder.
-
-    Reads the canonical analytic VERBATIM via the async ``metric_value`` for every distinct
-    ``(metric, as_of)`` a NUMBER claim points at (GROUND-R7); the grounder then verifies
-    against this snapshot without awaiting. A metric the service cannot compute resolves to
-    ``None`` so the grounder scrubs the claim (fail-closed), never a placeholder.
+    A follow-up/decision passes the prior ``thread_id`` back: the conversation id is recovered
+    from it (``conversation_id_of``) so the saver binds to the SAME durable thread. A fresh turn
+    (no ``thread_id``) mints a new conversation id; the SAME value is passed to the deliverable so
+    the thread_id it builds (``{athlete_id}:{conversation_id}``) matches the saver's bound scope —
+    otherwise the graph config's thread_id and the saver's thread row would diverge.
     """
-    snapshots: dict[tuple[str, str | None], float | None] = {}
-    for claim in claims:
-        if claim.kind is not ClaimKind.NUMBER or claim.metric is None:
-            continue
-        key = (claim.metric, claim.ref)
-        if key not in snapshots:
-            snapshots[key] = await evidence.metric_value(claim.metric, claim.ref)
-    return snapshots
-
-
-def _build_services(model: ChatModel, svc: AnalyticsService) -> AgentServices:
-    """Assemble the concrete production service bundle for the graph (GRAPH-R5)."""
-    return AgentServices(
-        planner=ModelPlanner(model),
-        gateway=RegistryGateway(svc),
-        coverage=DeterministicCoverage(),
-        grounder=ClaimGrounder(model, svc),
-    )
+    if thread_id is not None:
+        return conversation_id_of(thread_id)
+    return new_conversation_id()
 
 
 class _CompiledCoachGraph:
@@ -279,8 +120,7 @@ class _CompiledCoachGraph:
         """Invoke the compiled graph with the durable-thread config (CKPT-R3, OUTCOME-R2).
 
         The thread id MUST come from the run's own ``(athlete_id, conversation_id)`` scope
-        (CKPT-R3); it fails closed if absent rather than aliasing onto a shared constant key
-        that could mix checkpoint state across runs under a durable checkpointer.
+        (CKPT-R3); it fails closed if absent rather than aliasing onto a shared key.
         """
         thread_id = state.get("thread_id") or state.get("idempotency_key")
         if not thread_id:
@@ -292,30 +132,100 @@ class _CompiledCoachGraph:
         result = await self._compiled.ainvoke(state, config=config)
         return cast(AgentState, result)
 
+    async def resume(self, command: Command[Any], config: RunnableConfig) -> AgentState:
+        """Resume a paused run with ``Command(resume=...)`` on the SAME durable thread (CKPT-R2).
 
-class GraphAgentEngine:
-    """The deployable :class:`~wattwise_core.api.routers.agent_routes.AgentEngine`.
+        The head node does NOT re-run (no recompute, no fresh turn_id); the pre-interrupt nodes
+        replay from the checkpoint rather than re-executing. Returns the terminal state.
+        """
+        result = await self._compiled.ainvoke(command, config=config)
+        return cast(AgentState, result)
 
-    Per call it opens a canonical session, builds the analytics service + the concrete
-    agent services + the compiled graph (an in-memory checkpointer per call in OSS — the
-    durable SQLAlchemy checkpointer is wired when an agent-state store is configured), and
-    runs the Phase-1 deliverable projection (grounded Q&A / weekly digest).
+
+class DecisionRefused(RuntimeError):
+    """A HITL decision could not consume a live interrupt (CKPT-R9; fail-closed).
+
+    Raised by :meth:`GraphAgentEngine.decision` when ``consume_interrupt`` returns ``False`` —
+    the atomic guarded UPDATE matched no ``live`` row owned by the caller (an already-consumed
+    double-decision F-409, an unknown/never-recorded interrupt F-404, or a cross-athlete attempt
+    F-XID). The run is NEVER resumed in that case; the API router maps this to 404/409.
     """
 
-    def __init__(self, database: Database, model: ChatModel) -> None:
+
+class GraphAgentEngine:  # noqa: size-limits
+    """The deployable :class:`~wattwise_core.api.routers.agent_routes.AgentEngine`.
+
+    Over the class-size guard (documented suppression, QUAL-R9): one cohesive implementation of the
+    injected ``AgentEngine`` protocol the API router drives end to end — every deliverable surface
+    (grounded Q&A + follow-ups, weekly digest, multi-day plan, the HITL decision + its
+    interrupt-status probe) must live behind this single seam; each method stays well under the
+    60-line function ceiling, and the plan re-grounding bodies already moved to
+    :mod:`plan_regrounding` and the interrupt ledger to :mod:`checkpoint_interrupts`.
+
+    Per call it opens a canonical session, builds the analytics service + the concrete agent
+    services + the compiled graph over a DURABLE :class:`SqlAlchemyCheckpointSaver` bound to the
+    run's ``(athlete_id, conversation_id)`` on a DEDICATED agent-state pool (ARCH-R13/DEPLOY-R4),
+    and runs the deliverable projection. The durable saver makes a follow-up resume the SAME thread
+    and a paused approval-gated plan resumable (CKPT-R5/-R9). ``coach`` is the loaded §16
+    coach-config (compose prompt + metric-equivalence + tolerance + URL allow-list) that makes the
+    LIVE agent produce a GROUNDED answer; ``state_db`` (its OWN engine/pool) is injected in
+    production, else a per-process file-sqlite store is lazy.
+    """
+
+    def __init__(
+        self,
+        database: Database,
+        model: ChatModel,
+        *,
+        state_db: AgentStateDatabase | None = None,
+        coach: CoachBundle | None = None,
+    ) -> None:
         self._db = database
         self._model = model
+        self._state_db = state_db
+        self._coach = coach if coach is not None else CoachBundle()
 
-    def _graph(self, svc: AnalyticsService) -> CoachGraph:
-        """Build + compile the coaching graph over the per-call services (GRAPH-R5).
+    async def _agent_state_db(self) -> AgentStateDatabase:
+        """The dedicated agent-state database, lazily built + schema-created once (ARCH-R13).
 
-        The ceiling is passed explicitly so it stays tied to ``_RECURSION_LIMIT`` (the
-        superstep bound the adapter applies must remain above the graph's own ceiling).
+        An injected ``state_db`` (production / the durable tests) is used as-is. The lazy fallback
+        opens a per-process FILE-sqlite store on its own REAL pool (see :func:`_fallback_state_dsn`
+        for why not ``:memory:``).
+        """
+        if self._state_db is None:
+            self._state_db = build_agent_state_database(dsn=_fallback_state_dsn())
+            await self._state_db.create_all()
+        return self._state_db
+
+    def _saver(
+        self, state_db: AgentStateDatabase, *, athlete_id: str, conversation_id: str
+    ) -> SqlAlchemyCheckpointSaver:
+        """A durable checkpointer bound to ``(athlete_id, conversation_id)`` (CKPT-R3)."""
+        return SqlAlchemyCheckpointSaver(
+            state_db.session_factory,
+            athlete_id=athlete_id,
+            conversation_id=conversation_id,
+        )
+
+    def _graph(
+        self,
+        svc: AnalyticsService,
+        saver: SqlAlchemyCheckpointSaver,
+        *,
+        allow_names: frozenset[str] = frozenset(),
+    ) -> _CompiledCoachGraph:
+        """Build + compile the coaching graph over the per-call services + DURABLE saver (GRAPH-R5).
+
+        The ceiling is tied to ``_RECURSION_LIMIT``; the durable saver records a ``live`` ledger row
+        (CKPT-R9) so runs resume across turns/pauses. The loaded coach-config (§16) is wired in here
+        via ``self._coach`` — compose gets the real system prompt and the grounder gets the metric-
+        equivalence + tolerance, so a natural metric the model cites grounds (the headline fix).
         """
         compiled = build_graph(
             self._model,
-            _build_services(self._model, svc),
-            InMemorySaver(),
+            self._coach.services(self._model, svc, allow_names=allow_names),
+            saver,
+            coach_system=self._coach.system_prompt,
             node_visit_ceiling=_NODE_VISIT_CEILING,
         )
         return _CompiledCoachGraph(compiled)
@@ -330,32 +240,165 @@ class GraphAgentEngine:
         follow_up: dict[str, Any] | None,
         locale: str,
     ) -> AgentAnswer:
+        """Answer a question, resuming the SAME durable thread on a follow-up (COACH-R8).
+
+        A first turn opens a fresh durable thread; a follow-up (the caller passes the prior
+        ``thread_id`` back) lands on the SAME ``(athlete_id, conversation_id)`` so an
+        expand/drill/reveal turn continues the conversation. The durable saver is bound to that
+        scope; ``follow_up`` shapes the turn in the deliverable (CKPT-R3/-R5).
+        """
+        state_db = await self._agent_state_db()
+        conversation_id = _conversation_id(athlete_id, thread_id)
+        saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
             return await answer_question(
-                self._graph(AnalyticsService(session)),
+                self._graph(AnalyticsService(session), saver),
                 athlete_id,
                 question or "",
                 locale=locale,
                 response_length=response_length,  # type: ignore[arg-type]
+                thread_id=thread_id,
+                conversation_id=conversation_id,
+                follow_up=follow_up,
             )
 
     async def digest(self, *, athlete_id: str, week_end: str) -> Any:
+        state_db = await self._agent_state_db()
+        conversation_id = f"digest:{week_end}"
+        saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
-            return await weekly_digest(self._graph(AnalyticsService(session)), athlete_id, week_end)
+            graph = self._graph(AnalyticsService(session), saver)
+            return await weekly_digest(graph, athlete_id, week_end)
+
+    async def plan_deliverable(
+        self,
+        *,
+        athlete_id: str,
+        request: str,
+        thread_id: str | None = None,
+        locale: str = "en",
+        response_length: str = "detailed",
+        requires_approval: bool = True,
+    ) -> Plan:
+        """Build a multi-day grounded training PLAN, approval-gated by default (COACH-R2/CKPT-R5).
+
+        Drives the graph with the canonical workout-NAME library so prescribed names ground (not
+        auto-scrubbed). With ``requires_approval`` the durable interrupt-gate pauses the run and
+        records a ``live`` ledger row; the :class:`Plan` is ``awaiting_approval`` carrying the
+        ``interrupt_id`` the decision endpoint consumes (CKPT-R9).
+        """
+        state_db = await self._agent_state_db()
+        conversation_id = _conversation_id(athlete_id, thread_id)
+        saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
+        async with self._db.session() as session:
+            graph = self._graph(
+                AnalyticsService(session), saver, allow_names=CANONICAL_WORKOUT_NAMES
+            )
+            return await _plan(
+                graph,
+                athlete_id,
+                request,
+                locale=locale,
+                response_length=response_length,  # type: ignore[arg-type]
+                thread_id=thread_id,
+                conversation_id=conversation_id,
+                requires_approval=requires_approval,
+            )
+
+    async def decision(
+        self,
+        *,
+        athlete_id: str,
+        thread_id: str,
+        interrupt_id: str,
+        decision: str,
+        edited_plan: str | None = None,
+    ) -> Plan:
+        """Resume a paused approval-gated plan with the athlete's decision (API-R12a/CKPT-R9).
+
+        Atomically CONSUMES the ``live`` interrupt (guarded UPDATE): exactly one decision wins; a
+        double-decision/unknown/cross-athlete attempt matches no row and raises
+        :class:`DecisionRefused` (router maps 404/409) — never resumed twice. On a winning consume
+        it drives ``Command(resume=...)`` through the DURABLE saver (no recompute, CKPT-R2):
+        ``approve`` finalizes, ``reject`` resumes without approval, ``edit`` RE-GROUNDS
+        ``edited_plan`` FIRST and accepts it ONLY when it fully grounds (``PROCEED`` + non-empty);
+        a partial/abstained/extraction-failed edit is REJECTED — the run resolves to a DEGRADED
+        terminal state whose body is the already-grounded pre-edit plan, NEVER the unverified edit
+        (H3 / GROUND-R3). The edit is re-grounded BEFORE the graph resume so its outcome decides the
+        resume payload.
+        """
+        state_db = await self._agent_state_db()
+        conversation_id = conversation_id_of(thread_id)
+        saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
+        if not await saver.consume_interrupt(thread_id, interrupt_id):
+            raise DecisionRefused(f"no live interrupt to consume for thread {thread_id!r}")
+        async with self._db.session() as session:
+            svc = AnalyticsService(session)
+            accepted_edit: str | None = None
+            edit_rejected = False
+            if decision == "edit":
+                accepted_edit = await accept_edit(
+                    self._coach, self._model, svc, athlete_id, edited_plan or ""
+                )
+                edit_rejected = accepted_edit is None
+            resume: dict[str, Any] = {
+                # A rejected edit resumes UN-approved (like a reject), so the run finalizes WITHOUT
+                # the untrusted edit; an accepted edit carries its re-grounded body forward.
+                "approved": decision == "approve",
+                "decision": "reject" if edit_rejected else decision,
+            }
+            if accepted_edit is not None:
+                resume["edited_plan"] = accepted_edit
+            graph = self._graph(svc, saver, allow_names=CANONICAL_WORKOUT_NAMES)
+            config: RunnableConfig = {
+                "configurable": {"thread_id": thread_id},
+                "recursion_limit": _RECURSION_LIMIT,
+            }
+            final = await graph.resume(Command(resume=resume), config)
+        projected = _project_plan(final)
+        if accepted_edit is not None:
+            # An accepted EDIT replaces the delivered body with the RE-GROUNDED edit (GROUND-R3) —
+            # the athlete's edited prose, fully grounded, is what becomes final.
+            return replace(
+                projected, plan_text=accepted_edit, plan_html=safe_plan_html(accepted_edit)
+            )
+        if edit_rejected:
+            # The edit did not fully ground: degrade VISIBLY (never silently ship it). The body is
+            # the projected pre-edit grounded plan; the status is forced DEGRADED so the caller sees
+            # the edit was not accepted, and the unverified edit text never reaches the athlete.
+            return replace(projected, status=RunStatus.DEGRADED)
+        return projected
+
+    async def interrupt_status(
+        self, *, athlete_id: str, thread_id: str, interrupt_id: str
+    ) -> Literal["unknown", "live", "consumed"]:
+        """Classify an interrupt for the decision router's 404-vs-409 split (API-R12a / CKPT-R9).
+
+        The read-only, side-effect-free probe the router consults ONLY after :meth:`decision` fails
+        closed: an athlete-scoped read of the ``AgentInterrupt`` ledger by
+        ``(thread_id, interrupt_id, athlete_id)`` returning ``unknown`` (no row this athlete owns —
+        unknown thread/interrupt OR a foreign athlete's, never disclosed) -> router ``404``;
+        ``consumed`` (already decided) or ``live`` (a concurrent decision won the race) -> router
+        ``409``. Identity is the server-derived ``athlete_id`` (AUTH-R3 / CKPT-R3), scoped via the
+        durable saver bound to the thread's ``(athlete_id, conversation_id)`` — never disclosing a
+        foreign row.
+        """
+        state_db = await self._agent_state_db()
+        conversation_id = conversation_id_of(thread_id)
+        saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
+        return await saver.interrupt_status(thread_id, interrupt_id)
 
     async def readiness(
         self, *, athlete_id: str, locale: str = "en", response_length: str = "standard"
     ) -> Readiness:
         """Build the readiness/form deliverable from canonical inputs (QA-EVAL-R2.4).
 
-        Mirrors :meth:`answer`: opens a canonical session, builds the analytics service,
-        gathers the readiness inputs DETERMINISTICALLY (the fixed readiness JTBD does NOT
-        route through the retrieval planner) — latest canonical TSB (form) + its date, and
-        latest HRV — then drives :func:`readiness_assessment` with the same model-backed
-        narrator + canonical grounder the answers use. The delivered verdict is always the
-        deterministic oracle's (canonical wins); numbers surface only as grounded citations.
-        ``locale`` is accepted for parity with :meth:`answer` (the OSS narration prompt is
-        English; localized copy is a commercial layer).
+        Gathers the readiness inputs DETERMINISTICALLY (the fixed readiness JTBD does NOT route
+        through the retrieval planner) then drives :func:`readiness_assessment` with the same
+        model-backed narrator + canonical grounder the answers use; the delivered verdict is always
+        the deterministic oracle's (canonical wins), numbers surface only as grounded citations.
+        Readiness does NOT route through the durable checkpointer (a single deterministic
+        assessment, not a resumable conversation), so no agent-state pool is opened here.
         """
         async with self._db.session() as session:
             svc = AnalyticsService(session)
@@ -367,83 +410,52 @@ class GraphAgentEngine:
                 hrv_rmssd=rmssd,
                 hrv_baseline=baseline,
                 narrate=readiness_narrator(self._model),
-                grounder=ClaimGrounder(self._model, svc),
+                grounder=self._coach.grounder(self._model, svc),
                 response_length=response_length,  # type: ignore[arg-type]
             )
-
-
-class UnconfiguredAgentEngine:
-    """Graceful no-op engine when the OSS deployment has no LLM configured (RUN-R4.1).
-
-    The engine boots without a model; the coaching surface then returns a typed,
-    jargon-free ``degraded`` answer (no internals leaked, VOICE-R2/-R3) rather than the
-    boot failing or the endpoint erroring. Configuring a model upgrades it in place.
-    """
-
-    _MESSAGE: ClassVar[dict[str, str]] = {
-        "en": "Coaching isn't switched on for this account yet.",
-        "de": "Coaching ist fuer dieses Konto noch nicht aktiviert.",
-        "ru": "Trener poka ne podklyuchyon dlya etoy uchyotnoy zapisi.",
-    }
-
-    async def answer(
-        self,
-        *,
-        athlete_id: str,
-        question: str | None,
-        thread_id: str | None,
-        response_length: str,
-        follow_up: dict[str, Any] | None,
-        locale: str,
-    ) -> AgentAnswer:
-        text = self._MESSAGE.get((locale or "en").split("-", 1)[0].lower(), self._MESSAGE["en"])
-        return AgentAnswer(
-            status=RunStatus.DEGRADED,
-            thread_id=thread_id or "unconfigured",
-            answer_html=f"<p>{text}</p>",
-            answer_text=text,
-            coverage_caveat={"reason": "agent_unconfigured"},
-        )
-
-    async def readiness(
-        self, *, athlete_id: str, locale: str = "en", response_length: str = "standard"
-    ) -> Readiness:
-        """Typed graceful readiness when no LLM is configured (RUN-R4.1, mirrors :meth:`answer`).
-
-        No model and no canonical read: returns an abstaining :class:`Readiness` with no
-        verdict and a jargon-free "not switched on" state sentence (no internals leaked,
-        VOICE-R2/-R3), so the readiness endpoint degrades gracefully rather than erroring.
-        """
-        text = self._MESSAGE.get((locale or "en").split("-", 1)[0].lower(), self._MESSAGE["en"])
-        return Readiness(
-            verdict=None,
-            status=RunStatus.DEGRADED,
-            as_of=None,
-            summary_html=f"<p>{text}</p>",
-            summary_text=text,
-            coverage={"reason": "agent_unconfigured"},
-        )
 
 
 def build_agent_engine(database: Database, settings: Any) -> GraphAgentEngine | None:
     """Build the production engine from settings, or ``None`` when no model is configured.
 
-    The OSS engine boots without an LLM key (RUN-R4.1 does not require one); when the key
-    is absent this returns ``None`` and the API leaves the agent endpoints surfacing a
-    typed, jargon-free unavailable rather than failing the whole boot.
+    The OSS engine boots without an LLM key (RUN-R4.1 does not require one); when the key is
+    absent this returns ``None`` and the API leaves the agent endpoints surfacing a typed,
+    jargon-free unavailable rather than failing the whole boot. When a model IS configured the
+    engine is wired with a DEDICATED agent-state database (its own engine/pool, ARCH-R13/DEPLOY-R4)
+    so the durable checkpointer never contends with the canonical pool (SPIKE-3 deadlock-freedom).
     """
     if settings.llm_api_key is None:
         return None
-    return GraphAgentEngine(database, OpenAICompatibleModel(settings=settings))
+    state_db = build_agent_state_database(settings)
+    return GraphAgentEngine(
+        database,
+        OpenAICompatibleModel(settings=settings),
+        state_db=state_db,
+        coach=CoachBundle.from_settings(settings),
+    )
 
 
-def build_agent_engine_with_model(database: Database, model: ChatModel) -> GraphAgentEngine:
-    """Build the engine with an injected model (the test seam for a deterministic FakeModel)."""
-    return GraphAgentEngine(database, model)
+def build_agent_engine_with_model(
+    database: Database,
+    model: ChatModel,
+    *,
+    state_db: AgentStateDatabase | None = None,
+    coach: CoachBundle | None = None,
+) -> GraphAgentEngine:
+    """Build the engine with an injected model + optional ``state_db``/``coach`` (FakeModel seam).
+
+    The durable tests pass a REAL pooled ``state_db`` (file-sqlite/PG/MariaDB); when omitted the
+    engine lazily builds the per-process file-sqlite fallback. ``coach`` injects a §16 coach-config
+    (the live test passes the loaded bundle; deterministic FakeModel tests pass the empty default,
+    since FakeModel scripts exact canonical claims needing no prompt steering or equivalence).
+    """
+    return GraphAgentEngine(database, model, state_db=state_db, coach=coach)
 
 
 __all__ = [
     "ClaimGrounder",
+    "CoachBundle",
+    "DecisionRefused",
     "DeterministicCoverage",
     "GraphAgentEngine",
     "ModelPlanner",

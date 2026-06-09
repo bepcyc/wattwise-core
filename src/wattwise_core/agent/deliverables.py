@@ -1,21 +1,23 @@
-"""Phase-1 coach deliverables: grounded Q&A + the weekly digest (doc 50).
+"""Coach deliverables: grounded Q&A (+ follow-ups) + the weekly digest (doc 50).
 
-This module is the thin, typed PROJECTION layer between the agent graph (the
-in-flight a5 sibling, reached only through the :class:`CoachGraph` seam below) and
-the athlete-facing deliverable contracts the API renders. It owns the two Phase-1
-deliverables and NOTHING else: a free-form grounded answer
-(:func:`answer_question`) and the weekly digest, which IS the weekly load review
-(COACH-R1 #1) — one deliverable, one name (:func:`weekly_digest`). Readiness, the
-multi-day plan, insight, and briefing are specced (COACH-R1 #2-#5) but are a LATER
-phase and are deliberately absent here.
+This module is the thin, typed PROJECTION layer between the agent graph (reached only
+through the :class:`~wattwise_core.agent.projection.CoachGraph` seam) and the
+athlete-facing deliverable contracts the API renders. It owns the free-form grounded
+answer (:func:`answer_question`) and the weekly digest, which IS the weekly load review
+(COACH-R1 #1) — one deliverable, one name (:func:`weekly_digest`). The readiness/form
+deliverable and the multi-day PLAN deliverable live in focused siblings
+(:mod:`readiness_deliverable`, :mod:`plan_deliverable`) and are RE-EXPORTED here so every
+historical ``from ...deliverables import ...`` path stays stable (QUAL-R9 size split). The
+shared graph-driving + projection primitives live in the LEAF :mod:`projection` module.
 
 Each function DRIVES the graph with the right immutable trigger (GRAPH-R2.1):
-``answer_question`` uses ``user_turn`` carrying the question text;
-``weekly_digest`` uses ``scheduled_digest`` with no request text. It then projects
-ONLY the graph's grounded outputs (OUTCOME-R2: never un-grounded model text) into a
-typed dataclass carrying the status-discriminated outcome, the sanitized-later
-HTML/text body, the stable-id observations (COACH-R8), the surviving grounded
-citations (GROUND-R5), and small jargon-free follow-up prompts.
+``answer_question`` uses ``user_turn`` carrying the question text (and, on a COACH-R8
+follow-up, the SAME durable thread so an expand/drill/reveal turn continues the
+conversation); ``weekly_digest`` uses ``scheduled_digest`` with no request text. It then
+projects ONLY the graph's grounded outputs (OUTCOME-R2: never un-grounded model text) into
+a typed dataclass carrying the status-discriminated outcome, the sanitized-later HTML/text
+body, the stable-id observations (COACH-R8), the surviving grounded citations (GROUND-R5),
+and small jargon-free follow-up prompts.
 
 The voice contract is enforced as a PRESENTATION layer over the graph's
 fail-closed grounding, never a relaxation of it (VOICE-R7): the deliverable LEADS
@@ -34,12 +36,38 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
-from wattwise_core.agent.contracts import (
-    AgentState,
-    RunStatus,
-    Trigger,
+from wattwise_core.agent.contracts import RunStatus
+
+# The shared graph-driving + terminal-state projection primitives live in the LEAF
+# :mod:`projection` module so BOTH this module and :mod:`plan_deliverable` depend DOWNWARD on
+# them (no cycle): the agent-graph seam (:class:`CoachGraph`), building the run inputs (reversible
+# thread_id + per-turn turn_id) and projecting a terminal state into the typed
+# body/observations/citations (OUTCOME-R2).
+from wattwise_core.agent.projection import (
+    CoachGraph,
+    conversation_id_of,
+    new_conversation_id,
+    thread_id_for,
+)
+from wattwise_core.agent.projection import (
+    as_seq as _as_seq,
+)
+from wattwise_core.agent.projection import (
+    build_inputs as _build_inputs,
+)
+from wattwise_core.agent.projection import (
+    coverage_caveat as _coverage_caveat,
+)
+from wattwise_core.agent.projection import (
+    generate_followups as _generate_followups,
+)
+from wattwise_core.agent.projection import (
+    outputs as _outputs,
+)
+from wattwise_core.agent.projection import (
+    project_observations as _project_observations,
 )
 
 # The shared voice/projection primitives live in the LEAF :mod:`voice` module so BOTH this
@@ -52,27 +80,12 @@ from wattwise_core.agent.voice import (
     Observation,
     ResponseLength,
     _enforce_number_cap,
-    _opt_str,
     _project_citations,
     count_foregrounded_numbers,
     first_sentence,
     leads_with_state,
     number_cap,
 )
-
-
-@runtime_checkable
-class CoachGraph(Protocol):
-    """The agent-graph seam these deliverables drive (GRAPH-R1, doc 50 §3).
-
-    The concrete stateful graph is an in-flight sibling; this module reaches it ONLY
-    through this typed seam so it imports no sibling graph file (ARCH-R21). The graph
-    runs the full ``ingest_request -> ... -> finalize`` topology and returns the
-    terminal :class:`AgentState` with its grounded outputs filled. Identity/scope are
-    the graph's structural concern (AGT-SEC-R1); this seam never widens them.
-    """
-
-    async def run(self, state: AgentState) -> AgentState: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,106 +132,49 @@ class Digest:
     coverage_caveat: Mapping[str, Any] | None = None
 
 
-# --- graph driving + projection ---
+# --- COACH-R8 follow-up kinds (expand / drill / reveal_numbers) over the same thread ---
+
+# The verbosity ladder a COACH-R8 ``expand`` follow-up climbs one rung up (VOICE-R8).
+_LENGTH_LADDER: tuple[ResponseLength, ...] = ("short", "standard", "detailed")
 
 
-def _build_inputs(
-    *,
-    athlete_id: str,
-    trigger: Trigger,
-    locale: str,
-    request_text: str | None,
-    response_length: ResponseLength = "standard",
-    conversation_id: str | None = None,
-) -> AgentState:
-    """Assemble the write-once immutable graph inputs for a run (STATE-R2/-R4).
-
-    ``athlete_id`` flows straight from the authenticated caller (AGT-SEC-R1) and is
-    NEVER taken from any model/tool output. ``request_text`` is present iff the trigger
-    is ``user_turn`` (the STATE-R2 discriminated union); a scheduled digest carries
-    none, and its intent is fixed by the trigger (GRAPH-R2.1) with no intent model call.
-    The durable ``thread_id`` is the stable ``(athlete_id, conversation_id)`` identifier
-    the checkpointer keys on (CKPT-R3); ``idempotency_key`` is the per-turn dedup key
-    (CKPT-R4) — a distinct concept carried separately so the outcome can address both.
-    ``response_length`` governs verbosity/number-foregrounding (VOICE-R8), never truth.
-    """
-    convo = conversation_id or f"{trigger}:{request_text or ''}"
-    thread_id = f"{athlete_id}:{convo}"
-    state: AgentState = {
-        "athlete_id": athlete_id,
-        "trigger": trigger,
-        "request_text": request_text,
-        "locale": locale,
-        "thread_id": thread_id,
-        "idempotency_key": thread_id,
-        "response_length": response_length,
-    }
-    return state
+def _expanded_length(current: ResponseLength) -> ResponseLength:
+    """The next length up for an ``expand`` follow-up; saturates at ``detailed`` (COACH-R8)."""
+    idx = _LENGTH_LADDER.index(current) if current in _LENGTH_LADDER else 1
+    return _LENGTH_LADDER[min(idx + 1, len(_LENGTH_LADDER) - 1)]
 
 
-def _project_observations(
-    raw: Sequence[Mapping[str, Any]],
+def _follow_up_kind(follow_up: Mapping[str, Any] | None) -> str | None:
+    """The follow-up kind (``expand``/``drill``/``reveal_numbers``) or ``None`` (COACH-R8)."""
+    if follow_up is None:
+        return None
+    kind = follow_up.get("kind")
+    return str(kind) if kind is not None else None
+
+
+def _follow_up_target(follow_up: Mapping[str, Any] | None) -> str | None:
+    """The stable observation id a ``drill``/``reveal_numbers`` follow-up targets (COACH-R8)."""
+    if follow_up is None:
+        return None
+    ref = follow_up.get("target_ref")
+    return str(ref) if ref is not None else None
+
+
+def _reveal_observation(
+    observations: Sequence[Observation], target_ref: str | None
 ) -> tuple[Observation, ...]:
-    """Project graph observations into stable-id :class:`Observation`s (COACH-R8).
+    """The observation(s) a ``drill``/``reveal_numbers`` follow-up reveals VERBATIM (COACH-R8).
 
-    Drops any observation lacking a stable id or text (a follow-up could not target
-    it); its citations are projected and id-filtered like top-level citations.
+    A ``drill``/``reveal_numbers`` follow-up surfaces the ALREADY-grounded canonical numbers
+    behind a prior observation — the verbatim ``{metric, value, as_of}`` citations the graph
+    grounded on the thread, never a new claim (VOICE-R9 / GROUND-R7). When a ``target_ref`` is
+    given the matching observation is returned (its grounded citations are the reveal); with no
+    target every observation carrying grounded numbers is revealed. The numbers are read
+    VERBATIM off the prior grounded state — this layer recomputes nothing.
     """
-    observations: list[Observation] = []
-    for item in raw:
-        obs_id = _opt_str(item.get("observation_id"))
-        text = _opt_str(item.get("text"))
-        if not obs_id or not text:
-            continue
-        raw_cites = item.get("citations", ())
-        cites = _project_citations(raw_cites) if isinstance(raw_cites, Sequence) else ()
-        observations.append(Observation(observation_id=obs_id, text=text, citations=cites))
-    return tuple(observations)
-
-
-def _generate_followups(
-    status: RunStatus, observations: Sequence[Observation]
-) -> tuple[str, ...]:
-    """Generate small jargon-free follow-up prompts the engine owns (COACH-R8, VOICE-R9).
-
-    The engine GENERATES this copy (OSS); a thin client only renders it. Prompts are
-    presentation over the existing grounded thread (introduce no new claim/number) and
-    must stay athlete-native + jargon-free (VOICE-R2): a ``reveal_numbers`` handle is
-    offered only when there are grounded observations to reveal numbers behind; the
-    other is the canonical ``expand`` prompt. A degraded run offers neither a
-    numbers-reveal it cannot honor nor an internals leak — just the expand prompt.
-    """
-    reveal = "Show me the numbers behind that"
-    expand = "Tell me more"
-    if status is RunStatus.DEGRADED or not observations:
-        return (expand,)
-    return (reveal, expand)
-
-
-def _outputs(final: AgentState) -> tuple[str, str, RunStatus, str]:
-    """Read the grounded body/status/thread off a terminal state (OUTCOME-R2).
-
-    Returns ``(html, text, status, thread_id)``. Falls back text->html so a deliverable
-    always has both bodies for the API to sanitize; status defaults to ``degraded`` if a
-    graph somehow omitted it, since a missing terminal status is a reduced-confidence
-    outcome, never a fabricated ``completed`` (OUTCOME-R3/-R5, fail-closed).
-    """
-    html = _opt_str(final.get("grounded_html")) or ""
-    text = _opt_str(final.get("grounded_text")) or ""
-    html = html or text
-    text = text or html
-    status = final.get("status")
-    status = status if isinstance(status, RunStatus) else RunStatus.DEGRADED
-    # The durable thread_id is the (athlete_id, conversation_id)-scoped checkpointer id
-    # (CKPT-R3/OUTCOME-R2), NOT the per-turn idempotency key (CKPT-R4).
-    thread_id = _opt_str(final.get("thread_id")) or _opt_str(final.get("idempotency_key")) or ""
-    return html, text, status, thread_id
-
-
-def _coverage_caveat(final: AgentState) -> Mapping[str, Any] | None:
-    """Return the typed coverage caveat for a degraded outcome (OUTCOME-R4), else None."""
-    caveat = final.get("coverage_caveat")
-    return caveat if isinstance(caveat, Mapping) else None
+    if target_ref is not None:
+        return tuple(o for o in observations if o.observation_id == target_ref)
+    return tuple(o for o in observations if o.citations)
 
 
 async def answer_question(
@@ -228,37 +184,79 @@ async def answer_question(
     *,
     locale: str,
     response_length: ResponseLength = "standard",
+    thread_id: str | None = None,
+    conversation_id: str | None = None,
+    follow_up: Mapping[str, Any] | None = None,
 ) -> AgentAnswer:
-    """Drive the graph for a grounded free-form answer to ``question`` (COACH-R1).
+    """Drive the graph for a grounded free-form answer to ``question`` (COACH-R1, COACH-R8).
 
     Builds a ``user_turn`` run carrying the question (GRAPH-R2.1), runs the graph, and
     projects ONLY its grounded outputs into :class:`AgentAnswer` (OUTCOME-R2). The
-    athlete identity is server-derived (AGT-SEC-R1) and never trusted from the model;
-    ``response_length`` governs verbosity/number-foregrounding in the graph's compose,
-    never truth (VOICE-R8). No un-grounded text is ever surfaced.
+    athlete identity is server-derived (AGT-SEC-R1) and never trusted from the model.
+
+    A ``follow_up`` (COACH-R8) reuses the SAME durable thread (the caller passes its
+    ``thread_id`` back, CKPT-R3) and shapes the turn by kind: ``expand`` climbs one rung up the
+    verbosity ladder (VOICE-R8) so the next answer says more; ``drill``/``reveal_numbers``
+    reveal the ALREADY-grounded canonical ``{metric, value, as_of}`` numbers behind the
+    targeted observation VERBATIM (VOICE-R9 / GROUND-R7) — a higher number cap lets those
+    foregrounded numbers through, and the targeted observation's grounded citations are surfaced
+    on the answer. ``response_length`` governs verbosity, never truth (VOICE-R8). No un-grounded
+    text is ever surfaced.
     """
+    kind = _follow_up_kind(follow_up)
+    if kind == "expand":
+        response_length = _expanded_length(response_length)
     inputs = _build_inputs(
         athlete_id=athlete_id,
         trigger="user_turn",
         locale=locale,
         request_text=question,
         response_length=response_length,
+        thread_id=thread_id,
+        conversation_id=conversation_id,
+        follow_up=follow_up,
     )
     final = await graph.run(inputs)
-    html, text, status, thread_id = _outputs(final)
-    cap = number_cap(response_length)
-    html, text = _enforce_number_cap(html, text, cap)
+    html, text, status, out_thread_id = _outputs(final)
     observations = _project_observations(_as_seq(final.get("observations")))
+    citations = _project_citations(_as_seq(final.get("citations")))
+    # A reveal/drill follow-up foregrounds the verbatim grounded numbers it was asked to
+    # reveal; otherwise hold to the per-length cap (VOICE-R7). Either way every number shown
+    # is one the graph already grounded.
+    if kind in ("drill", "reveal_numbers"):
+        revealed = _reveal_observation(observations, _follow_up_target(follow_up))
+        citations = _merge_revealed_citations(citations, revealed)
+    else:
+        html, text = _enforce_number_cap(html, text, number_cap(response_length))
     return AgentAnswer(
         status=status,
-        thread_id=thread_id,
+        thread_id=out_thread_id,
         answer_html=html,
         answer_text=text,
         observations=observations,
-        citations=_project_citations(_as_seq(final.get("citations"))),
+        citations=citations,
         suggested_followups=_generate_followups(status, observations),
         coverage_caveat=_coverage_caveat(final),
     )
+
+
+def _merge_revealed_citations(
+    citations: tuple[Citation, ...], revealed: Sequence[Observation]
+) -> tuple[Citation, ...]:
+    """Append a revealed observation's grounded citations, de-duplicated by record id (COACH-R8).
+
+    The reveal surfaces the verbatim canonical numbers behind the targeted observation; they
+    join the answer's own grounded citations without duplicating a record already cited (the
+    numbers are read off the prior grounding, never recomputed, GROUND-R7).
+    """
+    seen = {c.record_id for c in citations}
+    extra = [
+        c
+        for obs in revealed
+        for c in obs.citations
+        if c.record_id and c.record_id not in seen
+    ]
+    return (*citations, *extra)
 
 
 async def weekly_digest(graph: CoachGraph, athlete_id: str, week_end: str) -> Digest:
@@ -296,13 +294,6 @@ async def weekly_digest(graph: CoachGraph, athlete_id: str, week_end: str) -> Di
     )
 
 
-def _as_seq(raw: Any) -> Sequence[Mapping[str, Any]]:
-    """Narrow an optional graph output list to a sequence of mappings, else empty."""
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
-        return ()
-    return tuple(item for item in raw if isinstance(item, Mapping))
-
-
 # Re-export the readiness/form deliverable, which lives in the focused sibling module
 # :mod:`readiness_deliverable` (QUAL-R9 size split). This import is now strictly ONE-WAY:
 # ``readiness_deliverable`` imports its shared voice/projection primitives from the LEAF
@@ -315,6 +306,16 @@ def _as_seq(raw: Any) -> Sequence[Mapping[str, Any]]:
 # ``_ReadinessNarration`` is re-exported by NAME (intentionally NOT in ``__all__``) so the
 # historical ``from wattwise_core.agent.deliverables import _ReadinessNarration`` path the
 # eval/integration tests use still resolves after the readiness split — hence its F401.
+# Re-export the multi-day PLAN deliverable from its focused sibling :mod:`plan_deliverable`
+# (QUAL-R9 size split, COACH-R2). Like ``readiness_deliverable`` the import is ONE-WAY: the plan
+# sibling imports its shared graph-driving/projection primitives from the LEAF :mod:`projection`
+# module (NOT from here), so there is no ``deliverables`` <-> ``plan_deliverable`` cycle. Every
+# public path stays stable — ``Plan`` / ``plan`` remain importable from ``deliverables``.
+from wattwise_core.agent.plan_deliverable import (  # noqa: E402
+    Plan,
+    plan,
+    safe_plan_html,
+)
 from wattwise_core.agent.readiness_deliverable import (  # noqa: E402
     HRV_UNAVAILABLE_CLAUSE,  # noqa: F401  re-exported by name; not in __all__
     Readiness,
@@ -331,16 +332,22 @@ __all__ = [
     "CoachGraph",
     "Digest",
     "Observation",
+    "Plan",
     "Readiness",
     "ReadinessGrounder",
     "ResponseLength",
     "StructuredNarrationError",
     "StructuredNarrator",
     "answer_question",
+    "conversation_id_of",
     "count_foregrounded_numbers",
     "first_sentence",
     "leads_with_state",
+    "new_conversation_id",
     "number_cap",
+    "plan",
     "readiness_assessment",
+    "safe_plan_html",
+    "thread_id_for",
     "weekly_digest",
 ]

@@ -30,14 +30,15 @@ from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from wattwise_core.agent.contracts import RunStatus
-from wattwise_core.agent.deliverables import AgentAnswer, Citation, Observation, Readiness
+from wattwise_core.agent.deliverables import AgentAnswer, Citation, Observation, Plan, Readiness
+from wattwise_core.agent.engine import DecisionRefused
 from wattwise_core.api.agent_stream import problem_event
 from wattwise_core.api.app import create_app
 from wattwise_core.api.auth import Scope, issue_access_token
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.redaction import contains_pii, redact_payload, redact_text
-from wattwise_core.api.routers import agent_routes
+from wattwise_core.api.routers import agent_routes, agent_schemas
 from wattwise_core.api.sanitize import is_inert, sanitize_html
 from wattwise_core.config import Environment, load_settings
 from wattwise_core.domain.enums import ReadinessVerdict
@@ -479,6 +480,251 @@ def _first_sentence(text: str) -> str:
         if idx != -1:
             return text[: idx + 1]
     return text
+
+
+# --- POST /v1/agent/threads/{thread_id}/decision (API-R12a / CKPT-R9) ------------
+
+
+class _FakeDecisionEngine:
+    """A controllable stand-in for the HITL decision engine (ARCH-R21 seam, API-R12a).
+
+    Models the real atomic single-consume: the live interrupt is consumed exactly ONCE; a
+    second decision (or an unknown/foreign interrupt) raises :class:`DecisionRefused`, mirroring
+    ``consume_interrupt`` returning ``False``. ``interrupt_status`` is the read-only probe the
+    router consults to split 404 (unknown) from 409 (consumed). The seen ``decision``/
+    ``edited_plan``/``athlete_id`` are recorded so the test asserts the router passes the
+    server-derived id (AUTH-R3) and the edit body through (GROUND-R3).
+    """
+
+    def __init__(self, *, known: set[str] | None = None) -> None:
+        self._live: set[str] = set(known) if known is not None else {"01INT"}
+        self._consumed: set[str] = set()
+        self.seen_athlete_id: str | None = None
+        self.seen_decision: str | None = None
+        self.seen_edited_plan: str | None = None
+        self.seen_thread_id: str | None = None
+
+    async def decision(
+        self,
+        *,
+        athlete_id: str,
+        thread_id: str,
+        interrupt_id: str,
+        decision: str,
+        edited_plan: str | None,
+    ) -> Plan:
+        self.seen_athlete_id = athlete_id
+        self.seen_decision = decision
+        self.seen_edited_plan = edited_plan
+        self.seen_thread_id = thread_id
+        if interrupt_id not in self._live:  # atomic consume matched no live row -> refused
+            raise DecisionRefused(f"no live interrupt {interrupt_id!r}")
+        self._live.discard(interrupt_id)
+        self._consumed.add(interrupt_id)
+        body = f"<p>Day 1: {edited_plan or 'Endurance ride'}.</p>"
+        return Plan(
+            status=RunStatus.COMPLETED,
+            thread_id=thread_id,
+            plan_html=body,
+            plan_text=f"Day 1: {edited_plan or 'Endurance ride'}.",
+            observations=(Observation(observation_id="01OBS", text="Build aerobic base."),),
+            citations=(Citation(record_id="01CIT", metric="ctl", value=42.0, as_of="2026-06-07"),),
+            suggested_followups=("Make it harder",),
+        )
+
+    async def interrupt_status(
+        self, *, athlete_id: str, thread_id: str, interrupt_id: str
+    ) -> str:
+        if interrupt_id in self._consumed:
+            return "consumed"
+        if interrupt_id in self._live:
+            return "live"
+        return "unknown"
+
+
+def _build_decision_app(engine: _FakeDecisionEngine) -> FastAPI:
+    """Assemble the app with the decision engine + overridden seams (mirrors _build_app)."""
+    settings = load_settings(
+        app__environment=Environment.DEVELOPMENT,
+        database_dsn="sqlite+aiosqlite:///:memory:",
+        token_signing_key="test-signing-key-0123456789abcdef",
+    )
+    app = create_app(settings)
+    app.include_router(agent_routes.router)
+    app.dependency_overrides[agent_routes.require_agent_scope] = lambda: None
+    app.dependency_overrides[agent_routes.current_athlete_id] = lambda: "owner"
+    app.dependency_overrides[agent_routes.agent_engine] = lambda: engine
+    bucket = RateLimiter()
+    app.dependency_overrides[agent_routes.rate_limiter] = lambda: bucket
+    return app
+
+
+def test_decision_approve_finalizes_plan_and_passes_server_identity() -> None:
+    """F-APPROVE: approve resumes the durable plan; identity is server-derived (API-R12a)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "approve"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["decision"] == "approve"
+    assert body["grounding"]["grounded"] is True
+    assert body["plan_text"].startswith("Day 1")
+    assert engine.seen_athlete_id == "owner"  # AUTH-R3: never a client value
+    assert engine.seen_thread_id == "owner:01CONV"  # the path param is the durable scope
+    flat = json.dumps(body)
+    for field in FORBIDDEN_FIELDS:
+        assert f'"{field}"' not in flat  # no billing/model machinery (API-R11c)
+
+
+def test_decision_edit_passes_edited_plan_through_for_regrounding() -> None:
+    """F-EDIT: an edit forwards edited_plan to the engine (which re-grounds it, GROUND-R3)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "edit", "edited_plan": "Recovery spin 45m"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "edit"
+    assert engine.seen_edited_plan == "Recovery spin 45m"
+    assert "Recovery spin 45m" in resp.json()["plan_text"]
+
+
+def test_decision_reject_resumes_without_approval() -> None:
+    """F-REJECT: reject still resumes the durable thread to a terminal outcome (API-R12a)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "reject"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "reject"
+    assert engine.seen_decision == "reject"
+
+
+def test_decision_edit_without_body_is_422_validation_error() -> None:
+    """An edit with no edited_plan is a 422 cross-field validation error (API-R12a / SCHEMA-R4)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "edit"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 422
+    assert resp.json()["type"].endswith("/validation-error")
+    assert engine.seen_decision is None  # never reached the engine
+
+
+def test_decision_edited_plan_on_non_edit_is_422() -> None:
+    """A non-edit decision carrying an edited_plan is a 422 (API-R12a cross-field rule)."""
+    app = _build_decision_app(_FakeDecisionEngine())
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "approve", "edited_plan": "sneaky"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 422
+    assert resp.json()["type"].endswith("/validation-error")
+
+
+def test_decision_forged_athlete_id_field_is_422() -> None:
+    """A forged body identity field is rejected before the engine (SCHEMA-R4 / AUTH-R3)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "approve", "athlete_id": "attacker"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 422
+    assert engine.seen_athlete_id is None  # the forged field never reached the engine
+
+
+def test_decision_double_decision_is_409_decision_conflict() -> None:
+    """F-409: a second decision on a consumed interrupt is 409 decision-conflict (CKPT-R9)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "approve"},
+            headers=_auth(app),
+        )
+        assert first.status_code == 200
+        second = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "approve"},
+            headers=_auth(app),
+        )
+    assert second.status_code == 409
+    assert second.json()["type"].endswith("/decision-conflict")
+
+
+def test_decision_unknown_interrupt_is_404_not_found() -> None:
+    """F-404: a decision against an interrupt that was never recorded is 404 not-found (CKPT-R9)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01NOPE", "decision": "approve"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 404
+    assert resp.json()["type"].endswith("/not-found")
+
+
+def test_decision_html_is_sanitized_inert() -> None:
+    """The resumed plan_html is server-side sanitized before return (API-R13 / SCHEMA-R7)."""
+    engine = _FakeDecisionEngine()
+    app = _build_decision_app(engine)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/threads/owner:01CONV/decision",
+            json={"interrupt_id": "01INT", "decision": "edit",
+                  "edited_plan": "ride<script>alert(1)</script>"},
+            headers=_auth(app),
+        )
+    assert resp.status_code == 200
+    html = resp.json()["plan_html"].lower()
+    assert "<script" not in html
+    assert "alert" not in html or "<" not in resp.json()["plan_html"]
+
+
+def test_awaiting_approval_render_surfaces_interrupt_id_and_plan() -> None:
+    """render_plan_awaiting yields awaiting_approval + interrupt_id + sanitized body (API-R12a)."""
+    paused = Plan(
+        status=RunStatus.AWAITING_APPROVAL,
+        thread_id="owner:01CONV",
+        plan_html="<p>Week 1 base.</p><script>x()</script>",
+        plan_text="Week 1 base.",
+        interrupt_id="01INT",
+        citations=(Citation(record_id="01CIT", metric="ctl", value=42.0, as_of="2026-06-07"),),
+        suggested_followups=("Make it harder",),
+    )
+    rendered = agent_schemas.render_plan_awaiting(paused, trace_id="tid-1")
+    assert rendered.status == "awaiting_approval"
+    assert rendered.interrupt_id == "01INT"
+    assert rendered.grounding.grounded is True
+    assert rendered.plan_text == "Week 1 base."
+    assert rendered.plan_html is not None
+    assert "<script" not in rendered.plan_html.lower()  # sanitized HERE (API-R13)
+    assert rendered.answer_html == rendered.plan_html  # body mirrored for status-agnostic clients
 
 
 # --- sanitize.py (SCHEMA-R7) -----------------------------------------------------

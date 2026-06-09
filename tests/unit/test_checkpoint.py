@@ -253,6 +253,7 @@ def test_agent_state_tables_not_in_canonical_metadata() -> None:
         "agent_checkpoint",
         "agent_write",
         "agent_memory_item",
+        "agent_interrupt",
     }
     assert canonical.isdisjoint(agent_state)
     assert not any(name.startswith("agent_") for name in canonical)

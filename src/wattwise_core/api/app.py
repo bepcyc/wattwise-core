@@ -50,10 +50,12 @@ from wattwise_core.api.openapi import install_openapi
 from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import activities as activities_router
 from wattwise_core.api.routers import agent_routes as agent_router
+from wattwise_core.api.routers import athlete as athlete_router
 from wattwise_core.api.routers import connections as connections_router
 from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import performance as performance_router
 from wattwise_core.api.routers import sync as sync_router
+from wattwise_core.api.routers import user_settings as user_settings_router
 from wattwise_core.api.wiring import build_ingestion_seams
 from wattwise_core.config import Settings, get_settings
 from wattwise_core.identity import OWNER_SUBJECT
@@ -124,7 +126,12 @@ def _wire_router_seams(app: FastAPI) -> None:
     (AUTH-R1/R7): the scope gate runs the bearer+scope check, the acting athlete id is
     derived server-side from the verified principal (AUTH-R3), the analytics service is
     built per request from the shared DB session, and the agent rate limiter is the
-    process limiter. The agent engine is built from settings (the LangGraph coach when a
+    process limiter. The athlete-profile and user-settings routers bind the same
+    server-derived identity + ``read``/``write`` scope gates over the shared session, so
+    the owner can set their profile (sex/timezone/current sport), their FTP fitness
+    signature (the threshold the power analytics ground on), and their preferences
+    (zones/language/answer-length/default load model) behind the bearer + scope gates.
+    The agent engine is built from settings (the LangGraph coach when a
     model is configured, else a graceful unconfigured fallback) so /v1/agent is live. The
     connect/import/sync routers' seams are bound to the real OSS ingestion services (the
     file-upload import processor, the on-demand sync orchestrator, and the credential
@@ -137,6 +144,14 @@ def _wire_router_seams(app: FastAPI) -> None:
     overrides[performance_router.analytics_service] = _analytics_seam
     overrides[activities_router.current_session] = get_db
     overrides[activities_router.cursor_signing_key] = _cursor_signing_key_seam
+    overrides[athlete_router.require_read_scope] = require_scopes(Scope.READ)
+    overrides[athlete_router.require_write_scope] = require_scopes(Scope.WRITE)
+    overrides[athlete_router.current_athlete_id] = _athlete_id_seam
+    overrides[athlete_router.current_session] = get_db
+    overrides[user_settings_router.require_read_scope] = require_scopes(Scope.READ)
+    overrides[user_settings_router.require_write_scope] = require_scopes(Scope.WRITE)
+    overrides[user_settings_router.current_athlete_id] = _athlete_id_seam
+    overrides[user_settings_router.current_session] = get_db
     overrides[agent_router.require_agent_scope] = require_scopes(Scope.AGENT)
     overrides[agent_router.current_athlete_id] = _athlete_id_seam
     overrides[agent_router.rate_limiter] = get_rate_limiter

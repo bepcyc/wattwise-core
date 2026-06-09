@@ -118,6 +118,68 @@ def test_number_within_tolerance_grounds() -> None:
     assert result.claims[0].verdict is GroundVerdict.GROUNDED
 
 
+# --- ADVERSARIAL FABRICATION TESTS (must FAIL on the pre-fix behaviour) --------------------
+
+
+def test_within_tolerance_publishes_canonical_value_not_the_model_number() -> None:
+    """H1 fabrication: a within-band but WRONG number publishes the CANONICAL value, not model's.
+
+    Canonical ctl=100; the model says 102 (within the 2% band). The OLD behaviour marked it GROUNDED
+    and shipped "102" — a fabrication the athlete sees while canonical is 100 (GROUND-R7 violation).
+    The published number MUST be the canonical value; "102" must NEVER reach the body.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 100.0})
+    result = ground("Your CTL is 102 today.", [_number("102", "ctl", 102.0)], evidence, [])
+    # Recognized as a (rounded) restatement -> grounded, but the PUBLISHED number is canonical.
+    assert result.claims[0].verdict is GroundVerdict.GROUNDED
+    assert "102" not in result.scrubbed_text, "the model's within-band approximation must NOT ship"
+    assert "100" in result.scrubbed_text, "the canonical value must be published (GROUND-R7)"
+    assert result.decision is GroundDecision.PROCEED
+
+
+def test_unextracted_number_is_swept_and_does_not_proceed() -> None:
+    """H4 fabrication: a number the extractor MISSED ("TSB is 999") is swept; run does not proceed.
+
+    The draft states two numbers but the claim extractor returns ONLY the CTL claim — the OLD
+    behaviour left the fabricated 999 in the body because numeric fail-closure depended on the
+    extractor. The deterministic numeric-coverage sweep removes the uncovered 999 and the decision
+    is forced off ``proceed`` (a grounded survivor -> ``regenerate``), so the 999 cannot ship.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 60.0})
+    # Only the CTL number is extracted; the "TSB is 999" span is NOT a claim.
+    result = ground(
+        "Your CTL is 60 and TSB is 999.", [_number("60", "ctl", 60.0)], evidence, []
+    )
+    assert "999" not in result.scrubbed_text, "the unextracted fabricated number must be swept (H4)"
+    assert "60" in result.scrubbed_text, "the grounded canonical value survives the sweep"
+    assert result.decision is not GroundDecision.PROCEED, "an uncovered number must block proceed"
+
+
+def test_numeric_sweep_keeps_dates_units_and_structural_tokens() -> None:
+    """H4: the numeric sweep keeps safe NON-metric tokens (dates, units, ordinals), only metrics go.
+
+    The sweep must NOT corrupt legitimate grounded prose: an ISO date, a "Day N" ordinal, an "NxM"
+    interval, and a unit-bearing duration/percentage are structurally safe and survive, while only
+    the unverified metric-magnitude figure would be removed. Guards the over-scrub regressions
+    (``2026-06-08`` -> ``2026-06`` and ``20%`` -> ``%``) the per-token window caused.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 60.0})
+    draft = "On 2026-06-08, Day 1: 3x12 efforts, 45m easy, improved 20%. CTL is 60."
+    result = ground(draft, [_number("60", "ctl", 60.0)], evidence, [])
+    for token in ("2026-06-08", "Day 1", "3x12", "45m", "20%", "60"):
+        assert token in result.scrubbed_text, f"safe/grounded token {token!r} must survive"
+
+
+def test_numeric_sweep_keeps_grounded_value_inside_a_url() -> None:
+    """H4: a digit inside a SURVIVING first-party URL is never reached by the numeric sweep."""
+    url = "https://wattwise.app/activity/42"
+    evidence = _FakeEvidence(metrics={"ctl": 60.0}, allowed_urls=frozenset({url}))
+    draft = f"Your CTL is 60. See {url}"
+    result = ground(draft, [_number("60", "ctl", 60.0), _url(url)], evidence, [url])
+    assert url in result.scrubbed_text, "URL path digits must not be scrubbed by the numeric sweep"
+    assert result.decision is GroundDecision.PROCEED
+
+
 # --- planted hallucinated NUMBER scrubbed / contradicted dropped (GROUND-R3/R7/R9) ---
 
 

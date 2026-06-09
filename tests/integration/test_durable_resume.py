@@ -36,10 +36,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import wattwise_core.agent.memory  # noqa: F401  (registers agent_memory_item on AgentStateBase)
 from wattwise_core.agent.checkpoint import (
+    CHECKPOINT_SCHEMA_VERSION,
     CheckpointIdentityError,
+    CheckpointSchemaVersionError,
     SqlAlchemyCheckpointSaver,
 )
-from wattwise_core.agent.state_store import AgentStateBase, AgentThread, AgentWrite
+from wattwise_core.agent.state_store import (
+    AgentInterrupt,
+    AgentStateBase,
+    AgentThread,
+    AgentWrite,
+)
 
 if TYPE_CHECKING:
     from _pytest.mark.structures import ParameterSet
@@ -130,9 +137,13 @@ def _saver(
     *,
     athlete_id: str = ATHLETE_A,
     conversation_id: str = CONVERSATION,
+    schema_version: int = CHECKPOINT_SCHEMA_VERSION,
 ) -> SqlAlchemyCheckpointSaver:
     return SqlAlchemyCheckpointSaver(
-        factory, athlete_id=athlete_id, conversation_id=conversation_id
+        factory,
+        athlete_id=athlete_id,
+        conversation_id=conversation_id,
+        schema_version=schema_version,
     )
 
 
@@ -413,3 +424,156 @@ async def test_genuine_integrity_error_fails_closed(
     with pytest.raises(IntegrityError):
         async with factory() as session:
             await saver._ensure_thread(session, "T2")
+
+
+# --- 5. F-SCHEMA-BUMP: an old-version checkpoint fails closed at v2 (CKPT-R7) -----------
+
+
+async def test_old_schema_version_checkpoint_fails_closed(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A v1 checkpoint cannot be loaded under the bumped v2 engine — it FAILS CLOSED (CKPT-R7).
+
+    The D-P2 turn-boundary redesign reshaped ``AgentState`` (turn_id/run_epoch, the
+    decrease-to-floor monotonic counters, turn-keyed accumulators), so the engine schema
+    version was bumped 1 -> 2. A checkpoint written under the OLD shape lacks those channels
+    and MUST NOT be silently coerced into the new reducers; loading it raises
+    ``CheckpointSchemaVersionError`` ("start fresh + log"), never returns a coerced tuple. This
+    also pins that the constant really advanced to >= 2 (a revert to 1 makes both savers agree
+    and the test fails).
+    """
+    assert CHECKPOINT_SCHEMA_VERSION >= 2, "the schema version must be bumped past the v1 shape"
+    # Write a checkpoint stamped with the OLD v1 version (a pre-D-P2 row on disk).
+    writer = _saver(factory, schema_version=1)
+    await writer.aput(_config(), _checkpoint("cp-v1")[1], _metadata(), {})
+
+    # The live engine (default v2) must refuse to load that row, on BOTH the point-get and the
+    # list path (the two read seams that stamp-check), rather than coerce the old blob.
+    reader = _saver(factory)  # schema_version defaults to CHECKPOINT_SCHEMA_VERSION (2)
+    with pytest.raises(CheckpointSchemaVersionError):
+        await reader.aget_tuple(_config())
+    with pytest.raises(CheckpointSchemaVersionError):
+        async for _ in reader.alist(_config()):
+            pass
+
+
+# --- 6. AgentInterrupt ledger: record + atomic guarded consume (CKPT-R9) ----------------
+
+INTERRUPT_ID = "int-approval-1"
+
+
+async def _interrupt_rows(
+    factory: async_sessionmaker[AsyncSession], thread_id: str
+) -> list[AgentInterrupt]:
+    """Return the ledger rows for a thread (newest grouping not needed; few rows)."""
+    async with factory() as session:
+        rows = (
+            await session.execute(
+                select(AgentInterrupt).where(AgentInterrupt.thread_id == thread_id)
+            )
+        ).scalars().all()
+    return list(rows)
+
+
+async def test_record_interrupt_is_idempotent(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``record_interrupt`` writes exactly ONE live row and re-recording is a no-op (CKPT-R9).
+
+    The gate may raise the SAME interrupt more than once (a replayed superstep); the unique
+    ``(thread_id, interrupt_id)`` plus insert-or-ignore means the ledger keeps a single live
+    row and a re-record never errors nor resurrects/duplicates it.
+    """
+    saver = _saver(factory)
+    await saver.record_interrupt(THREAD_ID, INTERRUPT_ID)
+    await saver.record_interrupt(THREAD_ID, INTERRUPT_ID)  # idempotent re-record
+
+    rows = await _interrupt_rows(factory, THREAD_ID)
+    assert len(rows) == 1, "exactly one ledger row despite the double record"
+    assert rows[0].status == "live"
+    assert rows[0].interrupt_id == INTERRUPT_ID
+    assert rows[0].athlete_id == uuid.UUID(ATHLETE_A)
+
+
+async def test_double_decision_second_is_refused(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F-409: a second consume of the same interrupt returns False (already-consumed → 409).
+
+    The first ``consume_interrupt`` flips the live row to ``consumed`` and returns True (the
+    decision endpoint resumes); a second consume finds no live row and returns False, so the
+    endpoint MUST answer 409 rather than resume the graph twice (fail-closed, CKPT-R9).
+    """
+    saver = _saver(factory)
+    await saver.record_interrupt(THREAD_ID, INTERRUPT_ID)
+
+    assert await saver.consume_interrupt(THREAD_ID, INTERRUPT_ID) is True
+    assert await saver.consume_interrupt(THREAD_ID, INTERRUPT_ID) is False
+
+    rows = await _interrupt_rows(factory, THREAD_ID)
+    assert [r.status for r in rows] == ["consumed"], "the row is consumed, not re-livened"
+
+
+async def test_unknown_interrupt_is_refused(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F-404: consuming an interrupt that was never recorded returns False (→ 404).
+
+    No live row exists, so the guarded UPDATE matches zero rows (``rowcount==0``) and the
+    endpoint answers 404 — it must never resume on a fabricated interrupt id.
+    """
+    saver = _saver(factory)
+    # Record a DIFFERENT interrupt so the thread exists but the queried id is absent.
+    await saver.record_interrupt(THREAD_ID, INTERRUPT_ID)
+
+    assert await saver.consume_interrupt(THREAD_ID, "int-never-recorded") is False
+    # The genuinely-recorded interrupt is untouched (still consumable).
+    assert await saver.consume_interrupt(THREAD_ID, INTERRUPT_ID) is True
+
+
+async def test_cross_athlete_decision_is_refused(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F-XID: athlete B cannot consume athlete A's interrupt; A's row stays live (CKPT-R9).
+
+    The consume guard is athlete-scoped (``AND athlete_id = <bound>``), so B's UPDATE matches
+    zero rows and returns False — never resuming A's run. A's interrupt is NOT collaterally
+    consumed and remains consumable by A (the guard is precise, not a blanket flip).
+    """
+    saver_a = _saver(factory, athlete_id=ATHLETE_A, conversation_id=CONVERSATION)
+    await saver_a.record_interrupt(THREAD_ID, INTERRUPT_ID)
+
+    # Athlete B targets the SAME thread_id + interrupt_id but is a different principal.
+    saver_b = _saver(factory, athlete_id=ATHLETE_B, conversation_id=CONVERSATION)
+    assert await saver_b.consume_interrupt(THREAD_ID, INTERRUPT_ID) is False
+
+    rows = await _interrupt_rows(factory, THREAD_ID)
+    assert [r.status for r in rows] == ["live"], "B's refused attempt left A's row live"
+    # A can still legitimately consume its own interrupt afterwards.
+    assert await saver_a.consume_interrupt(THREAD_ID, INTERRUPT_ID) is True
+
+
+async def test_concurrent_consume_exactly_one_wins(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F-CONCURRENT: N concurrent consumes of ONE interrupt — exactly one True (atomic, CKPT-R9).
+
+    This MUST run on a real >1-connection pool (file-SQLite WAL / PG / MariaDB), never
+    ``:memory:``/StaticPool: only a genuine multi-connection race exercises the atomic guarded
+    UPDATE. The conditional ``WHERE status='live'`` makes the flip a single atomic compare-and-
+    set, so exactly ONE racer observes ``rowcount==1`` (resume) and every other sees
+    ``rowcount==0`` (409) — there is never a double-resume, and the row ends ``consumed`` once.
+    """
+    saver = _saver(factory)
+    await saver.record_interrupt(THREAD_ID, INTERRUPT_ID)
+
+    # Verify the pool can hand out more than one connection (else the race is fake).
+    assert factory.kw["bind"].pool.size() >= 1
+    n = 16
+    results = await asyncio.gather(
+        *(saver.consume_interrupt(THREAD_ID, INTERRUPT_ID) for _ in range(n))
+    )
+    assert sum(results) == 1, "exactly ONE concurrent decision may win the atomic consume"
+
+    rows = await _interrupt_rows(factory, THREAD_ID)
+    assert [r.status for r in rows] == ["consumed"], "the single live row ended consumed once"

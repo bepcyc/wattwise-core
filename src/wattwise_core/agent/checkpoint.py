@@ -1,35 +1,24 @@
-"""Durable, portable checkpointer for the agent graph (CKPT-R1/-R2/-R3/-R7, STATE-R*).
+"""Durable, portable checkpointer for the agent graph (CKPT-R1/-R2/-R3/-R7/-R9, STATE-R*).
 
-A custom :class:`~langgraph.checkpoint.base.BaseCheckpointSaver` implemented directly
-over SQLAlchemy so the agent's durable graph state runs unchanged on the three supported
-backends (SQLite / PostgreSQL / MariaDB, ARCH-R13) — we deliberately do NOT use
-``langgraph.checkpoint.postgres.AsyncPostgresSaver``, which is PostgreSQL-only and would
-break portability. Persistence goes through the dedicated agent-state ORM
-(``state_store``), which lives in its own metadata/schema and is NEVER the canonical GBO
-store (ARCH-R13, CKPT-R1).
+A custom :class:`~langgraph.checkpoint.base.BaseCheckpointSaver` implemented directly over
+SQLAlchemy so the agent's durable graph state runs unchanged on the three supported backends
+(SQLite / PostgreSQL / MariaDB, ARCH-R13) — deliberately NOT the PostgreSQL-only
+``AsyncPostgresSaver``. Persistence goes through the dedicated agent-state ORM (``state_store``),
+which lives in its own metadata/schema and is NEVER the canonical GBO store (ARCH-R13, CKPT-R1).
 
-Identity & fail-closed guarantees enforced here:
-
-* **CKPT-R1** — ``aput`` persists a checkpoint after every node transition; the graph
-  runtime calls it at each step, and each call writes one ``agent_checkpoint`` row.
-* **CKPT-R3** — every saver instance is bound to ONE authenticated ``athlete_id`` plus a
-  ``conversation_id`` (the principal scope, re-derived from the caller on resume). A
-  thread is created/loaded only for that pair; a load that resolves a thread owned by a
-  different athlete is REFUSED (``CheckpointIdentityError``), never silently returned.
-* **CKPT-R7** — each checkpoint row stamps the engine ``schema_version``; loading a row
-  whose stored version is incompatible FAILS CLOSED (``CheckpointSchemaVersionError``),
-  never coerces. The graph runtime treats the refusal as "start fresh + log".
-
-The saver takes an injected ``async_sessionmaker`` (the agent-state-write session
-factory, DEPLOY-R4) so it never owns engine lifecycle and stays unit-testable against an
-in-memory database.
+Identity & fail-closed guarantees (each detailed on the relevant method): ``aput`` persists after
+every node transition (CKPT-R1); every saver is bound to ONE authenticated
+``(athlete_id, conversation_id)`` and a cross-identity load is REFUSED (CKPT-R3); an incompatible
+``schema_version`` fails closed (CKPT-R7); the HITL ledger (``record_interrupt`` /
+``consume_interrupt`` / ``interrupt_status``) gates resume on an atomic guarded UPDATE (CKPT-R9).
+The injected ``async_sessionmaker`` (DEPLOY-R4) means the saver never owns engine lifecycle.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -46,6 +35,7 @@ from sqlalchemy import Table, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from wattwise_core.agent import checkpoint_interrupts as ledger
 from wattwise_core.agent.state_store import (
     AgentCheckpoint,
     AgentThread,
@@ -57,7 +47,12 @@ from wattwise_core.persistence.upsert import upsert
 # Engine-side checkpoint schema version (CKPT-R7). Bump ONLY on a breaking change to the
 # persisted state shape; a stored checkpoint with a different version fails closed on
 # load rather than being silently coerced.
-CHECKPOINT_SCHEMA_VERSION = 1
+#
+# v2 (D-P2): the turn-boundary protocol reshaped AgentState (turn_id/run_epoch channels,
+# _turn_monotonic decrease-to-floor counters, turn-keyed retrieved/coverage_gaps). A v1
+# checkpoint lacks those channels, so it MUST fail closed and start fresh, never be coerced
+# into the new shape (CheckpointSchemaVersionError; F-SCHEMA-BUMP).
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 class CheckpointError(RuntimeError):
@@ -96,11 +91,10 @@ def _config_str(config: RunnableConfig, key: str, default: str = "") -> str:
 class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
     """Agent-state checkpointer over SQLAlchemy (portable, fail-closed, athlete-scoped).
 
-    Slightly over the derived class-size guard: this is one cohesive implementation of
-    langgraph's ``BaseCheckpointSaver`` interface (aget_tuple/aput/aput_writes/alist),
-    which must live as a single class to satisfy that contract. The module stays under
-    the 400-line ceiling and every method under the 60-line ceiling.
-
+    Over the derived class-size guard: one cohesive implementation of langgraph's
+    ``BaseCheckpointSaver`` interface (aget_tuple/aput/aput_writes/alist) plus the HITL
+    interrupt ledger (record/consume), which must live as a single class to satisfy that
+    contract; every method stays under the 60-line ceiling.
 
     Bound at construction to the authenticated ``athlete_id`` (CKPT-R3 principal scope)
     and the ``conversation_id`` that, together, identify the durable thread. The
@@ -142,15 +136,14 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
 
         Concurrency-safe (CKPT-R1): a single graph run makes the langgraph runtime call
         ``aput``/``aput_writes`` on SEPARATE sessions/connections that race to create the
-        thread — both ``SELECT`` miss, both ``INSERT``, and the loser hits the
+        thread — both ``SELECT`` miss, both ``INSERT``, the loser hits the
         ``(athlete_id, conversation_id)`` unique constraint. The loser must NOT re-resolve in
-        its own rolled-back transaction (the winner's row is not yet visible to it, so the
-        re-select still misses and the run dies on the benign race). Instead, on
-        ``IntegrityError`` we roll the poisoned transaction back and re-resolve through a
-        FRESH session (a new connection that can SEE the committed row). The re-resolve still
-        goes through ``_resolve_thread``, so a cross-identity row is REFUSED, never returned
-        (CKPT-R3). The caller only needs the row to EXIST (it discards the return value to let
-        the checkpoint/write FK resolve), so returning a detached probe object is fine.
+        its own rolled-back transaction (the winner's row is not yet visible, so the re-select
+        still misses and the run dies on the benign race). Instead, on ``IntegrityError`` we
+        roll the poisoned transaction back and re-resolve through a FRESH session (a new
+        connection that can SEE the committed row), still via ``_resolve_thread`` so a
+        cross-identity row is REFUSED, never returned (CKPT-R3). The caller only needs the row
+        to EXIST (it discards the return value), so returning a detached probe object is fine.
         """
         thread = await self._resolve_thread(session, thread_id)
         if thread is not None:
@@ -182,12 +175,11 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
     async def resolve_idempotent(self, thread_id: str) -> str | None:
         """Return the latest checkpoint id for an EXISTING in-window run, else ``None`` (CKPT-R4).
 
-        Idempotency is keyed by the durable thread — a thread_id is the stable
-        ``(athlete_id, conversation_id)`` identifier (CKPT-R3), and a re-submission of the
-        SAME request turn maps to the SAME thread_id (the engine derives it from the turn's
-        idempotency key). So a non-``None`` return means a run already exists for this turn:
-        the caller MUST resume/return it rather than starting a duplicate. Cross-identity
-        ownership is refused here too (CKPT-R3). ``None`` means start a fresh run.
+        Idempotency is keyed by the durable thread (the stable ``(athlete_id, conversation_id)``
+        id, CKPT-R3); a re-submission of the SAME turn maps to the SAME thread_id (engine-derived
+        from the turn's idempotency key). A non-``None`` return means a run already exists for this
+        turn — the caller MUST resume it, not start a duplicate; cross-identity ownership is refused
+        (CKPT-R3); ``None`` means start fresh.
         """
         async with self._sessions() as session:
             thread = await self._resolve_thread(session, thread_id)
@@ -346,14 +338,8 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
             )
             session.add(row)
             await session.commit()
-        result: RunnableConfig = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": ns,
-                "checkpoint_id": checkpoint["id"],
-            }
-        }
-        return result
+        conf = {"thread_id": thread_id, "checkpoint_ns": ns, "checkpoint_id": checkpoint["id"]}
+        return {"configurable": conf}
 
     async def aput_writes(
         self,
@@ -366,12 +352,11 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
 
         Special langgraph channels (``__resume__``/``__interrupt__``/``__error__``/
         ``__scheduled__``) are keyed by their reserved negative ``idx`` from
-        ``WRITES_IDX_MAP`` — exactly as langgraph's own reference saver does — so a
-        ``__resume__`` write (idx -4, carrying the human HITL decision) can NEVER collide at
-        positional idx 0 with an ordinary branch write and be silently dropped. The natural
-        key ``(thread, ns, checkpoint, task, idx)`` is upserted with DO UPDATE (last-write-
-        wins) through the sanctioned dialect seam, so a re-delivered write of the SAME channel
-        overwrites rather than being ignored (CKPT-R2; portable across SQLite/PG/MariaDB).
+        ``WRITES_IDX_MAP`` (as langgraph's reference saver does), so a ``__resume__`` write
+        (idx -4, the human HITL decision) can NEVER collide at positional idx 0 with a branch
+        write and be silently dropped. The natural key ``(thread, ns, checkpoint, task, idx)``
+        is upserted last-write-wins through the sanctioned dialect seam, so a re-delivered
+        write of the SAME channel overwrites rather than being ignored (portable, CKPT-R2).
         """
         thread_id = _config_str(config, "thread_id")
         ns = _config_str(config, "checkpoint_ns")
@@ -399,6 +384,31 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
                     update_columns=["channel", "value_type", "value_blob"],
                 )
             await session.commit()
+
+    # --- HITL approval-gate ledger (CKPT-R9 / D-P2) ----------------------------------
+    # The three ledger operations live in :mod:`checkpoint_interrupts` (QUAL-R9 size split); the
+    # saver binds its identity/session-factory + thread get-or-create into them so each guard stays
+    # athlete-scoped (CKPT-R3). The seam names are unchanged so every caller path stays stable.
+
+    async def record_interrupt(self, thread_id: str, interrupt_id: str) -> None:
+        """Record a ``live`` approval-gate interrupt row, idempotently (CKPT-R9)."""
+        await ledger.record_interrupt(
+            self._sessions, self._ensure_thread, self._athlete_id, thread_id, interrupt_id
+        )
+
+    async def consume_interrupt(self, thread_id: str, interrupt_id: str) -> bool:
+        """Atomically consume a ``live`` interrupt; True ⇒ resume, False ⇒ 404/409 (CKPT-R9)."""
+        return await ledger.consume_interrupt(
+            self._sessions, self._athlete_id, thread_id, interrupt_id
+        )
+
+    async def interrupt_status(
+        self, thread_id: str, interrupt_id: str
+    ) -> Literal["unknown", "live", "consumed"]:
+        """Athlete-scoped status of an interrupt for the 404-vs-409 split (CKPT-R9, API-R12a)."""
+        return await ledger.interrupt_status(
+            self._sessions, self._athlete_id, thread_id, interrupt_id
+        )
 
 
 __all__ = [

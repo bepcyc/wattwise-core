@@ -12,9 +12,16 @@ Boundary contract enforced here:
 
 - **AUTH-R13** the endpoint requires the ``agent`` scope and is request-rate-limited
   in the ``agent`` class (``20/min``, LIMIT-R2) keyed by the server-derived athlete id.
-- **API-R11a** the response is a status-discriminated union on ``status``; OSS surfaces
-  the ``completed`` and ``degraded`` members (``awaiting_approval``/``budget_exceeded``
-  are later/commercial and never produced by the OSS engine).
+- **API-R11a / API-R12a** the response is a status-discriminated union on ``status``; OSS
+  surfaces ``completed``, ``degraded``, AND ``awaiting_approval`` (an approval-gated multi-day
+  PLAN paused at the durable interrupt-gate, carrying the ``interrupt_id`` the decision endpoint
+  consumes + the grounded plan body, CKPT-R9). Only ``budget_exceeded`` remains commercial-only
+  and is never produced by the OSS engine.
+- **API-R12a** ``POST /v1/agent/threads/{thread_id}/decision`` resumes a paused plan with the
+  athlete's ``approve``/``reject``/``edit`` verdict over the DURABLE saver (no recompute,
+  CKPT-R2). The atomic single-consume guarantees exactly one decision wins: an unknown/foreign
+  interrupt is ``404`` ``not-found``, an already-decided one is ``409`` ``decision-conflict``
+  (CKPT-R9); an ``edit`` re-grounds the edited plan before resume (GROUND-R3).
 - **API-R11c** the athlete-facing response carries NO billing/budget/model machinery
   (no ``usage``/``cost_*``/token counts/``model_tier``/``reasoning``/model name).
 - **API-R12** a run that cannot ground fails closed with ``422`` ``agent-grounding-failed``
@@ -36,14 +43,14 @@ AUTH-R13, SCHEMA-R7, LIMIT-R2, PERF-R10(b), ERR-R8, ERR-R9.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from typing import Annotated, Any, Final, Literal, Protocol, runtime_checkable
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
-from wattwise_core.agent.contracts import RunStatus
-from wattwise_core.agent.deliverables import AgentAnswer, Citation, Readiness
+from wattwise_core.agent.deliverables import AgentAnswer, Plan, Readiness
+from wattwise_core.agent.engine import DecisionRefused
 from wattwise_core.api.agent_stream import (
     SSE_HEADERS,
     SSE_TERMINAL_DONE,
@@ -57,26 +64,18 @@ from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers.agent_schemas import (
     AgentAskRequest,
     AgentAskResponse,
-    CitationOut,
-    DegradedOut,
-    GroundingOut,
-    ObservationOut,
+    AgentDecisionRequest,
+    AgentDecisionResponse,
+    DecisionKind,
     ReadinessResponse,
     ResponseLength,
-    SuggestedFollowupOut,
+    grounded_flag,
+    render_decision,
+    render_readiness,
+    render_response,
 )
-from wattwise_core.api.sanitize import sanitize_html
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
-
-#: The per-language warm reason_text for a degraded outcome (API-R11a / API-R37). The
-#: structured ``coverage_caveat`` carries the machine basis; this is its human gloss in
-#: the athlete's selected language (en/de/ru), externalized as catalog copy (QUAL-R13).
-_DEGRADED_REASON_BY_LOCALE: Final[dict[str, str]] = {
-    "en": "I built this with what we have — a source is offline.",
-    "de": "Ich habe das mit den vorhandenen Daten erstellt — eine Quelle ist offline.",
-    "ru": "Я собрал это из того, что есть — один источник недоступен.",
-}
 
 
 # --- engine seam (injected; reached only through this Protocol, ARCH-R21) --------
@@ -112,6 +111,40 @@ class AgentEngine(Protocol):
         locale: str,
         response_length: ResponseLength,
     ) -> Readiness: ...
+
+    async def decision(
+        self,
+        *,
+        athlete_id: str,
+        thread_id: str,
+        interrupt_id: str,
+        decision: DecisionKind,
+        edited_plan: str | None,
+    ) -> Plan:
+        """Resume a paused approval-gated PLAN with the athlete's HITL verdict (API-R12a/CKPT-R9).
+
+        Atomically CONSUMES the live interrupt then drives ``Command(resume)`` through the durable
+        saver (no recompute); ``edit`` re-grounds ``edited_plan`` first (GROUND-R3). A
+        double-decision / unknown / cross-athlete attempt consumes no row and raises
+        :class:`~wattwise_core.agent.engine.DecisionRefused` — the router classifies it 404/409 via
+        :meth:`interrupt_status`. ``athlete_id`` is server-derived (AUTH-R3); the ``thread_id`` is
+        the path-bound durable scope.
+        """
+        ...
+
+    async def interrupt_status(
+        self, *, athlete_id: str, thread_id: str, interrupt_id: str
+    ) -> Literal["unknown", "live", "consumed"]:
+        """Classify a refused decision into ``unknown`` (404) vs ``consumed`` (409) (API-R12a).
+
+        A read-only, side-effect-free probe the router consults ONLY after :meth:`decision` fails
+        closed, to choose the HTTP status: ``unknown`` (no live/consumed row the caller owns —
+        unknown thread/interrupt OR another athlete's, never disclosed) -> ``404``; ``consumed``
+        (the caller's row was already decided) -> ``409``. ``live`` is the never-decided race case
+        (also ``409`` — a concurrent decision won). Scoped to the server-derived ``athlete_id``
+        (CKPT-R3): a foreign row reads as ``unknown``.
+        """
+        ...
 
 
 # --- dependency seams (overridden by the app factory) ----------------------------
@@ -159,123 +192,7 @@ Engine = Annotated[AgentEngine, Depends(agent_engine)]
 Limiter = Annotated[RateLimiter, Depends(rate_limiter)]
 
 
-# --- projection helpers ----------------------------------------------------------
-
-
-def _grounded_flag(answer: AgentAnswer) -> bool:
-    """True iff the engine produced a grounded terminal outcome (API-R12).
-
-    A ``completed`` or ``degraded`` outcome is grounded (degraded is partial-coverage
-    grounded, never fabricated). Any other/absent status is treated as ungrounded so
-    the endpoint fails closed rather than emitting an ungrounded answer.
-    """
-    return answer.status in (RunStatus.COMPLETED, RunStatus.DEGRADED)
-
-
-def _citations_out(citations: Sequence[Citation]) -> list[CitationOut]:
-    """Project surviving grounded citations into the wire shape (API-R11d).
-
-    Shared by the answer and readiness renders — both project the same canonical
-    ``{metric, value, as_of}`` + record-id citation shape, so neither carries an
-    external provider name (API-R13 / AUTH-R15).
-    """
-    return [
-        CitationOut(citation_id=cit.record_id, metric=cit.metric, value=cit.value, as_of=cit.as_of)
-        for cit in citations
-    ]
-
-
-def _observations_out(answer: AgentAnswer) -> list[ObservationOut]:
-    """Project the stable-id observations into the wire shape (API-R11e)."""
-    return [
-        ObservationOut(observation_id=obs.observation_id, text=obs.text)
-        for obs in answer.observations
-    ]
-
-
-def _followups_out(answer: AgentAnswer) -> list[SuggestedFollowupOut]:
-    """Project the engine's jargon-free follow-up prompts into reveal-numbers chips.
-
-    The deliverables seam carries follow-ups as plain athlete-native labels; we surface
-    each as an ``expand`` chip (the safe default "tell me more"), since OSS does not
-    bind a label to a specific target. Empty when the engine offered none.
-    """
-    return [
-        SuggestedFollowupOut(kind="expand", label=label)
-        for label in answer.suggested_followups
-    ]
-
-
-def _degraded_out(answer: AgentAnswer, locale: str) -> DegradedOut | None:
-    """Build the ``degraded`` member payload, else ``None`` (API-R11a / API-R37).
-
-    Present only for a ``degraded`` outcome: the human ``reason_text`` in the athlete's
-    selected language (en/de/ru, API-R37) plus the typed ``coverage_caveat``
-    (source-agnostic missing/substituted/stale state). The caveat is the engine's typed
-    structure; we pass it through without inventing a number.
-    """
-    if answer.status is not RunStatus.DEGRADED:
-        return None
-    caveat = dict(answer.coverage_caveat) if answer.coverage_caveat is not None else None
-    reason = _DEGRADED_REASON_BY_LOCALE.get(locale, _DEGRADED_REASON_BY_LOCALE["en"])
-    return DegradedOut(reason_text=reason, coverage_caveat=caveat)
-
-
-def _render_response(answer: AgentAnswer, trace_id: str, locale: str) -> AgentAskResponse:
-    """Render a grounded :class:`AgentAnswer` into the sanitized response union.
-
-    ``answer_html`` is sanitized HERE (API-R13 / SCHEMA-R7) before it leaves the API —
-    the client is never trusted to sanitize. Maps the OSS terminal status to the
-    union's closed member; only ``completed``/``degraded`` are reachable in OSS. The
-    degraded human caveat is localized to ``locale`` (API-R37).
-    """
-    member: Literal["completed", "degraded"] = (
-        "degraded" if answer.status is RunStatus.DEGRADED else "completed"
-    )
-    return AgentAskResponse(
-        status=member,
-        thread_id=answer.thread_id,
-        trace_id=trace_id,
-        answer_html=sanitize_html(answer.answer_html),
-        answer_text=answer.answer_text,
-        observations=_observations_out(answer),
-        grounding=GroundingOut(grounded=True, citations=_citations_out(answer.citations)),
-        suggested_followups=_followups_out(answer),
-        degraded=_degraded_out(answer, locale),
-    )
-
-
-def _readiness_followups_out(readiness: Readiness) -> list[SuggestedFollowupOut]:
-    """Project the jargon-free reveal-the-numbers chips (API-R11e / VOICE-R9)."""
-    return [
-        SuggestedFollowupOut(kind="reveal_numbers", label=label)
-        for label in readiness.suggested_followups
-    ]
-
-
-def _render_readiness(readiness: Readiness, trace_id: str) -> ReadinessResponse:
-    """Render the readiness deliverable into the sanitized typed response (API-R41).
-
-    ``summary_html`` is sanitized HERE (API-R13 / SCHEMA-R7) before it leaves the API. The
-    verdict is the StrEnum value (or ``None`` when the deliverable abstained); there is no
-    numeric readiness field. ``coverage`` passes through the engine's typed map unchanged
-    (no invented number).
-    """
-    coverage = dict(readiness.coverage) if readiness.coverage is not None else None
-    return ReadinessResponse(
-        verdict=readiness.verdict.value if readiness.verdict is not None else None,
-        as_of=readiness.as_of,
-        trace_id=trace_id,
-        summary_html=sanitize_html(readiness.summary_html),
-        summary_text=readiness.summary_text,
-        observations=[
-            ObservationOut(observation_id=obs.observation_id, text=obs.text)
-            for obs in readiness.observations
-        ],
-        citations=_citations_out(readiness.citations),
-        coverage=coverage,
-        suggested_followups=_readiness_followups_out(readiness),
-    )
+# --- request validation ----------------------------------------------------------
 
 
 def _validate_request(body: AgentAskRequest) -> None:
@@ -353,7 +270,7 @@ async def _run_engine(
         follow_up=body.follow_up.model_dump() if body.follow_up else None,
         locale=locale,
     )
-    if not _grounded_flag(answer):
+    if not grounded_flag(answer):
         raise ProblemError("agent-grounding-failed")
     return answer
 
@@ -395,7 +312,7 @@ async def _stream_answer(
     except ProblemError as exc:
         yield sse_event(SSE_TERMINAL_ERROR, problem_event(exc, request), event_id="error")
         return
-    response = _render_response(answer, trace_id, locale)
+    response = render_response(answer, trace_id, locale)
     yield sse_event(SSE_TERMINAL_DONE, response.model_dump(), event_id="done")
 
 
@@ -440,7 +357,7 @@ async def agent_ask(
             headers=SSE_HEADERS,
         )
     answer = await _run_engine(engine, athlete_id, body, locale)
-    return _render_response(answer, trace_id, locale)
+    return render_response(answer, trace_id, locale)
 
 
 @router.get(
@@ -475,12 +392,78 @@ async def agent_readiness(
     readiness = await engine.readiness(
         athlete_id=athlete_id, locale=locale, response_length="standard"
     )
-    return _render_readiness(readiness, trace_id)
+    return render_readiness(readiness, trace_id)
+
+
+async def _decision_problem(
+    engine: AgentEngine, athlete_id: str, thread_id: str, interrupt_id: str
+) -> ProblemError:
+    """Classify a refused decision into the right RFC 9457 problem (API-R12a / CKPT-R9).
+
+    Consulted ONLY after :meth:`AgentEngine.decision` failed closed (the atomic consume matched no
+    live row). The read-only :meth:`interrupt_status` probe disambiguates: ``unknown`` (no row the
+    caller owns — unknown thread/interrupt OR a foreign athlete's, never disclosed) -> ``404``
+    ``not-found``; ``consumed``/``live`` (the caller's row was already decided, or a concurrent
+    decision won the race) -> ``409`` ``decision-conflict``. Identity is the server-derived
+    ``athlete_id`` (AUTH-R3 / CKPT-R3). If a deployed engine predates the probe, we fail closed to
+    ``409`` (the contract maps a ``rowcount==0`` refusal to already-decided) rather than guessing a
+    ``404`` — never resumed twice either way.
+    """
+    probe = getattr(engine, "interrupt_status", None)
+    if probe is None:
+        return ProblemError("decision-conflict")
+    state = await probe(athlete_id=athlete_id, thread_id=thread_id, interrupt_id=interrupt_id)
+    if state == "unknown":
+        return ProblemError("not-found")
+    return ProblemError("decision-conflict")
+
+
+@router.post(
+    "/threads/{thread_id}/decision",
+    response_model=AgentDecisionResponse,
+    dependencies=[_Agent],
+    operation_id="agentDecision",
+)
+async def agent_decision(
+    request: Request,
+    thread_id: str,
+    body: AgentDecisionRequest,
+    engine: Engine,
+    athlete_id: AthleteId,
+    limiter: Limiter,
+) -> AgentDecisionResponse:
+    """Decide a paused approval-gated PLAN: approve / reject / edit (API-R12a / CKPT-R9).
+
+    Requires the ``agent`` scope (AUTH-R13) and debits the per-athlete ``agent`` rate bucket
+    (LIMIT-R2) keyed by the server-derived id (AUTH-R3). The ``(athlete_id, conversation_id)``
+    durable scope is resolved by the engine FROM the ``thread_id`` path param — identity is never
+    a body field (SCHEMA-R4). The engine atomically consumes the live interrupt then resumes the
+    durable thread (no recompute, CKPT-R2); ``edit`` re-grounds ``edited_plan`` first (GROUND-R3).
+    A refused decision fails closed: an unknown/foreign interrupt is ``404``, an already-decided
+    one is ``409`` (CKPT-R9) — the run is NEVER resumed twice.
+    """
+    limiter.check(athlete_id, LimitClass.AGENT)
+    trace_id = resolve_trace_id(request)
+    try:
+        plan = await engine.decision(
+            athlete_id=athlete_id,
+            thread_id=thread_id,
+            interrupt_id=body.interrupt_id,
+            decision=body.decision,
+            edited_plan=body.edited_plan,
+        )
+    except DecisionRefused as exc:
+        raise await _decision_problem(
+            engine, athlete_id, thread_id, body.interrupt_id
+        ) from exc
+    return render_decision(plan, body.decision, trace_id)
 
 
 __all__ = [
     "AgentAskRequest",
     "AgentAskResponse",
+    "AgentDecisionRequest",
+    "AgentDecisionResponse",
     "AgentEngine",
     "ReadinessResponse",
     "agent_engine",

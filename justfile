@@ -135,14 +135,29 @@ test-e2e:
 # 3. Coverage gate (CI-R1 item 5)
 # =====================================================================
 
-# Combined coverage ≥ 80% overall; the analytics + adapter packages are gated to
-# ≥ 95% line+branch by Dev B's per-package test layout. We emit XML + a retained
-# report (CI-R6) and fail under the global floor here.
-cov:
+# Combined coverage ≥ 80% overall AND a ≥ 95% line+branch FLOOR on the two
+# correctness-critical packages — analytics + ingestion adapters (DOD-R1). The
+# global run emits XML + a retained term report (CI-R6); the scoped run enforces
+# the per-package floor. Both must pass for `cov` to go green.
+cov: cov-critical
     {{uv}} pytest --cov={{package}} --cov-branch \
         --cov-report=term-missing \
         --cov-report=xml:reports/coverage.xml \
         --cov-fail-under=80
+
+# Per-package ≥ 95% line+branch FLOOR for the analytics + ingestion-adapter
+# packages (DOD-R1). Scoped `--cov` to exactly those two import roots so the
+# `--cov-fail-under=95` threshold is measured against them ALONE (not diluted by
+# the rest of the package, which the global ≥ 80% floor in `cov` covers). Branch
+# coverage is on via [tool.coverage.run]. Report retained for CI artifacts (CI-R6).
+cov-critical:
+    {{uv}} pytest \
+        --cov=wattwise_core.analytics \
+        --cov=wattwise_core.ingestion.adapters \
+        --cov-branch \
+        --cov-report=term-missing \
+        --cov-report=xml:reports/coverage-critical.xml \
+        --cov-fail-under=95
 
 # =====================================================================
 # 4. Agent eval + injection tiers (CI-R1 items 6, 7)
@@ -159,8 +174,8 @@ eval:
 eval-record:
     {{uv}} python -m {{package}}.eval record
 
-# Advance the stored baseline scorecard (QA-EVAL-R12(c)). Reviewed, idempotent.
-# TODO(src/wattwise_core/eval): owned by the agent/eval sibling.
+# Regenerate the committed baseline scorecard from a clean run (QA-EVAL-R7/-R12(c)).
+# Rewrites src/wattwise_core/eval/baseline-scorecard.json; review the diff before commit.
 eval-update-baseline:
     {{uv}} python -m {{package}}.eval update-baseline
 
@@ -222,17 +237,27 @@ test-db-portable:
 # =====================================================================
 
 # Secret scan + dependency/SCA scan (CI-R1 items 8, 9; SEC-R13.1/.2).
-# TODO(scripts): `scripts/scan.sh` owned by the security sibling (gitleaks +
-# `uv`/pip-audit). Kept as a script so the tool choice is not baked into YAML.
+# Two fail-closed scripts, both owned by the security sibling — kept as scripts so
+# the tool choice is not baked into YAML:
+#   * `scripts/secret_scan.sh` — committed-secret scan over tree + diff with a
+#     planted-canary self-test (SEC-R13.1 / SEC-R12-AC; gitleaks/trufflehog).
+#   * `scripts/scan.sh`        — dependency/SCA + image vuln scan (SEC-R13.2 /
+#     CONT-R1; trivy/grype). Secret scan runs FIRST so a leak fails fast.
 scan:
+    bash scripts/secret_scan.sh
     bash scripts/scan.sh
 
-# Build the runtime image, scan it (no Critical admitted), and emit an SBOM
-# (CI-R1 item 10; CONT-R1). Retained artifacts land under reports/.
-# TODO(scripts): `scripts/image_scan_sbom.sh` owned by the security/ops sibling
-# (docker build + trivy/grype + syft -> reports/sbom.json).
+# Scan the runtime image (no Critical admitted) and emit an SBOM (CI-R1 item 10;
+# CONT-R1). Composed from the two real security-sibling scripts so the tool choice
+# stays out of YAML and the image gate matches the SCA gate:
+#   1. `scripts/scan.sh` with WW_FAIL_SEVERITY=CRITICAL — image vuln scan that
+#      admits NO Critical (CONT-R1). WW_IMAGE selects the built image to scan.
+#   2. `scripts/sbom.sh` — syft SBOM (CycloneDX/SPDX) for that image.
+# Both retain their reports under reports/ (CI-R6). Override WW_IMAGE to point at
+# the freshly built tag, e.g. `WW_IMAGE=wattwise-core:v1.2.3 just sbom`.
 sbom:
-    bash scripts/image_scan_sbom.sh
+    WW_FAIL_SEVERITY=CRITICAL bash scripts/scan.sh
+    bash scripts/sbom.sh
 
 # Conventional-commits gate (CI-R1 item 15, QUAL-R12). Lints PR commit messages.
 # TODO(scripts): `scripts/lint_commits.sh` owned by the delivery sibling

@@ -90,13 +90,17 @@ class OpenAICompatibleModel:
             raise ModelResponseError(f"provider returned no parseable {schema.__name__!r} object")
         return parsed
 
-    async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:
+    async def compose(self, *, system: str, context: str, max_tokens: int = 1_000_000) -> str:
         """Bounded-temperature prose composition (MODEL-R5).
 
         Prose is not a verdict: it runs at the configured (bounded) temperature, with the
         untrusted ``context`` kept in a separate user message (INJECT-R1). Grounding (§7)
         — not this call — decides truth.
         """
+        # High default = "use the full configured output budget": a node that passes no
+        # max_tokens is NOT capped at 1024. A 2026 reasoning model spends output tokens on
+        # its thinking trace before the answer, so a small per-call cap starved compose to
+        # empty (MODEL-R5a); the budget below must hold reasoning trace + answer.
         bound = min(max_tokens, self._max_output_tokens)
         completion = await self._client.chat.completions.create(
             model=self._model,

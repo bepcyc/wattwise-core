@@ -2,11 +2,20 @@
 #
 # Config layering (CFG-R*, doc 10): packaged defaults (this file) -> optional
 # operator file (WATTWISE_CONFIG_FILE) -> environment variables (WATTWISE_*).
-# A later layer overrides an earlier one. Secrets are NEVER read from this file
-# or any committed file: the database DSN, the LLM provider key, the token
-# signing key, and the encryption root key come ONLY from the environment / a
-# secret manager at startup (BOOT-R4, DEPLOY-R6). Absence of a required secret
-# fails the boot closed (RUN-R4.1) — it never silently degrades.
+# A later layer overrides an earlier one.
+#
+# This file is the ONLY home for concrete non-secret configuration values
+# (CFG-R1a): settings.py declares the typed schema + validation constraints only
+# and carries no value defaults, so every non-secret value the engine needs lives
+# here. It must stay COMPLETE — a value for every non-secret field — so Settings()
+# resolves with no operator file / env in development. A key absent from every
+# layer fails closed at load (no hardcoded code fallback exists to rescue it).
+#
+# Secrets are NEVER read from this file or any committed file (CFG-R2): the
+# database DSN, the LLM provider key, the token signing key, and the encryption
+# root key come ONLY from the environment / a secret manager at startup (BOOT-R4,
+# DEPLOY-R6). Absence of a required secret fails the boot closed (RUN-R4.1) — it
+# never silently degrades.
 
 [app]
 environment = "production"   # production | staging | development
@@ -31,14 +40,103 @@ atl_time_constant_days = 7
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.
+# It is 2026: the default is a contemporary reasoning-capable model (MODEL-R5a).
 base_url = "https://openrouter.ai/api/v1"
-model = "deepseek/deepseek-chat"
+model = "deepseek/deepseek-v4-flash"
 temperature = 0.0
-max_output_tokens = 1024
+# Sized for reasoning models: reasoning tokens are billed against the completion
+# budget and emitted BEFORE the answer, so a small allowance yields an empty answer
+# (MODEL-R5a). Must comfortably hold reasoning trace + visible answer.
+max_output_tokens = 8192
 # Fail-closed grounding (GROUND-R*): the agent abstains unless every claim is
 # grounded in retrieved canonical data at/above this coverage.
 grounding_min_coverage = 1.0
 request_timeout_seconds = 60
+# First-party hosts whose links the deliverable may keep (GROUND-R4 allow-list). A URL whose
+# host is not on this exact-host set is scrubbed by the grounder ("when in doubt, scrub"). This
+# is LOADED policy content (CFG-R1a), never a code-baked host literal; the operator/private
+# bundle may extend it. A TOML array flattens to one ``agent__allowed_hosts`` list setting.
+allowed_hosts = ["wattwise.app", "www.wattwise.app", "docs.wattwise.app"]
+
+[agent.coach]
+# The OSS default coach-config bundle (SKILL-R1 / §16): the engine embeds NO persona
+# or prompt inline — the compose-node system prompt is loaded from here (overridable by
+# the operator file / a private bundle). This minimal, plain example prompt (SKILL-R6)
+# steers a reasoning model to make CLAIMS THAT GROUND: cite ONLY the canonical metrics it
+# was given, by their canonical name + the as-of date present in the data, and never
+# invent an aggregate/derived metric the data does not directly expose. Truth is decided
+# by deterministic grounding (§7), never by this prompt.
+#
+# Numeric-grounding thresholds (§16 / SKILL-R1 "metric thresholds"): the band within which
+# a claimed number is accepted as a re-statement of the canonical analytic (GROUND-R7). The
+# defaults accept a model DISPLAYING the canonical value at sane human precision (a coach
+# says "your ctl is 6.7", not "6.7315243…") while a FABRICATED number — wrong by tens of
+# percent — is still scrubbed. These are LOADED content, not a gate hardcode (CFG-R1a).
+grounding_rel_tolerance = 0.02
+grounding_abs_tolerance = 0.05
+# Display precision (decimal places) the canonical value is rounded to when it REPLACES a
+# recognized (within-tolerance or contradicted) numeric span in the published text (GROUND-R7):
+# the model's approximation is NEVER emitted — the canonical value, rounded for a human display,
+# always is. Loaded content (CFG-R1a), not a code literal.
+grounding_display_decimals = 1
+# The window (days back from the reference date) the latest-available-date fallback scans when a
+# natural metric claim carries NO parseable as-of date. The PMC series carries forward from the
+# athlete's training origin, so the last computed day of a window ending at the reference date is
+# the athlete's current value. Loaded content (CFG-R1a), not a code literal.
+latest_lookback_days = 42
+system_prompt = """You are the athlete's endurance coach. Answer ONLY from the canonical \
+training data provided to you in the data section. Do not use outside knowledge and do not \
+estimate, sum, average, or otherwise derive any number the data does not state directly.
+
+Always ground your answer in the actual canonical metric values present in the data. State \
+each number as the exact canonical metric it is, using these canonical metric names: ctl \
+(chronic training load / fitness), atl (acute training load / fatigue), tsb (training stress \
+balance, also called form), tss (training stress / load for a session), np (normalized power), \
+if (intensity factor), critical_power_w, w_prime_j, hrv_rmssd_ms. When the data records a date \
+for a value, give that date; copy it exactly from the data and never invent one. For example: \
+"Your ctl is 6.7 and your tsb is -20.2." Always pair every number with its canonical metric \
+name — never a bare number, and never a metric the data does not contain.
+
+Even when the athlete asks for something the data does not directly contain (for example a \
+six-week TOTAL when the data holds only the daily fitness, fatigue, and form values), you MUST \
+still answer concretely: report the latest available ctl, atl, and tsb values from the data as \
+the athlete's current training-load picture, and briefly note that a single six-week total \
+isn't one of the stored values. Do NOT refuse, and do NOT reply only with "I can't" — always \
+include the real latest ctl, atl, and tsb numbers from the data. Keep it warm, brief, and \
+concrete. The system verifies every number against the canonical data and removes anything it \
+cannot confirm, so stating the real canonical values is exactly what reaches the athlete."""
+
+[agent.metric_aliases]
+# Metric-equivalence classes (§16 / SKILL-R1): natural athlete/coach phrasings a real model
+# emits, mapped to the canonical metric key the grounder verifies against (GROUND-R2/-R7).
+# This is DATA, not code (CFG-R1a) — extend it here (or in the private bundle) without an
+# engine change. Keys are case/whitespace-folded before lookup; values MUST be a canonical
+# MetricName member (ctl/atl/tsb/form/critical_power_w/w_prime_j/hrv_rmssd_ms). A natural
+# claim that maps to a canonical metric the analytics exposes therefore grounds instead of
+# being scrubbed as an unknown metric.
+"fitness" = "ctl"
+"chronic training load" = "ctl"
+"chronic training load (ctl)" = "ctl"
+"ctl (fitness)" = "ctl"
+"long-term load" = "ctl"
+"fatigue" = "atl"
+"acute training load" = "atl"
+"acute training load (atl)" = "atl"
+"atl (fatigue)" = "atl"
+"short-term load" = "atl"
+"form" = "tsb"
+"training stress balance" = "tsb"
+"training stress balance (tsb)" = "tsb"
+"tsb (form)" = "tsb"
+"freshness" = "tsb"
+"critical power" = "critical_power_w"
+"cp" = "critical_power_w"
+"w prime" = "w_prime_j"
+"w'" = "w_prime_j"
+"anaerobic capacity" = "w_prime_j"
+"hrv" = "hrv_rmssd_ms"
+"rmssd" = "hrv_rmssd_ms"
+"heart rate variability" = "hrv_rmssd_ms"
 
 [retention]
 # 0 = retain indefinitely; >0 = per-athlete retention window in days (PRIV-R*).

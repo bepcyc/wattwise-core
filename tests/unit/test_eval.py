@@ -21,6 +21,14 @@ import pytest
 
 from wattwise_core.agent.readiness_deliverable import HRV_UNAVAILABLE_CLAUSE
 from wattwise_core.eval.__main__ import main as cli_main
+from wattwise_core.eval.baseline import (
+    BASELINE_FORMAT_VERSION,
+    BASELINE_PATH,
+    build_baseline,
+    compare_to_baseline,
+    load_baseline,
+    write_baseline,
+)
 from wattwise_core.eval.grading import (
     ABSTENTION_MIN_RATE,
     GROUNDING_MIN_FAITHFULNESS,
@@ -463,3 +471,115 @@ def test_eval_cli_run_gates_green(tmp_path: Path) -> None:
     blob = json.loads(out.read_text())
     assert blob["passed"] is True
     assert {s["suite"] for s in blob["suites"]} >= {"termination", "intent_plan", "judge"}
+
+
+# --------------------------------------------------------------------------- #
+# Non-regression baseline (QA-EVAL-R7) — versioned floor + safety regression   #
+# --------------------------------------------------------------------------- #
+
+
+async def _all_cards() -> list[object]:
+    """Run every catalogued suite once (the cards the baseline check compares)."""
+    return [await run_suite(name, mode=EvalMode.RECORDED) for name in list_suites()]
+
+
+def test_committed_baseline_exists_and_is_versioned() -> None:
+    # QA-EVAL-R7: a versioned baseline artifact MUST be committed beside the eval engine.
+    assert BASELINE_PATH.exists(), "the baseline scorecard MUST be committed (QA-EVAL-R7)"
+    doc = load_baseline()
+    assert doc is not None
+    assert doc["baseline_format_version"] == BASELINE_FORMAT_VERSION
+    # Every CI-gated suite is represented in the committed baseline.
+    assert set(doc["suites"]) == set(list_suites())
+    # The committed baseline records a PASSING run (never enshrines a failure as the floor).
+    assert all(s["passed"] for s in doc["suites"].values())
+
+
+async def test_current_run_does_not_regress_committed_baseline() -> None:
+    # QA-EVAL-R7: a clean run MUST be >= the committed baseline on every tracked metric.
+    cards = await _all_cards()
+    report = compare_to_baseline(cards)
+    assert report.baseline_present
+    assert report.passed, report.summary()
+    assert report.regressions == ()
+
+
+async def test_safety_suite_regression_fails_even_when_absolute_is_high(
+    tmp_path: Path,
+) -> None:
+    # QA-EVAL-R7 teeth: inflate the grounding faithfulness baseline above 1.0. The current
+    # run still scores a perfectly-passing 1.0 (absolute gate green), yet the non-regression
+    # gate MUST fail it as a SAFETY-SUITE regression — proving the two gates are independent.
+    cards = await _all_cards()
+    doc = build_baseline(cards)
+    doc["suites"]["grounding"]["metrics"]["grounding.faithfulness"] = 1.5
+    path = tmp_path / "inflated.json"
+    path.write_text(json.dumps(doc))
+    report = compare_to_baseline(cards, path=path)
+    assert not report.passed
+    assert report.has_safety_regression
+    assert any(r.suite == "grounding" and r.is_safety for r in report.regressions)
+
+
+async def test_non_safety_regression_also_fails(tmp_path: Path) -> None:
+    # A drop below baseline on a non-safety metric (intent-plan precision) is still a hard
+    # fail, but NOT flagged as a safety regression.
+    cards = await _all_cards()
+    doc = build_baseline(cards)
+    doc["suites"]["intent_plan"]["metrics"]["intent_plan.precision"] = 1.25
+    path = tmp_path / "inflated.json"
+    path.write_text(json.dumps(doc))
+    report = compare_to_baseline(cards, path=path)
+    assert not report.passed
+    assert not report.has_safety_regression
+    assert any(r.suite == "intent_plan" for r in report.regressions)
+
+
+async def test_missing_baseline_does_not_fail_the_gate(tmp_path: Path) -> None:
+    # A first run before any baseline is seeded MUST NOT fail on the baseline's absence —
+    # there is nothing to regress against; the operator is told to seed one.
+    cards = await _all_cards()
+    report = compare_to_baseline(cards, path=tmp_path / "nope.json")
+    assert not report.baseline_present
+    assert report.passed
+    assert "eval-update-baseline" in report.summary()
+
+
+async def test_new_suite_since_baseline_is_reported_not_a_regression(
+    tmp_path: Path,
+) -> None:
+    # QA-EVAL-R7 + I7 interop: a suite added since the baseline (a new I7 dataset) has no
+    # prior value, so it is REPORTED as new and never counted as a regression — the gate
+    # stays green until the next deliberate `update-baseline`.
+    cards = await _all_cards()
+    doc = build_baseline(cards)
+    del doc["suites"]["readiness"]
+    path = tmp_path / "missing-readiness.json"
+    path.write_text(json.dumps(doc))
+    report = compare_to_baseline(cards, path=path)
+    assert report.passed
+    assert "readiness" in report.new_suites
+
+
+async def test_update_baseline_round_trips(tmp_path: Path) -> None:
+    # `update-baseline` writes a document a fresh run reads back as a non-regression.
+    cards = await _all_cards()
+    path = tmp_path / "baseline.json"
+    write_baseline(cards, path=path)
+    assert path.exists()
+    report = compare_to_baseline(cards, path=path)
+    assert report.baseline_present
+    assert report.passed
+
+
+def test_update_baseline_cli_rewrites_and_run_stays_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # QA-EVAL-R12(c): `update-baseline` actually rewrites the artifact (no longer a no-op),
+    # and a subsequent `run` (with its non-regression gate active) stays green against it.
+    target = tmp_path / "baseline-scorecard.json"
+    monkeypatch.setattr("wattwise_core.eval.baseline.BASELINE_PATH", target)
+    assert cli_main(["update-baseline"]) == 0
+    assert target.exists(), "update-baseline MUST write the baseline artifact (not a no-op)"
+    out = tmp_path / "scorecard.json"
+    assert cli_main(["run", "--mode=recorded", f"--scorecard={out}"]) == 0

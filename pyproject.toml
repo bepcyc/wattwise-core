@@ -119,6 +119,7 @@ markers = [
   "fuzz: fuzz tests over decoders/parsers (TIER-R5)",
   "inject: prompt-injection isolation tests (INJ-R2)",
   "logging: logging-contract / redaction tests (QA-LOG-R*)",
+  "llm: live-LLM tier (real model; skipped unless WATTWISE_LLM_API_KEY is set; never in the offline gate)",
 ]
 
 [tool.coverage.run]
@@ -127,12 +128,25 @@ source = ["wattwise_core"]
 omit = ["*/migrations/*", "*/__main__.py"]
 
 [tool.coverage.report]
+# Global floor (DOD-R1): the whole package must clear ≥ 80% line+branch; the
+# `just cov` recipe passes `--cov-fail-under=80` for this combined run.
+fail_under = 80
 exclude_also = [
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
   "@(abc\\.)?abstractmethod",
   "\\.\\.\\.",
 ]
+
+# Per-package ≥ 95% line+branch FLOOR for the two correctness-critical packages
+# (DOD-R1): the analytics metrics engine and the ingestion adapters. This is
+# ENFORCED by the `just cov-critical` recipe, which scopes `--cov` to exactly
+# `wattwise_core.analytics` + `wattwise_core.ingestion.adapters` and fails under
+# 95. Recorded here (non-executable note) so the floor + its scope are visible at
+# the config layer, not only in the Justfile. Keep the two values in sync.
+[tool.coverage.paths]
+analytics = ["src/wattwise_core/analytics"]
+ingestion_adapters = ["src/wattwise_core/ingestion/adapters"]
 
 [tool.ruff]
 line-length = 100

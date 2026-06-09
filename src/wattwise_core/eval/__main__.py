@@ -4,10 +4,14 @@ The justfile / CI invoke ``python -m wattwise_core.eval run --mode=recorded
 --scorecard=...`` to gate the build: it runs every suite over the versioned checked-in
 datasets with the deterministic offline model, writes a machine-readable JSON scorecard
 (EVAL-R9), and EXITS NON-ZERO when any suite metric falls below its hard threshold
-(EVAL-R1: "CI MUST fail the build when suite metrics fall below thresholds"). The
-``record`` / ``update-baseline`` subcommands the justfile references are present so the
-recorded-response fixtures (QA-EVAL-R9) can be regenerated; in the OSS offline engine the
-datasets ARE the committed fixtures, so these are deterministic no-op confirmations.
+(EVAL-R1: "CI MUST fail the build when suite metrics fall below thresholds"). ``run`` ALSO
+enforces non-regression against the committed baseline scorecard (QA-EVAL-R7): beyond the
+absolute thresholds it exits non-zero if any tracked suite metric drops below the stored
+baseline — so a safety-suite regression fails the build even when the absolute score still
+passes. The ``record`` subcommand is a deterministic confirmation that the recorded-response
+fixtures (QA-EVAL-R9) load; in the OSS offline engine the datasets ARE the committed
+fixtures. ``update-baseline`` regenerates the baseline artifact from a clean run (the
+reviewed way to advance the floor after a deliberate, intended improvement).
 
 Network-free and deterministic (TIER-R1): every suite runs in recorded-response mode only.
 """
@@ -20,6 +24,7 @@ import json
 import sys
 from pathlib import Path
 
+from wattwise_core.eval.baseline import compare_to_baseline, write_baseline
 from wattwise_core.eval.runner import EvalMode, Scorecard, list_suites, run_suite
 
 
@@ -39,7 +44,14 @@ def _write_scorecard(cards: list[Scorecard], path: Path) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """Run all suites, write the scorecard, fail CI on any below-threshold suite (EVAL-R1)."""
+    """Run all suites, gate on absolute thresholds AND baseline non-regression.
+
+    Two independent gates, both of which must pass (EVAL-R1 + QA-EVAL-R7): every suite must
+    clear its absolute per-suite threshold, and no tracked suite metric may drop below the
+    committed baseline. A safety-suite regression fails the build even if its absolute score
+    would still pass (QA-EVAL-R7). When ``--no-baseline`` is set the regression gate is
+    skipped (used only by ``update-baseline``, which is about to overwrite the baseline).
+    """
     cards = asyncio.run(_run_all())
     if args.scorecard:
         _write_scorecard(cards, Path(args.scorecard))
@@ -50,6 +62,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if failed:
         print(f"eval gate FAILED: {', '.join(failed)}", file=sys.stderr)
         return 1
+    if not args.no_baseline:
+        report = compare_to_baseline(cards)
+        for suite in report.new_suites:
+            print(f"[NEW]  {suite} (no baseline yet; run eval-update-baseline)")
+        if not report.passed:
+            print(
+                f"eval NON-REGRESSION gate FAILED (QA-EVAL-R7): {report.summary()}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"non-regression: {report.summary()}")
     print("eval gate PASSED")
     return 0
 
@@ -62,9 +85,24 @@ def _cmd_record(_args: argparse.Namespace) -> int:
 
 
 def _cmd_update_baseline(_args: argparse.Namespace) -> int:
-    """Re-run the suites to confirm the committed baseline still gates green."""
+    """Regenerate the committed baseline scorecard from a clean run (QA-EVAL-R7).
+
+    The reviewed way to advance the non-regression floor: re-runs every suite and rewrites
+    ``baseline-scorecard.json`` with the freshly measured per-suite metrics. REFUSES to
+    write a baseline that does not itself clear the absolute thresholds — a baseline must
+    record a passing run, never enshrine a failing one as the floor.
+    """
     cards = asyncio.run(_run_all())
-    print(f"baseline reconfirmed: {sum(c.passed for c in cards)}/{len(cards)} suites pass")
+    failed = [c.suite for c in cards if not c.passed]
+    if failed:
+        print(
+            "refusing to write baseline: these suites fail their absolute gate: "
+            f"{', '.join(failed)}",
+            file=sys.stderr,
+        )
+        return 1
+    path = write_baseline(cards)
+    print(f"baseline written: {path} ({len(cards)} suites)")
     return 0
 
 
@@ -75,6 +113,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run all suites and gate the build (EVAL-R1)")
     run.add_argument("--mode", default="recorded", choices=["recorded"])
     run.add_argument("--scorecard", default=None, help="path to write the JSON scorecard")
+    run.add_argument(
+        "--no-baseline",
+        action="store_true",
+        help="skip the QA-EVAL-R7 non-regression check (used by update-baseline)",
+    )
     run.set_defaults(func=_cmd_run)
 
     rec = sub.add_parser("record", help="verify recorded-response fixtures")
