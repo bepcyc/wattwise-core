@@ -7,18 +7,16 @@ failing source never crashes the run), AUT-R2/SEC-R7 (the credential is resolved
 an opaque ``credential_ref`` only at the point of use), ARCH-R2 (no source-name
 branching outside adapters).
 
-:meth:`SyncOrchestrator.run` flow, for the *server-derived* athlete (AUTH-R3): resolve
-the requested connection(s) to their registered ``source_key`` and select the adapter
-via the registry (never by importing a named adapter — Principle A / ARCH-R2); resolve
-the opaque ``credential_ref`` to the live secret in-memory at the point of use (SEC-R7)
-and let the adapter's IMPURE client fetch source-shaped objects (ASBOs), kept OUT of
-the pure :meth:`SourceAdapter.map`; map each ASBO -> canonical :class:`GboCandidate`
-under a caller-built :class:`FetchContext` so ``map`` never reads the clock (MAP-R1);
-land the batch through :class:`IngestService` in ONE session transaction (UPS-R6). A
-source that errors is recorded DEGRADED on the :class:`SyncRun` and the run continues
-(CON-R3 / ARCH-R9) — it NEVER raises past the other sources; each source lands in its
-own transaction, so an ingest error rolls that source back and never fabricates a
-partial canonical record (fail-closed).
+:meth:`SyncOrchestrator.run` flow, for the *server-derived* athlete (AUTH-R3): select the
+adapter via the registry (never importing a named adapter — ARCH-R2); on incremental mode
+narrow the window forward of the watermark so already-current ranges are skipped (ADP-R6);
+resolve the opaque ``credential_ref`` only at the point of use (SEC-R7); fetch ASBOs
+(impure) and pure-map each in ISOLATION (MAP-R1) so a single un-mappable record becomes a
+range-precise gap while the good records still commit (ING-GAP-R5 / ING-UPS-R3); land the
+batch through :class:`IngestService` in ONE transaction that ALSO advances the watermark
+(SYN-R3) and self-heals covered transient gaps (ING-GAP-R4) — store, cursor, and gap state
+stay mutually consistent (ING-UPS-R2). A source that errors degrades and never crashes the
+others (CON-R3 / ARCH-R9), rolling that source back without fabricating a partial record.
 
 Layer: L3 ingestion/sync — the ONLY writer to the store (ARCH-R3, via
 :class:`IngestService`); imports NO named adapter module (ARCH-R2) and NO L6 edge.
@@ -37,11 +35,17 @@ from typing import Any, Protocol, runtime_checkable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import AuthArchetype
+from wattwise_core.ingestion._sync_records import (
+    MappedBatch,
+    incremental_floor_date,
+    map_records_isolated,
+    open_record_gaps,
+)
 from wattwise_core.ingestion.base import FetchContext, SourceAdapter, SourceDescriptorRef
 from wattwise_core.ingestion.ingest import IngestService, OriginalFile
 from wattwise_core.ingestion.registry import AdapterRegistry, UnknownSourceError
+from wattwise_core.ingestion.watermark import SyncedRange
 from wattwise_core.observability.logging import get_logger
 from wattwise_core.persistence.models import Connection, SourceDescriptor
 from wattwise_core.persistence.types import utcnow, uuid7
@@ -226,9 +230,12 @@ class SyncOrchestrator:
             oldest=(fetched_at - _DEFAULT_LOOKBACK).date().isoformat(),
             newest=fetched_at.date().isoformat(),
         )
+        explicit_window = window is not None
         connections = await self._select_connections(athlete_id, connection_id, source)
         for conn in connections:
-            result = await self._sync_one(athlete_id, conn, win, fetched_at, run.sync_run_id)
+            result = await self._sync_one(
+                athlete_id, conn, win, fetched_at, run.sync_run_id, explicit_window
+            )
             run.results.append(result)
         return run
 
@@ -259,6 +266,7 @@ class SyncOrchestrator:
         window: SyncWindow,
         fetched_at: _dt.datetime,
         sync_run_id: str,
+        explicit_window: bool,
     ) -> SourceSyncResult:
         """Fetch -> map -> land ONE source, never raising past it (CON-R3 / ARCH-R9)."""
         try:
@@ -269,8 +277,16 @@ class SyncOrchestrator:
             # No direct-API fetch seam (e.g. connectionless file upload): nothing to
             # pull on demand. Skipped, not degraded — this is the expected shape.
             return _skipped(target, "source has no on-demand fetch")
+        # ADP-R6: on incremental mode (no explicit window) skip the already-watermarked
+        # range — fetch only forward of the source's high-water cursor.
+        if not explicit_window:
+            floor = await incremental_floor_date(
+                self._session_factory, _uid(athlete_id), _uid(target.source_descriptor_id),
+                window.oldest,
+            )
+            window = SyncWindow(oldest=floor, newest=window.newest)
         try:
-            candidates = await self._fetch_and_map(adapter, target, window, fetched_at, sync_run_id)
+            batch = await self._fetch_and_map(adapter, target, window, fetched_at, sync_run_id)
         except Exception as exc:  # isolate the source failure; degrade not crash (ARCH-R9)
             _log.warning(
                 "sync.source_degraded",
@@ -280,7 +296,9 @@ class SyncOrchestrator:
             )
             return _degraded(target, "source fetch or mapping failed")
         originals = adapter.original_files() if isinstance(adapter, OriginalArtifactSource) else []
-        return await self._land(athlete_id, target, candidates, sync_run_id, originals)
+        return await self._land(
+            athlete_id, target, batch, window, sync_run_id, fetched_at, originals
+        )
 
     async def _fetch_and_map(
         self,
@@ -289,8 +307,8 @@ class SyncOrchestrator:
         window: SyncWindow,
         fetched_at: _dt.datetime,
         sync_run_id: str,
-    ) -> list[GboCandidate]:
-        """Resolve the credential, fetch ASBOs (impure), and pure-map to candidates."""
+    ) -> MappedBatch:
+        """Fetch ASBOs (impure), then pure-map each in ISOLATION (ING-GAP-R5/ING-UPS-R3)."""
         api_key = self._resolve_api_key(target)
         asbos = await adapter.fetch(
             api_key=api_key,
@@ -298,19 +316,14 @@ class SyncOrchestrator:
             window=window,
         )
         ctx = FetchContext(
-            ingest_run_id=sync_run_id,
-            fetched_at=fetched_at,
-            connection_id=target.connection_id,
+            ingest_run_id=sync_run_id, fetched_at=fetched_at, connection_id=target.connection_id
         )
         ref = SourceDescriptorRef(
             source_descriptor_id=target.source_descriptor_id,
             source_key=target.source_key,
             kind=target.kind,
         )
-        candidates: list[GboCandidate] = []
-        for asbo in asbos:
-            candidates.extend(adapter.map(asbo, ref, ctx))
-        return candidates
+        return map_records_isolated(adapter, asbos, ref, ctx, source_key=target.source_key)
 
     def _resolve_api_key(self, target: _ConnectionTarget) -> str | None:
         """Resolve the opaque ``credential_ref`` to the live secret (CLI-R13, SEC-R7).
@@ -328,27 +341,35 @@ class SyncOrchestrator:
         self,
         athlete_id: str,
         target: _ConnectionTarget,
-        candidates: list[GboCandidate],
+        batch: MappedBatch,
+        window: SyncWindow,
         sync_run_id: str,
+        fetched_at: _dt.datetime,
         original_files: list[OriginalFile],
     ) -> SourceSyncResult:
-        """Land the mapped batch through :class:`IngestService` in ONE transaction.
+        """Land the batch in ONE transaction with the cursor + gap bookkeeping (ING-UPS-R2).
 
-        Any verbatim originals the source acquired are captured tier-1 in the SAME
-        landing transaction (ING-R8/FIL-R1); a direct-API source supplies none.
+        The upsert, the watermark advance (SYN-R3), the self-heal of transient gaps the
+        synced range covers (ING-GAP-R4), the per-record range-precise gap (ING-GAP-R5),
+        and the tier-1 original capture (ING-R8/FIL-R1) ALL commit in the SAME transaction.
         """
-        if not candidates:
+        if not batch.candidates and not batch.failed:
             return SourceSyncResult.ok(target, candidates_mapped=0)
+        synced = _synced_range(window, self._now())
         try:
             async with self._session_factory() as session:
-                ingest = IngestService(session)
-                outcome = await ingest.ingest(
+                outcome = await IngestService(session).ingest(
                     athlete_id,
                     target.source_descriptor_id,
-                    candidates,
+                    batch.candidates,
                     connection_id=target.connection_id,
                     ingest_run_id=_uid(sync_run_id),
                     original_files=original_files or None,
+                    synced_range=synced,
+                )
+                await open_record_gaps(
+                    session, _uid(athlete_id), _uid(target.source_descriptor_id), batch.failed,
+                    ingest_run_id=_uid(sync_run_id), seen_at=fetched_at,
                 )
         except Exception as exc:  # rolled back by the session ctx; degrade not crash (ARCH-R9)
             _log.warning(
@@ -358,9 +379,19 @@ class SyncOrchestrator:
                 error_type=type(exc).__name__,
             )
             return _degraded(target, "writing the canonical batch failed")
+        if batch.failed:  # partial failure: good records landed, failed range gap-marked
+            return SourceSyncResult(
+                source_key=target.source_key,
+                connection_id=target.connection_id,
+                outcome=SyncOutcome.DEGRADED,
+                candidates_mapped=len(batch.candidates),
+                activities_written=len(outcome.activities_written),
+                wellness_written=outcome.wellness_written,
+                detail="some records could not be mapped",
+            )
         return SourceSyncResult.ok(
             target,
-            candidates_mapped=len(candidates),
+            candidates_mapped=len(batch.candidates),
             activities_written=len(outcome.activities_written),
             wellness_written=outcome.wellness_written,
         )
@@ -406,6 +437,14 @@ def _skipped(target: _ConnectionTarget, detail: str) -> SourceSyncResult:
 
 def _uid(value: str | uuid.UUID) -> uuid.UUID:
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+
+
+def _synced_range(window: SyncWindow, now: _dt.datetime) -> SyncedRange:
+    """The committed [oldest, newest end-of-day] time range a sync covered (ING-GAP-R4)."""
+    start = _dt.datetime.fromisoformat(window.oldest).replace(tzinfo=_dt.UTC)
+    end = _dt.datetime.fromisoformat(window.newest).replace(tzinfo=_dt.UTC)
+    return SyncedRange(oldest=start, newest=end + _dt.timedelta(days=1) - _dt.timedelta(seconds=1),
+                       now=now)
 
 
 __all__ = [

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -33,32 +32,32 @@ from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
-from wattwise_core.domain.enums import Fidelity, GboType, trust_rank
+from wattwise_core.domain.enums import GboType
 from wattwise_core.ingestion import _canonical as _cw
 from wattwise_core.ingestion._candidate_store import (
     persist_candidates_bulk,
     prepare_batch,
 )
 from wattwise_core.ingestion._canonical import OriginalFile
-from wattwise_core.ingestion.dedup import resolve_activity_identity, resolve_field
-from wattwise_core.ingestion.trust import TrustPolicy, load_trust_policy
+from wattwise_core.ingestion._mapping import (
+    _ACTIVITY_SCALARS,
+    _LAP_SCALARS,
+    _activity_values,
+    _highest_trust,
+    _parse_date,
+    _parse_start_time,
+    _resolve_scalars,
+    _validate_payload,
+    _whole_source_tier_of,
+)
+from wattwise_core.ingestion.dedup import resolve_activity_identity
+from wattwise_core.ingestion.trust import load_trust_policy
+from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
 from wattwise_core.persistence.models import Activity, SourceCandidate
-from wattwise_core.persistence.models.athlete_preference import WHOLE_SOURCE_CHANNEL
-from wattwise_core.persistence.types import utcnow, uuid7
+from wattwise_core.persistence.types import uuid7
 from wattwise_core.persistence.upsert import upsert
 from wattwise_core.storage import ObjectStore, create_object_store
 
-# Canonical scalar fields carried on an activity candidate's payload (resolved per
-# field across candidates; streams/laps are handled separately).
-_ACTIVITY_SCALARS = (
-    "start_time", "sport", "sub_sport", "elapsed_time_s", "moving_time_s", "distance_m",
-    "total_work_j", "energy_kj", "avg_power_w", "max_power_w", "avg_hr_bpm", "max_hr_bpm",
-    "avg_cadence_rpm", "avg_speed_mps", "elevation_gain_m", "avg_temp_c", "device_class",
-)
-_LAP_SCALARS = (
-    "start_offset_s", "duration_s", "distance_m", "avg_power_w", "max_power_w",
-    "avg_hr_bpm", "max_hr_bpm", "avg_cadence_rpm", "avg_speed_mps", "elevation_gain_m",
-)
 _IDENTITY_WINDOW = _dt.timedelta(hours=2)
 
 
@@ -70,6 +69,8 @@ class IngestResult:
     wellness_written: int = 0
     candidates_persisted: int = 0
     candidates_failed: int = 0
+    watermarks_advanced: int = 0
+    gaps_closed: int = 0
 
 
 class IngestService:
@@ -98,6 +99,7 @@ class IngestService:
         connection_id: str | uuid.UUID | None = None,
         ingest_run_id: uuid.UUID | None = None,
         original_files: list[OriginalFile] | None = None,
+        synced_range: SyncedRange | None = None,
     ) -> IngestResult:
         """Land candidates into the canonical store in DURABLE, fault-isolated batches.
 
@@ -109,7 +111,12 @@ class IngestService:
         batches durably persisted (ING-UPS-R3 / ACC-4) — SAVEPOINTs alone would be lost on an
         outer rollback. ``original_files`` are stored verbatim and linked via ``activity_file``
         (ING-R8/FIL-R1). Wellness candidates resolve across ALL same-day candidates (CONF-R2),
-        written and committed with the final batch.
+        never last-write-wins.
+
+        When ``synced_range`` is given, the per-``gbo_type`` watermark is advanced and any
+        OPEN transient gap fully inside that range is closed — AFTER all batch data has been
+        committed above (SYN-R3 / ING-UPS-R2 / ING-GAP-R4), so store, cursor, and gap state
+        stay mutually consistent and a crash mid-run never advances past un-committed data (ING-R6).
         """
         athlete = _uid(athlete_id)
         descriptor = _uid(source_descriptor_id)
@@ -128,6 +135,16 @@ class IngestService:
         for local_date in wellness_dates:
             await self._write_wellness(athlete, local_date)
             result.wellness_written += 1
+        if synced_range is not None:
+            # Advance the watermark + self-heal covered transient gaps (SYN-R3 / ING-UPS-R2 /
+            # ING-GAP-R4) AFTER all batch data is committed above, so cursor/gap state never
+            # diverge from durable data and a crash never advances past un-committed data (ING-R6).
+            advanced = await advance_and_heal(
+                self._session, athlete, descriptor, candidates, synced_range,
+                ingest_run_id=run_id,
+            )
+            result.watermarks_advanced = advanced.watermarks_advanced
+            result.gaps_closed = advanced.gaps_closed
         await self._session.commit()
         return result
 
@@ -261,14 +278,6 @@ def _batched(candidates: list[GboCandidate], size: int | None) -> list[list[GboC
     return [candidates[i : i + size] for i in range(0, len(candidates), size)]
 
 
-def _validate_payload(cand: GboCandidate) -> None:
-    """Parse the resolution-critical payload fields, raising on a malformed candidate."""
-    if cand.gbo_type == GboType.ACTIVITY.value:
-        _parse_start_time(cand.payload["start_time"])
-    elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
-        _parse_date(cand.payload["local_date"])
-
-
 async def _land_batch(
     svc: IngestService,
     athlete: uuid.UUID,
@@ -362,116 +371,8 @@ async def _wellness_candidates(
     return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
 
 
-def _resolve_scalars(
-    candidates: list[SourceCandidate], fields: tuple[str, ...], policy: TrustPolicy
-) -> tuple[dict[str, Any], dict[str, object]]:
-    """Resolve each scalar field across candidates + build its coverage (CONF-R2/R5).
-
-    Returns ``(resolved_values, coverage)``. Each field is resolved with its EFFECTIVE
-    per-channel trust tier (``policy.tier(candidate, fname)`` — the configurable PRV-R7
-    re-rank, defaulting to the adapter tier when unconfigured). A field whose >=2
-    contributors materially disagree beyond the per-field dispute tolerance gets
-    ``coverage.disputed=True`` — the best value is still selected, the disagreement is
-    surfaced not hidden (CONF-R5).
-    """
-    resolved: dict[str, Any] = {}
-    coverage: dict[str, object] = {}
-    for fname in fields:
-        tier_of = _channel_tier_of(policy, fname)  # effective per-channel tier (PRV-R7)
-        contributors = _cw.field_candidates(candidates, fname, tier_of)
-        winner = resolve_field(contributors, dispute_tolerance=_cw.dispute_tolerance(fname))
-        if winner is None:
-            continue
-        resolved[fname] = winner.value
-        # Badge the RESOLVED WINNER's tier, NOT an arbitrary scanned contributor (PRV-R6).
-        coverage[fname] = _cw.coverage_for(
-            True, winner.winning_trust_tier, disputed=winner.disputed
-        ).to_jsonable()
-    return resolved, coverage
-
-
-_ACTIVITY_COLUMNS = frozenset(Activity.__table__.columns.keys())
-
-
-def _activity_values(
-    activity_id: uuid.UUID, athlete: uuid.UUID, scalars: dict[str, Any], coverage: dict[str, object]
-) -> tuple[dict[str, Any], list[str]]:
-    """The activity row value-dict + the update-on-collision set for the atomic upsert (UPS-R2).
-
-    Carries the resolved scalars (``start_time`` parsed to tz-aware UTC), the derived
-    ``has_power``/``has_hr``/``coverage`` flags, and a fresh ``updated_at``. ``sport`` is
-    NOT NULL, so a new row defaults to ``"other"`` when unresolved. The returned update set
-    is exactly the resolved/derived columns — ``sport`` is included ONLY when resolved, so a
-    conflicting (existing) row never has a previously-resolved value regressed to a default,
-    matching the prior setattr-only behaviour (no zero-filling, PRV-R6).
-    """
-    values: dict[str, Any] = {"activity_id": activity_id, "athlete_id": athlete}
-    update_columns: list[str] = []
-    for key, value in scalars.items():
-        col = "start_time" if key == "start_time" else key
-        if col not in _ACTIVITY_COLUMNS:
-            continue
-        values[col] = _parse_start_time(value) if key == "start_time" else value
-        update_columns.append(col)
-    values.setdefault("sport", "other")  # NOT NULL on a fresh insert; refreshed only if resolved
-    values["has_power"] = scalars.get("avg_power_w") is not None
-    values["has_hr"] = scalars.get("avg_hr_bpm") is not None
-    values["coverage"] = coverage
-    values["updated_at"] = utcnow()
-    update_columns += ["has_power", "has_hr", "coverage", "updated_at"]
-    return values, update_columns
-
-
-def _channel_tier_of(
-    policy: TrustPolicy, channel: str
-) -> Callable[[SourceCandidate], Fidelity]:
-    """A channel-bound effective-tier seam ``(candidate) -> Fidelity`` for ``_canonical``.
-
-    Binds the channel so the single-arg ``tier_of`` the ``_canonical`` helpers call
-    resolves the EFFECTIVE per-channel tier (PRV-R7), keeping ``dedup.resolve_field`` and
-    the ``_canonical`` helpers free of any DB read — the policy is already in memory.
-    """
-    return lambda candidate: policy.tier(candidate, channel)
-
-
-def _whole_source_tier_of(policy: TrustPolicy) -> Callable[[SourceCandidate], Fidelity]:
-    """The effective-tier seam bound to the whole-source channel (``"*"``).
-
-    Used for record-level surfaces (streams, wellness) that resolve under the
-    whole-source effective tier: per-athlete ``"*"`` override → descriptor ``"*"`` /
-    ``default_fidelity`` → the candidate's adapter tier (the prior behaviour when
-    unconfigured).
-    """
-    return lambda candidate: policy.tier(candidate, WHOLE_SOURCE_CHANNEL)
-
-
-def _tier_of(candidate: SourceCandidate) -> Fidelity:
-    """The candidate's ACTUAL adapter-assigned tier (NOT re-ranked by config).
-
-    Used only for config-independent candidate selection (e.g. which candidate's ``laps``
-    payload to take, ``_highest_trust``) — never for field-level conflict resolution,
-    which goes through the configurable :class:`TrustPolicy`.
-    """
-    raw = candidate.trust_profile.get("tier", Fidelity.PLATFORM_COMPUTED.value)
-    return Fidelity(str(raw))
-
-
-def _highest_trust(candidates: list[SourceCandidate]) -> SourceCandidate:
-    return min(candidates, key=lambda c: (trust_rank(_tier_of(c)), str(c.source_descriptor_id)))
-
-
-def _parse_start_time(value: Any) -> _dt.datetime:
-    """Parse a stored ISO start_time back to a tz-aware UTC datetime."""
-    dt = value if isinstance(value, _dt.datetime) else _dt.datetime.fromisoformat(str(value))
-    return dt if dt.tzinfo else dt.replace(tzinfo=_dt.UTC)
-
-
-def _parse_date(value: Any) -> _dt.date:
-    return value if isinstance(value, _dt.date) else _dt.date.fromisoformat(str(value))
-
-
 def _uid(value: str | uuid.UUID) -> uuid.UUID:
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
 
 
-__all__ = ["IngestResult", "IngestService", "OriginalFile"]
+__all__ = ["IngestResult", "IngestService", "OriginalFile", "SyncedRange"]

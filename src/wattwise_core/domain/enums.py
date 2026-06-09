@@ -154,6 +154,40 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+class GapReason(StrEnum):
+    """The closed typed-gap reason taxonomy (ING-GAP-R3).
+
+    The complete acquisition/mapping/conflict reason set a partial failure is recorded
+    under (ING-GAP-R1/R2). It is exactly the ten members ING-GAP-R3 mandates AT MINIMUM;
+    it MUST NOT carry an analytics-dependency reason (those belong to the Analytics
+    spec). A field with >=1 contributing candidate is NEVER a gap — material
+    disagreement is the coverage ``disputed`` flag, not a reason here (PRV-R5).
+    """
+
+    AUTH_REVOKED = "auth_revoked"
+    NEEDS_REAUTH = "needs_reauth"
+    RATE_LIMITED = "rate_limited"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    DISCOVERY_INCOMPLETE = "discovery_incomplete"
+    FETCH_FAILED = "fetch_failed"
+    SCHEMA_MISMATCH = "schema_mismatch"
+    MAPPING_FIELD_MISSING = "mapping_field_missing"
+    SOURCE_REMOVED = "source_removed"
+    COVERAGE_STALE = "coverage_stale"
+
+
+class GapState(StrEnum):
+    """A typed gap's lifecycle state (ING-GAP-R4).
+
+    A gap opens on a partial failure (ING-GAP-R5) and a transient one is self-healing:
+    a later successful sync covering the same range closes it. A consumer MUST be able
+    to distinguish ``open`` from ``closed`` (ING-GAP-R4).
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
 class SignatureOrigin(StrEnum):
     """How a ``fitness_signature`` was obtained (GBO-R26)."""
 

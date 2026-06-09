@@ -13,7 +13,16 @@ Owning requirements:
   ``is_superseded``, ``content_hash``, observed/fetched clocks, adapter/mapping
   versions, trust profile, confidence, ingest run id, untrusted-content flag.
 
-Tier-2 store (GBO-R8c): NEVER read by consumers (LIN-R4).
+* ``ingestion_watermark`` — the idempotent incremental cursor per
+  ``(athlete_id, source_descriptor_id, gbo_type, stream)`` (SYN-R2); advanced
+  transactionally with the batch it represents (SYN-R3) and honored by discover
+  (ADP-R6).
+* ``ingestion_gap`` — the first-class typed gap recording a partial failure
+  (ING-GAP-R1..R6): typed ``reason`` taxonomy, open/closed state, range-precision.
+
+Tier-2 store (GBO-R8c): NEVER read by consumers (LIN-R4). The watermark and gap entities
+are source-derived canonical data, written ONLY by the Ingestion/Sync service (ARCH-R3
+canonical-write partition), never by the master-data-write or agent-state-write roles.
 """
 
 from __future__ import annotations
@@ -27,7 +36,10 @@ from sqlalchemy.orm import Mapped, mapped_column, validates
 from wattwise_core.domain.enums import (
     AuthArchetype,
     ConnectionStatus,
+    GapReason,
+    GapState,
     GboType,
+    Severity,
     SourceKind,
 )
 from wattwise_core.persistence.base import Base, TimestampMixin
@@ -207,4 +219,121 @@ class SourceCandidate(Base, TimestampMixin):
     resolved_signature_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
 
 
-__all__ = ["Connection", "SourceCandidate", "SourceDescriptor"]
+class IngestionWatermark(Base, TimestampMixin):
+    """The idempotent incremental cursor per ingest scope (SYN-R2).
+
+    ONE row per ``(athlete_id, source_descriptor_id, gbo_type, stream)`` — the watermark
+    scope SYN-R2 mandates; ``stream`` is the optional sub-key (NULL for record-level GBO
+    types, a channel name when a per-stream cursor is needed). It captures BOTH a
+    **high-water timestamp/cursor** (``high_water_at`` / ``cursor``) AND a **content
+    hint** (``content_hint`` — e.g. the last ``observed_at`` or ``content_hash``) so a
+    changed-but-not-new record is re-fetched rather than skipped (SYN-R2). It is the
+    source-derived canonical cursor written ONLY by the Ingestion/Sync service in the
+    SAME transaction as the batch upsert it represents (SYN-R3 / ING-UPS-R2), so a crash
+    mid-run never advances past un-committed data and a re-run resumes from the committed
+    cursor (ING-R6). Discover honors it for incremental mode (ADP-R6).
+
+    NULL ``stream`` cannot participate in a portable UNIQUE constraint identically across
+    backends, so the empty sentinel ``""`` denotes "no stream sub-key"; the unique key is
+    over the four non-null columns.
+    """
+
+    __tablename__ = "ingestion_watermark"
+    __table_args__ = (
+        UniqueConstraint(
+            "athlete_id",
+            "source_descriptor_id",
+            "gbo_type",
+            "stream",
+            name="uq_ingestion_watermark_scope",
+        ),
+        Index(
+            "ix_ingestion_watermark_scope",
+            "athlete_id",
+            "source_descriptor_id",
+            "gbo_type",
+        ),
+    )
+
+    ingestion_watermark_id: Mapped[uuid.UUID] = pk_column()
+    athlete_id: Mapped[uuid.UUID] = fk_uuid_column("athlete.athlete_id", nullable=False)
+    source_descriptor_id: Mapped[uuid.UUID] = fk_uuid_column(
+        "source_descriptor.source_descriptor_id", nullable=False
+    )
+    gbo_type: Mapped[GboType] = enum_column(GboType, nullable=False)
+    # Optional per-stream sub-key (SYN-R2 ``[, stream]``); ``""`` = no sub-key (so the
+    # composite UNIQUE is identical across SQLite/PostgreSQL/MariaDB — no NULL semantics).
+    stream: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    # High-water cursor: the most-recent ingested instant (timestamp half of SYN-R2).
+    high_water_at: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
+    # Opaque source-supplied cursor token (e.g. a discovery ``next_cursor`` watermark).
+    cursor: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Content hint (last observed_at / content_hash) so changed-but-not-new records are
+    # re-fetched and not silently skipped by discover (SYN-R2 / ADP-R6).
+    content_hint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    ingest_run_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+
+
+class IngestionGap(Base, TimestampMixin):
+    """A first-class typed gap: what acquisition/mapping/conflict could not complete.
+
+    The structured, queryable representation of a partial failure (ING-GAP-R1); never
+    swallowed nor logged-only. It identifies ``athlete_id``, ``source_descriptor_id``
+    (NULL for a source-agnostic gap), the affected ``gbo_type``, the time/record range it
+    covers, a typed ``reason``, ``severity``, the ``ingest_run_id``, first/last-seen
+    timestamps, and whether it is ``transient`` (auto-retryable) or ``terminal`` (needs
+    user/operator action) (ING-GAP-R2). It carries open/closed ``state`` plus a
+    ``closed_at`` closure timestamp so a transient gap is self-healing — a later
+    successful sync covering the same range closes it (ING-GAP-R4). It is range-precise:
+    it covers exactly the un-ingested range, leaving successfully ingested records in the
+    same run committed (ING-GAP-R5 / ING-UPS-R3). A genuine source-side absence is NOT a
+    gap (ING-GAP-R6).
+
+    The range is carried as an OPEN pair so EITHER a time range (``range_start_at`` /
+    ``range_end_at``) OR a discovery record range (``range_start_token`` /
+    ``range_end_token``) can be expressed without a second divergent schema.
+    """
+
+    __tablename__ = "ingestion_gap"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_gap_athlete_source_gbo",
+            "athlete_id",
+            "source_descriptor_id",
+            "gbo_type",
+        ),
+        Index("ix_ingestion_gap_state", "state"),
+        Index("ix_ingestion_gap_ingest_run_id", "ingest_run_id"),
+    )
+
+    ingestion_gap_id: Mapped[uuid.UUID] = pk_column()
+    athlete_id: Mapped[uuid.UUID] = fk_uuid_column("athlete.athlete_id", nullable=False)
+    # NULL for a source-agnostic gap (ING-GAP-R2 explicitly allows it).
+    source_descriptor_id: Mapped[uuid.UUID | None] = fk_uuid_column(
+        "source_descriptor.source_descriptor_id", nullable=True
+    )
+    gbo_type: Mapped[GboType] = enum_column(GboType, nullable=False)
+    reason: Mapped[GapReason] = enum_column(GapReason, nullable=False)
+    severity: Mapped[Severity] = enum_column(Severity, nullable=False)
+    state: Mapped[GapState] = enum_column(GapState, nullable=False, default=GapState.OPEN)
+    # transient = auto-retryable / self-healing; terminal = needs user/operator action.
+    transient: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # The covered range — a time range and/or a discovery record-token range (ING-GAP-R5).
+    range_start_at: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
+    range_end_at: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
+    range_start_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    range_end_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    ingest_run_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    first_seen_at: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
+    last_seen_at: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
+    # The closure timestamp ING-GAP-R4 mandates a transient gap records when it heals.
+    closed_at: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
+
+
+__all__ = [
+    "Connection",
+    "IngestionGap",
+    "IngestionWatermark",
+    "SourceCandidate",
+    "SourceDescriptor",
+]

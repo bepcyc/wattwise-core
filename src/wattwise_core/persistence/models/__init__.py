@@ -8,7 +8,8 @@ inheriting :class:`~wattwise_core.persistence.base.Base`.
 The clusters (and their owning GBO-R* IDs) are:
 
 * :mod:`.athlete`   — ``Athlete``, ``Sport``, ``SubSport``, ``TrainingZoneSet``.
-* :mod:`.source`    — ``SourceDescriptor``, ``Connection``, ``SourceCandidate``.
+* :mod:`.source`    — ``SourceDescriptor``, ``Connection``, ``SourceCandidate``,
+  ``IngestionWatermark`` (SYN-R2), ``IngestionGap`` (ING-GAP-R2).
 * :mod:`.athlete_preference` — ``AthleteSourcePreference`` (per-athlete trust
   override, PRV-R7).
 * :mod:`.activity`  — ``Activity``, ``ActivityLap``, ``ActivityStreamSet``,
@@ -58,6 +59,8 @@ from wattwise_core.persistence.models.planning import (
 from wattwise_core.persistence.models.signature import FitnessSignature
 from wattwise_core.persistence.models.source import (
     Connection,
+    IngestionGap,
+    IngestionWatermark,
     SourceCandidate,
     SourceDescriptor,
 )
@@ -81,6 +84,8 @@ __all__ = [
     "FitnessSignature",
     "FitnessStateDaily",
     "Goal",
+    "IngestionGap",
+    "IngestionWatermark",
     "NotificationRoute",
     "Plan",
     "PlanDay",
