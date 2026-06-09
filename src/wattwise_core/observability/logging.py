@@ -11,15 +11,19 @@ Contract realized here:
   (LOG-R3: ``trace_id``/``span_id``/``request_id``/``athlete_id``/``run_id``/
   ``thread_id``).
 - **LOG-R5 / PRIV-R5** A SINGLE central redactor (:func:`redact_processor`) runs
-  on EVERY event before it leaves the process, across all log streams (LOG-R6). It
-  combines three defenses: (1) **key-name** redaction — any event key whose name
-  matches the sensitive denylist is dropped/masked; (2) **value-pattern**
-  redaction — substrings inside string values that look like secrets/PII (bearer
-  tokens, API keys, emails, credential refs, base64 envelope material) are masked;
-  (3) **prompt/health containment** — known prompt/health-bearing keys are dropped.
-  Redaction is allowlist-friendly: known-safe correlation/operational keys pass;
-  everything unrecognized that *looks* sensitive is masked. Redaction is
-  unconditional — it is NEVER relaxed by debug/verbose mode (LOG-R4 / RUN-R4.2).
+  on EVERY event before it leaves the process, across all log streams (LOG-R6).
+  Redaction is **ALLOWLIST-based, never blocklist-based** (LOG-R5 / PRIV-R5 verbatim):
+  ONLY explicitly enumerated, known-safe operational/correlation fields are emitted
+  verbatim; EVERY other key — and EVERY non-string value, even under an allowed key —
+  is redacted/dropped by default. There is no deny-substring list to bypass: an
+  unknown key (``home_address``, ``athlete_name``, ``start_lat``) or a non-string
+  value (a raw ``hrv`` float, a health int) is masked because it is NOT on the
+  allowlist, not because it matched a known-bad name. As a defence-in-depth second
+  layer, the values of allowlisted *string* fields are additionally scrubbed for any
+  secret/PII substring (bearer tokens, API keys, emails, credential refs, base64
+  envelope material) so a token pasted into ``event``/``message`` is still masked.
+  Redaction is unconditional — it is NEVER relaxed by debug/verbose mode (LOG-R4 /
+  RUN-R4.2).
 
 The redactor is exported so the audit-log and agent/eval-trace streams (LOG-R6.2 /
 LOG-R6.3) reuse the SAME function — there is exactly one redactor in the system.
@@ -30,7 +34,6 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from collections.abc import MutableMapping
 from typing import Any
 
 import structlog
@@ -40,75 +43,75 @@ from structlog.typing import EventDict, WrappedLogger
 
 _MASK = "[REDACTED]"
 
-# (1) Key-name denylist (LOG-R5): any event key whose lowercased name contains one
-# of these tokens is masked outright. Covers secrets, credentials, tokens, raw
-# prompt/response/health payloads, and envelope ciphertext fields. This is a
-# denylist of DANGEROUS key *names*; the value-pattern pass (below) is the
-# allowlist-style net that catches sensitive values under innocuous-looking keys.
-_DENY_KEY_SUBSTRINGS: frozenset[str] = frozenset(
+# (1) Field ALLOWLIST (LOG-R5 / PRIV-R5): the COMPLETE set of event keys that may be
+# emitted. This is the redaction policy's single gate — it is allowlist-based, NOT
+# blocklist-based. A key NOT in this set is redacted by default; there is no
+# deny-substring escape hatch, so an arbitrary unknown PII/health/GPS key
+# (``athlete_name``, ``home_address``, ``start_lat``, ``resting_bpm``, …) is masked
+# precisely because it is unknown, never because it matched a known-bad name.
+#
+# Membership is restricted to fields that are operationally necessary AND structurally
+# incapable of carrying special-category (health) data, secrets, PII, raw
+# prompt/response content, or full request/response bodies (PRIV-R5):
+#   - structlog/render-injected envelope: timestamp, level, logger(_name), event;
+#   - LOG-R3 correlation ids (all opaque, never PII): trace_id, span_id, request_id,
+#     athlete_id (opaque internal id), run_id, thread_id;
+#   - bounded operational descriptors emitted by production call sites: status,
+#     outcome, duration_ms / latency_ms, path (URL path, no query/body), error_type
+#     (an exception class name, never the message), source / source_key /
+#     connection_id (opaque source + connection identifiers), schema (schema name),
+#     attempt / max_attempts (small ints — but see below: non-strings are still
+#     dropped unless the key is numeric-safe), requested_at (an ISO-8601 instant).
+# Every other key is redacted. This list is a security invariant (like the SEC-R2.1
+# signing-algorithm allowlist), not an operator-tunable, so it lives in code.
+_ALLOWED_KEYS: frozenset[str] = frozenset(
     {
-        "password",
-        "passwd",
-        "secret",
-        "token",  # access_token, refresh_token, signing_token, ...
-        "api_key",
-        "apikey",
-        "authorization",
-        "auth_header",
-        "credential",  # credential, credentials, credential_ref, raw_credential
-        "cred_ref",
-        "wrapped_key",
-        "wrapped_token",
-        "data_key",
-        "root_key",
-        "encryption_key",
-        "private_key",
-        "session_key",
-        "cookie",
-        "set-cookie",
-        "dsn",  # database DSN may embed a password
-        "prompt",  # raw model prompt content (PRIV-R5 / LOG-R5)
-        "completion",  # raw model response content
-        "response_text",
-        "messages",  # chat message arrays carry prompt/health content
-        "hrv",  # special-category health (GDPR Art. 9)
-        "heart_rate",
-        "heartrate",
-        "weight",
-        "health",
-        "payload",  # raw source payload may carry health/PII
-        "raw_body",
-        "request_body",
-        "response_body",
-    }
-)
-
-# Keys that are explicitly SAFE to emit verbatim even though a substring above
-# might otherwise match (e.g. "logger"). Keeps the correlation context intact.
-_SAFE_KEYS: frozenset[str] = frozenset(
-    {
+        # render/structlog envelope
         "timestamp",
         "level",
         "logger",
         "logger_name",
         "event",
-        "message",
+        # LOG-R3 correlation ids (opaque, never PII)
         "trace_id",
         "span_id",
         "request_id",
-        "athlete_id",  # opaque internal id, never PII (LOG-R3 / OBS-R2)
+        "athlete_id",
         "run_id",
         "thread_id",
-        "source",  # opaque source name (e.g. "intervals_icu"), not a secret
+        # bounded operational descriptors (no health/PII/secret/body)
         "status",
-        "duration_ms",
         "outcome",
+        "path",
+        "error_type",
+        "source",
+        "source_key",
+        "connection_id",
+        "schema",
+        "requested_at",
     }
 )
 
-# (2) Value-pattern denylist (LOG-R5): masks sensitive substrings inside string
-# values regardless of the key they appear under (e.g. a token pasted into a free
-# "message"). Ordered most-specific-first.
+# Allowlisted keys whose value is permitted to be a bounded NON-string scalar
+# (small bools/ints/floats that carry no health/PII — e.g. a latency in ms, a retry
+# attempt count). For every OTHER allowed key, only ``str`` values pass; any
+# non-string value (a raw ``hrv`` float, a health int, a nested object) is dropped,
+# so a sensitive value can never ride through under an allowed key as a number.
+_ALLOWED_NUMERIC_KEYS: frozenset[str] = frozenset(
+    {
+        "duration_ms",
+        "latency_ms",
+        "attempt",
+        "max_attempts",
+        "status_code",
+    }
+)
+_ALLOWED_KEYS = _ALLOWED_KEYS | _ALLOWED_NUMERIC_KEYS
+
+# (2) Value-pattern scrub (LOG-R5 defence-in-depth): even under an ALLOWLISTED string
+# key (e.g. a token pasted into a free-text ``event``/``message``), mask sensitive
+# substrings. This is a second layer BEHIND the allowlist, never a substitute for it.
+# Ordered most-specific-first.
 _VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Bearer / authorization header values.
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"),
@@ -127,30 +130,41 @@ _VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def _mask_value(value: str) -> str:
-    """Mask sensitive substrings inside a single string value (LOG-R5 pass 2)."""
+    """Mask sensitive substrings inside an allowlisted string value (LOG-R5 layer 2).
+
+    Defence-in-depth behind the field allowlist: a token/email/credential-ref pasted
+    into a permitted free-text field (``event``/``message``) is still masked.
+    """
     masked = value
     for pat in _VALUE_PATTERNS:
         masked = pat.sub(_MASK, masked)
     return masked
 
 
-def _redact_obj(value: Any) -> Any:
-    """Recursively redact a log value: mask strings, recurse into maps/sequences."""
+def _redact_one(key: str, value: Any) -> Any:
+    """Resolve one (key, value) pair against the ALLOWLIST (LOG-R5 / PRIV-R5).
+
+    Allowlist-based, never blocklist-based:
+
+    * a key NOT in :data:`_ALLOWED_KEYS` is masked outright — including arbitrary
+      unknown PII/health/GPS keys, because the policy emits ONLY known-safe fields;
+    * an allowlisted *string* value passes after the value-pattern scrub;
+    * an allowlisted *numeric-safe* key (``_ALLOWED_NUMERIC_KEYS``) passes a bounded
+      ``bool``/``int``/``float`` scalar verbatim;
+    * any OTHER value type under an allowed key (a float under ``hrv``-via-``status``,
+      a nested object, a list) is masked — a non-string can never ride through.
+    """
+    lkey = key.lower()
+    if lkey not in _ALLOWED_KEYS:
+        return _MASK
     if isinstance(value, str):
         return _mask_value(value)
-    if isinstance(value, MutableMapping):
-        return {k: _redact_one(k, v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return type(value)(_redact_obj(v) for v in value)
-    return value
-
-
-def _redact_one(key: str, value: Any) -> Any:
-    """Redact a single (key, value) pair by key-name then value-pattern."""
-    lkey = key.lower()
-    if lkey not in _SAFE_KEYS and any(token in lkey for token in _DENY_KEY_SUBSTRINGS):
-        return _MASK
-    return _redact_obj(value)
+    if lkey in _ALLOWED_NUMERIC_KEYS and isinstance(value, (bool, int, float)):
+        return value
+    # Allowed key, but a non-string / non-whitelisted-numeric value: drop it. This
+    # catches a raw health number, a nested mapping, or a sequence smuggled under an
+    # otherwise-safe key name.
+    return _MASK
 
 
 def redact_processor(
@@ -158,11 +172,12 @@ def redact_processor(
 ) -> EventDict:
     """Central emit-boundary redactor (LOG-R5 / PRIV-R5).
 
-    Runs on EVERY event of EVERY stream before emission: key-name redaction +
-    value-pattern redaction + recursive scrub of nested structures. Never
-    relaxed by debug mode. The single source of truth for what may leave the
-    process — the audit and agent/eval streams (LOG-R6.2/R6.3) reuse this exact
-    function so there is only one redactor.
+    Runs on EVERY event of EVERY stream before emission. ALLOWLIST-based: emits
+    ONLY the explicitly enumerated known-safe fields (:data:`_ALLOWED_KEYS`) and
+    redacts/drops EVERYTHING else — every unknown key AND every non-string value —
+    by default. Never relaxed by debug mode. The single source of truth for what
+    may leave the process — the audit and agent/eval streams (LOG-R6.2/R6.3) reuse
+    this exact function so there is only one redactor.
     """
     return {key: _redact_one(key, value) for key, value in event_dict.items()}
 

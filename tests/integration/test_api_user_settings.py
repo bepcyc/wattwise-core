@@ -30,7 +30,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from wattwise_core.api.auth import Principal, Scope, authenticate
 from wattwise_core.api.errors import ProblemError, install_error_handlers
+from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import user_settings as settings_router
 from wattwise_core.persistence.models import Athlete, Base
 
@@ -81,11 +83,16 @@ async def seeded() -> AsyncIterator[Env]:
 def _build_app(session: AsyncSession, athlete_id: str, *, write_allowed: bool) -> FastAPI:
     """Mount the user-settings router and override the identity/scope/session seams."""
     app = FastAPI()
+    app.state.rate_limiter = RateLimiter()  # the per-athlete read/write buckets (LIMIT-R1)
     install_error_handlers(app)
     app.include_router(settings_router.router)
     write_seam = (lambda: None) if write_allowed else _insufficient_scope
     app.dependency_overrides.update(
         {
+            # The router attaches the per-subject RateLimit gate, which derives identity from
+            # ``authenticate`` (AUTH-R18); bind it to the seeded owner so the bucket is keyed
+            # server-side, mirroring the assembled app's wiring (LIMIT-R1/R6).
+            authenticate: lambda: Principal(subject=athlete_id, scopes=frozenset(Scope)),
             settings_router.require_read_scope: lambda: None,
             settings_router.require_write_scope: write_seam,
             settings_router.current_athlete_id: lambda: athlete_id,

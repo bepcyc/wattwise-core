@@ -36,6 +36,7 @@ from wattwise_core.analytics.result import (
 )
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.api.chart_schemas import ChartSeries, CoverageDescriptor, SeriesPoint
+from wattwise_core.api.deps import RateLimit
 from wattwise_core.api.errors import ProblemError
 from wattwise_core.api.perf_helpers import (
     absent_coverage as _absent_coverage,
@@ -66,7 +67,7 @@ from wattwise_core.api.perf_helpers import (
 )
 from wattwise_core.api.problems import precondition_unmet, range_reversed
 
-router = APIRouter(prefix="/v1/performance", tags=["performance"])
+router = APIRouter(prefix="/v1/performance", tags=["performance"], dependencies=[RateLimit])
 
 # HRV series keys (HRV-R3/R5): time-domain + frequency-domain band powers (doc 60 §8).
 _HRV_KEYS: tuple[str, ...] = (

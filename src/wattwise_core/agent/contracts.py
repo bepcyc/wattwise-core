@@ -321,6 +321,14 @@ class AgentState(TypedDict, total=False):
     reflection_count: Annotated[int, _turn_monotonic]
     redraft_count: Annotated[int, _turn_monotonic]
     node_visits: Annotated[int, _turn_monotonic]
+    # The tool-iteration counter (AGT-ENT-R4 tool-iteration guard): incremented by ``gather`` each
+    # time it actually resolves planned capability requests. RUN-SCOPED (resets per turn) and uses
+    # the SAME ``_turn_monotonic`` reducer as ``node_visits``/``reflection_count``: monotonic within
+    # a turn (a tool loop cannot evade its budget by rewinding), resettable only to the floor 0 by
+    # the head node at a turn boundary. When it reaches the resolved entitlement's
+    # ``max_tool_iterations`` the routers stop re-planning and route to compose — a graceful bound
+    # on the gather/tool loop independent of ``node_visits`` (AGT-ENT-R1, read from entitlement).
+    tool_iterations: Annotated[int, _turn_monotonic]
     cost_events: Annotated[list[dict[str, Any]], _append]
     # (c) outputs
     draft: str | None

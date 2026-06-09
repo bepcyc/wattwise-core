@@ -26,7 +26,6 @@ Requirements realized here (doc 60 / doc 70):
 
 from __future__ import annotations
 
-import datetime as _dt
 import hmac
 from collections.abc import Callable
 from importlib import import_module
@@ -50,7 +49,7 @@ from wattwise_core.api.deps import AppSettings, get_db, get_rate_limiter
 from wattwise_core.api.errors import ProblemError, install_error_handlers
 from wattwise_core.api.middleware import JSONBodySizeLimitMiddleware
 from wattwise_core.api.openapi import install_openapi
-from wattwise_core.api.ratelimit import RateLimiter
+from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers import activities as activities_router
 from wattwise_core.api.routers import agent_breadth as agent_breadth_router
 from wattwise_core.api.routers import agent_routes as agent_router
@@ -62,10 +61,18 @@ from wattwise_core.api.routers import planning as planning_router
 from wattwise_core.api.routers import sync as sync_router
 from wattwise_core.api.routers import user_settings as user_settings_router
 from wattwise_core.api.routers import users as users_router
+from wattwise_core.api.security import (
+    agent_feature_gate,
+    build_deletion_requester,
+    install_security_middleware,
+    mount_readiness,
+    resolve_entitlement,
+)
 from wattwise_core.api.wiring import build_ingestion_seams
 from wattwise_core.config import Settings, get_settings
+from wattwise_core.entitlement import OssEntitlementResolver, validate_plan
 from wattwise_core.identity import OWNER_SUBJECT
-from wattwise_core.observability.logging import configure_logging, get_logger
+from wattwise_core.observability.logging import configure_logging
 from wattwise_core.persistence import Database
 
 #: The WWW-Authenticate challenge returned with an invalid sign-in (AUTH-R1/API-R23).
@@ -110,11 +117,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
     app.state.database = Database(resolved)
-    app.state.rate_limiter = RateLimiter()
+    app.state.rate_limiter = _build_rate_limiter(resolved)
+    # Resolve + VALIDATE the OSS default entitlement plan at boot (ENT-4 / AGT-ENT-R4): an
+    # invalid/missing plan fails the boot CLOSED here (RUN-R4.1) — the engine never starts
+    # under a silently-permissive or unvalidated plan. The resolver + the validated plan are
+    # bound to app state so the HTTP gate resolves -> attaches -> checks (AGT-ENT-R1/-R3) and
+    # the readiness probe (OBS-R6.2) can confirm they are ready.
+    app.state.entitlement_resolver = OssEntitlementResolver.from_settings(resolved)
+    app.state.entitlement_plan = validate_plan(
+        app.state.entitlement_resolver.resolve(OWNER_SUBJECT)
+    )
 
+    install_security_middleware(app, resolved)
     app.add_middleware(JSONBodySizeLimitMiddleware)
     install_error_handlers(app)
     _mount_liveness(app)
+    mount_readiness(app)
     app.include_router(_public_router())
     app.include_router(_auth_router())
     register_routers(app)
@@ -168,7 +186,11 @@ def _wire_router_seams(app: FastAPI) -> None:
     overrides[user_settings_router.require_write_scope] = require_scopes(Scope.WRITE)
     overrides[user_settings_router.current_athlete_id] = _athlete_id_seam
     overrides[user_settings_router.current_session] = get_db
-    overrides[agent_router.require_agent_scope] = require_scopes(Scope.AGENT)
+    # The agent gate is the CHECK half of the entitlement seam: it runs the bearer+agent-scope
+    # gate AND reads the resolved entitlement, failing closed when ``can_use_agent`` is ungranted
+    # (AGT-ENT-R3). Under the OSS all-permissive plan it permits; a commercial plan that ungrants
+    # the feature is enforced here without touching the agent router (resolve -> attach -> check).
+    overrides[agent_router.require_agent_scope] = agent_feature_gate
     overrides[agent_router.current_athlete_id] = _athlete_id_seam
     overrides[agent_router.rate_limiter] = get_rate_limiter
     engine = _build_engine(app)
@@ -178,10 +200,12 @@ def _wire_router_seams(app: FastAPI) -> None:
     # the shared transactional session so digest persistence + the email-verified gate are live
     # (H1: an unwired ``current_session`` fails closed and 500s the digest CRUD).
     overrides[agent_breadth_router.current_session] = get_db
-    # The owner account-deletion endpoint records an ASYNC erasure request via a durable recorder
-    # (PRIV-R8 / retention §11); bind it so DELETE /v1/users/me acknowledges rather than 500-ing on
-    # its fail-closed default (H4).
-    overrides[users_router.deletion_requester] = lambda: _record_deletion_request
+    # The owner account-deletion endpoint invokes the REAL whole-athlete erasure EXECUTOR via the
+    # recorder bound here (PRIV-1 / PRIV-R8): DELETE /v1/users/me erases every athlete-scoped row
+    # across BOTH stores (canonical + agent-state) + the retained original-file object bytes, mints
+    # an auditable completion record (the ErasureReceipt), and returns the async pending_deletion
+    # ack. It never silently no-ops (fail-closed) and never 500s on an unwired seam (H4).
+    overrides[users_router.deletion_requester] = lambda: build_deletion_requester(app)
     _wire_planning(overrides, engine)
     seams = build_ingestion_seams(app.state.database, app.state.settings)
     overrides[imports_router.import_processor] = lambda: seams.import_processor
@@ -215,10 +239,6 @@ def _wire_planning(
     overrides[planning_router.cursor_signing_key] = _cursor_signing_key_seam
 
 
-#: The durable audit logger the async account-deletion recorder appends erasure requests to.
-_DELETION_LOGGER: Final = get_logger("wattwise_core.api.users.deletion")
-
-
 def _build_engine(app: FastAPI) -> object:
     """Build the agent engine the API drives — the live coach, else the no-LLM fallback (RUN-R4.1).
 
@@ -238,23 +258,22 @@ def _build_engine(app: FastAPI) -> object:
     )
 
 
-async def _record_deletion_request(athlete_id: str, requested_at: _dt.datetime) -> None:
-    """Durably record an account-deletion request for the async erasure path (PRIV-R8 / §11).
+def _build_rate_limiter(settings: Settings) -> RateLimiter:
+    """Build the process RateLimiter with the CONFIG-sourced per-class ceilings (LIMIT-R2/CFG-R1a).
 
-    The single-owner OSS engine has no scheduled erasure worker of its own; the deletion endpoint
-    must still NEVER silently no-op (fail-closed) and must NOT hard-delete inline (retention §11).
-    This appends a durable, structured audit record (the operator's JSON log sink is the durable
-    right-to-be-forgotten queue a background sweeper / the commercial layer consumes) stamped with
-    the SERVER-DERIVED owner id (AUTH-R3) and the request instant, then returns so the endpoint
-    acknowledges ``pending_deletion`` asynchronously. A logging failure propagates so the endpoint
-    fails closed rather than acknowledging an erasure that was never recorded.
+    No rate value is a code literal: the ``agent`` class ceiling is the entitlement-governed
+    ``entitlement__request_rate_per_minute`` (so the agent surface's request rate IS the OSS
+    plan's non-monetary request-rate guard, AGT-ENT-R1/-R4), and the ``read`` / ``mutating``
+    ceilings are the loaded ``ratelimit__*`` values (defaults.toml). The limiter's
+    ``DEFAULT_LIMITS`` is used only by an isolated unit that constructs ``RateLimiter()`` with no
+    settings; the production app always sources from config here.
     """
-    _DELETION_LOGGER.info(
-        "account_deletion_requested",
-        athlete_id=athlete_id,
-        requested_at=requested_at.isoformat(),
-        status="pending_deletion",
-    )
+    limits = {
+        LimitClass.READ: settings.ratelimit__read_per_minute,
+        LimitClass.MUTATING: settings.ratelimit__mutating_per_minute,
+        LimitClass.AGENT: settings.entitlement__request_rate_per_minute,
+    }
+    return RateLimiter(limits)
 
 
 def _athlete_id_seam(principal: Annotated[Principal, Depends(authenticate)]) -> str:
@@ -391,4 +410,9 @@ def _discover_routers() -> tuple[APIRouter, ...]:
     return tuple(item for item in registered if isinstance(item, APIRouter))
 
 
-__all__ = ["API_PREFIX", "create_app", "register_routers"]
+__all__ = [
+    "API_PREFIX",
+    "create_app",
+    "register_routers",
+    "resolve_entitlement",
+]

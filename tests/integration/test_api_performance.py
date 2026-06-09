@@ -32,7 +32,9 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.api.auth import Principal, Scope, authenticate
 from wattwise_core.api.errors import install_error_handlers
+from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import activities as act_router
 from wattwise_core.api.routers import performance as perf_router
 from wattwise_core.domain.enums import (
@@ -93,17 +95,21 @@ def _build_app(session: AsyncSession, athlete_id: str) -> FastAPI:
     (PAGE-R5).
     """
     app = FastAPI()
+    app.state.rate_limiter = RateLimiter()  # per-athlete read bucket the routers debit (LIMIT-R1)
     install_error_handlers(app)
     app.include_router(perf_router.router)
     app.include_router(act_router.router)
-    overrides = {
-        perf_router.require_read_scope: lambda: None,
-        perf_router.current_athlete_id: lambda: athlete_id,
-        perf_router.analytics_service: lambda: AnalyticsService(session),
-        act_router.current_session: lambda: session,
-        act_router.cursor_signing_key: lambda: "perf-test-cursor-key",
-    }
-    app.dependency_overrides.update(overrides)
+    # The routers attach the per-subject RateLimit gate, which derives identity from
+    # ``authenticate`` (AUTH-R18); bind it to the seeded owner so the read bucket is keyed
+    # server-side, mirroring how the assembled app wires it (LIMIT-R1/R6).
+    app.dependency_overrides[authenticate] = lambda: Principal(
+        subject=athlete_id, scopes=frozenset(Scope)
+    )
+    app.dependency_overrides[perf_router.require_read_scope] = lambda: None
+    app.dependency_overrides[perf_router.current_athlete_id] = lambda: athlete_id
+    app.dependency_overrides[perf_router.analytics_service] = lambda: AnalyticsService(session)
+    app.dependency_overrides[act_router.current_session] = lambda: session
+    app.dependency_overrides[act_router.cursor_signing_key] = lambda: "perf-test-cursor-key"
     return app
 
 

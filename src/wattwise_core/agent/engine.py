@@ -16,25 +16,30 @@ from dataclasses import replace
 from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
 # The concrete production agent services + the canonical workout-NAME library live in the focused
 # sibling :mod:`engine_services` (QUAL-R9 size split); the public ones are re-exported below so
 # every historical ``from wattwise_core.agent.engine import ClaimGrounder/ModelPlanner/...`` path
-# stays stable (e.g. the integration tests import ``ClaimGrounder``/``_PlanSchema``).
+# stays stable (e.g. the integration tests import ``ClaimGrounder``/``_PlanSchema``). The
+# compiled-graph adapter + run bounds live in :mod:`engine_graph` (QUAL-R9 size split).
 from wattwise_core.agent.checkpoint import SqlAlchemyCheckpointSaver
-from wattwise_core.agent.contracts import AgentState, ChatModel, RunStatus
+from wattwise_core.agent.contracts import ChatModel, RunStatus
 from wattwise_core.agent.deliverables import (
     AgentAnswer,
     Digest,
     Plan,
     answer_question,
     conversation_id_of,
-    new_conversation_id,
     weekly_digest,
 )
 from wattwise_core.agent.engine_extras import DeliverableEngineMixin
+from wattwise_core.agent.engine_graph import (
+    NODE_VISIT_CEILING,
+    RECURSION_LIMIT,
+    CompiledCoachGraph,
+    conversation_id_for,
+)
 from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (historical paths)
     CANONICAL_WORKOUT_NAMES,
     ClaimGrounder,
@@ -47,11 +52,12 @@ from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (hi
     _PlanSchema,
     build_services,
 )
-from wattwise_core.agent.graph import DEFAULT_NODE_VISIT_CEILING, build_graph
+from wattwise_core.agent.graph import DEFAULT_MAX_TOOL_ITERATIONS, build_graph
 from wattwise_core.agent.model import OpenAICompatibleModel
 from wattwise_core.agent.plan_deliverable import _project_plan, safe_plan_html
 from wattwise_core.agent.plan_deliverable import plan as _plan
 from wattwise_core.agent.plan_regrounding import accept_edit
+from wattwise_core.agent.seams import EntitlementCostGate
 from wattwise_core.agent.state_db import (
     AgentStateDatabase,
     build_agent_state_database,
@@ -61,73 +67,9 @@ from wattwise_core.agent.state_db import (
 )
 from wattwise_core.agent.unconfigured import UnconfiguredAgentEngine
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.entitlement import Entitlements, OssEntitlementResolver
+from wattwise_core.identity import OWNER_SUBJECT
 from wattwise_core.persistence import Database
-
-# The compiled-graph type the deliverables drive through the ``CoachGraph`` seam.
-_CompiledGraph = CompiledStateGraph[AgentState, Any, AgentState, AgentState]
-
-# The node-visit ceiling the production graph is compiled with, and the langgraph
-# superstep bound — kept TOGETHER so the invariant ``recursion_limit > ceiling`` holds for
-# whatever ceiling is configured. The bound sits ABOVE the ceiling so a pathological run
-# finalizes gracefully (degraded, OUTCOME-R3) via the graph's own ceiling rather than
-# raising a GraphRecursionError first; the bounded reflect/redraft counters guarantee
-# termination well before either bound on every legal path.
-_NODE_VISIT_CEILING = DEFAULT_NODE_VISIT_CEILING
-_RECURSION_LIMIT = _NODE_VISIT_CEILING + 20
-
-
-def _conversation_id(athlete_id: str, thread_id: str | None) -> str:
-    """The saver-bound conversation id for a run, REVERSIBLE with the thread_id (CKPT-R3).
-
-    A follow-up/decision passes the prior ``thread_id`` back: the conversation id is recovered
-    from it (``conversation_id_of``) so the saver binds to the SAME durable thread. A fresh turn
-    (no ``thread_id``) mints a new conversation id; the SAME value is passed to the deliverable so
-    the thread_id it builds (``{athlete_id}:{conversation_id}``) matches the saver's bound scope —
-    otherwise the graph config's thread_id and the saver's thread row would diverge.
-    """
-    if thread_id is not None:
-        return conversation_id_of(thread_id)
-    return new_conversation_id()
-
-
-class _CompiledCoachGraph:
-    """Adapt a compiled LangGraph to the deliverables' :class:`CoachGraph` seam (GRAPH-R1).
-
-    ``deliverables.answer_question`` drives the graph through the typed async ``run(state)``
-    seam; a compiled langgraph instead exposes ``ainvoke`` and REQUIRES a per-run config
-    carrying the durable ``thread_id`` (the checkpointer key, CKPT-R3) plus a recursion
-    bound. This wrapper supplies both from the immutable input state so the production engine
-    invokes the graph exactly as the grounded-Q&A deliverable expects — without it the
-    deliverable's ``graph.run`` call would not resolve against the bare compiled graph.
-    """
-
-    def __init__(self, compiled: _CompiledGraph) -> None:
-        self._compiled = compiled
-
-    async def run(self, state: AgentState) -> AgentState:
-        """Invoke the compiled graph with the durable-thread config (CKPT-R3, OUTCOME-R2).
-
-        The thread id MUST come from the run's own ``(athlete_id, conversation_id)`` scope
-        (CKPT-R3); it fails closed if absent rather than aliasing onto a shared key.
-        """
-        thread_id = state.get("thread_id") or state.get("idempotency_key")
-        if not thread_id:
-            raise ValueError("agent run state carries no durable thread id (CKPT-R3)")
-        config: RunnableConfig = {
-            "configurable": {"thread_id": thread_id},
-            "recursion_limit": _RECURSION_LIMIT,
-        }
-        result = await self._compiled.ainvoke(state, config=config)
-        return cast(AgentState, result)
-
-    async def resume(self, command: Command[Any], config: RunnableConfig) -> AgentState:
-        """Resume a paused run with ``Command(resume=...)`` on the SAME durable thread (CKPT-R2).
-
-        The head node does NOT re-run (no recompute, no fresh turn_id); the pre-interrupt nodes
-        replay from the checkpoint rather than re-executing. Returns the terminal state.
-        """
-        result = await self._compiled.ainvoke(command, config=config)
-        return cast(AgentState, result)
 
 
 class DecisionRefused(RuntimeError):
@@ -169,11 +111,20 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         *,
         state_db: AgentStateDatabase | None = None,
         coach: CoachBundle | None = None,
+        entitlement: Entitlements | None = None,
     ) -> None:
         self._db = database
         self._model = model
         self._state_db = state_db
         self._coach = coach if coach is not None else CoachBundle()
+        # The DEFAULT (config-resolved) entitlement the engine reads its non-monetary local guards
+        # FROM (AGT-ENT-R1): the node-visit ceiling + tool-iteration bound the graph reads, the
+        # token bound the model output budget is sized to, and the wall-clock deadline the run is
+        # bounded by. ``build_agent_engine`` supplies the config-resolved OSS plan; a direct caller
+        # (tests / OSS) may pass ``None`` -> a bare all-permissive grant (zero bounds), so each
+        # guard falls back to its config/module default exactly as before. A per-REQUEST
+        # entitlement passed to a deliverable method OVERRIDES this default for that run (MED-2).
+        self._entitlement = entitlement if entitlement is not None else Entitlements()
 
     async def _agent_state_db(self) -> AgentStateDatabase:
         """The dedicated agent-state database, lazily built + schema-created once (ARCH-R13).
@@ -197,28 +148,69 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
             conversation_id=conversation_id,
         )
 
+    def _effective_entitlement(self, entitlement: Entitlements | None) -> Entitlements:
+        """The entitlement that governs THIS run: the per-request one if supplied, else the default.
+
+        MED-2 resolve -> attach -> check: the API attaches the per-request resolved entitlement
+        (``request.state.entitlement``) and threads it into the deliverable methods; when present it
+        is the authority for this run (bounds + flags). When ``None`` (a direct OSS/test caller) the
+        engine's config-resolved default (``self._entitlement``) governs — identical in OSS (single
+        owner, all-permissive), but the seam is now REAL end to end so the commercial layer can vary
+        the plan per request WITHOUT touching the engine or the graph.
+        """
+        return entitlement if entitlement is not None else self._entitlement
+
+    def _sized_model(self, entitlement: Entitlements) -> ChatModel:
+        """The model whose per-call output budget is the entitlement's token bound (AGT-ENT-R1).
+
+        When the model supports re-sizing (``with_output_budget``, the OSS
+        :class:`OpenAICompatibleModel`) and the carried entitlement names a positive
+        ``max_output_tokens``, return a view sized to that bound so the model reads its output
+        budget FROM the resolved entitlement for this run; otherwise the model is used as-is (a
+        FakeModel / a bare grant with no token bound keeps its construction-time budget).
+        """
+        budget = entitlement.max_output_tokens
+        resize = getattr(self._model, "with_output_budget", None)
+        if resize is not None and isinstance(budget, int) and budget > 0:
+            return cast(ChatModel, resize(budget))
+        return self._model
+
     def _graph(
         self,
         svc: AnalyticsService,
         saver: SqlAlchemyCheckpointSaver,
         *,
         allow_names: frozenset[str] = frozenset(),
-    ) -> _CompiledCoachGraph:
+        entitlement: Entitlements | None = None,
+    ) -> CompiledCoachGraph:
         """Build + compile the coaching graph over the per-call services + DURABLE saver (GRAPH-R5).
 
-        The ceiling is tied to ``_RECURSION_LIMIT``; the durable saver records a ``live`` ledger row
-        (CKPT-R9) so runs resume across turns/pauses. The loaded coach-config (§16) is wired in here
-        via ``self._coach`` — compose gets the real system prompt and the grounder gets the metric-
-        equivalence + tolerance, so a natural metric the model cites grounds (the headline fix).
+        ALL FIVE non-monetary local guards are read FROM the resolved entitlement (AGT-ENT-R1): the
+        graph reads the node-visit ceiling + the tool-iteration bound from the
+        :class:`EntitlementCostGate` carried on the services; the model's per-call OUTPUT budget is
+        sized to the entitlement's token bound; and the wall-clock deadline bounds the whole
+        ``CompiledCoachGraph.run``. The engine passes the MODULE defaults explicitly to
+        ``build_graph`` so the carried entitlement's config-loaded bounds govern (the seams
+        precedence ladder: explicit-default -> entitlement -> fallback). The durable saver records a
+        ``live`` ledger row (CKPT-R9) so runs resume across turns/pauses. The loaded coach-config
+        (§16) is wired in via ``self._coach`` — compose gets the real system prompt and the grounder
+        the metric-equivalence + tolerance, so a natural metric the model cites grounds.
         """
+        ent = self._effective_entitlement(entitlement)
+        model = self._sized_model(ent)
+        services = replace(
+            self._coach.services(model, svc, allow_names=allow_names),
+            cost_gate=EntitlementCostGate(ent),
+        )
         compiled = build_graph(
-            self._model,
-            self._coach.services(self._model, svc, allow_names=allow_names),
+            model,
+            services,
             saver,
             coach_system=self._coach.system_prompt,
-            node_visit_ceiling=_NODE_VISIT_CEILING,
+            node_visit_ceiling=NODE_VISIT_CEILING,
+            max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
         )
-        return _CompiledCoachGraph(compiled)
+        return CompiledCoachGraph(compiled, wall_clock_seconds=ent.wall_clock_seconds)
 
     async def answer(
         self,
@@ -229,20 +221,23 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         response_length: str,
         follow_up: dict[str, Any] | None,
         locale: str,
+        entitlement: Entitlements | None = None,
     ) -> AgentAnswer:
         """Answer a question, resuming the SAME durable thread on a follow-up (COACH-R8).
 
         A first turn opens a fresh durable thread; a follow-up (the caller passes the prior
         ``thread_id`` back) lands on the SAME ``(athlete_id, conversation_id)`` so an
         expand/drill/reveal turn continues the conversation. The durable saver is bound to that
-        scope; ``follow_up`` shapes the turn in the deliverable (CKPT-R3/-R5).
+        scope; ``follow_up`` shapes the turn in the deliverable (CKPT-R3/-R5). When the API threads
+        the per-request resolved ``entitlement`` (MED-2) it governs this run's non-monetary bounds;
+        ``None`` falls back to the engine's config-resolved default (identical in OSS).
         """
         state_db = await self._agent_state_db()
-        conversation_id = _conversation_id(athlete_id, thread_id)
+        conversation_id = conversation_id_for(athlete_id, thread_id)
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
             return await answer_question(
-                self._graph(AnalyticsService(session), saver),
+                self._graph(AnalyticsService(session), saver, entitlement=entitlement),
                 athlete_id,
                 question or "",
                 locale=locale,
@@ -253,18 +248,22 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
                 presentation=self._coach.presentation,
             )
 
-    async def digest(self, *, athlete_id: str, week_end: str) -> Digest:
+    async def digest(
+        self, *, athlete_id: str, week_end: str, entitlement: Entitlements | None = None
+    ) -> Digest:
         """Build the weekly digest (== weekly load review) for ``week_end`` (COACH-R1 #1).
 
         Drives a ``scheduled_digest`` run over a deterministic per-week conversation id and projects
         the grounded trailing-week review into :class:`Digest`, abstaining visibly (``degraded`` +
-        caveat) when the week's canonical inputs are missing (OUTCOME-R3/-R4, GROUND-R7).
+        caveat) when the week's canonical inputs are missing (OUTCOME-R3/-R4, GROUND-R7). A
+        per-request ``entitlement`` (MED-2) governs this run's bounds when supplied, else the
+        engine's config-resolved default.
         """
         state_db = await self._agent_state_db()
         conversation_id = f"digest:{week_end}"
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
-            graph = self._graph(AnalyticsService(session), saver)
+            graph = self._graph(AnalyticsService(session), saver, entitlement=entitlement)
             return await weekly_digest(
                 graph, athlete_id, week_end, presentation=self._coach.presentation
             )
@@ -279,6 +278,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         locale: str = "en",
         response_length: str = "detailed",
         requires_approval: bool = True,
+        entitlement: Entitlements | None = None,
     ) -> Plan:
         """Build a multi-day grounded training PLAN, approval-gated by default (COACH-R2/CKPT-R5).
 
@@ -287,15 +287,19 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         records a ``live`` ledger row; the :class:`Plan` is ``awaiting_approval`` carrying the
         ``interrupt_id`` the decision endpoint consumes (CKPT-R9). ``athlete_id`` is server-derived
         (AGT-SEC-R1). ``request_text`` is the planning prompt the planning router passes;
-        ``request`` is a backward-compatible alias for the same value.
+        ``request`` is a backward-compatible alias for the same value. A per-request ``entitlement``
+        (MED-2) governs this run's non-monetary bounds when supplied, else the config default.
         """
         prompt = request_text if request_text is not None else (request or "")
         state_db = await self._agent_state_db()
-        conversation_id = _conversation_id(athlete_id, thread_id)
+        conversation_id = conversation_id_for(athlete_id, thread_id)
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
             graph = self._graph(
-                AnalyticsService(session), saver, allow_names=CANONICAL_WORKOUT_NAMES
+                AnalyticsService(session),
+                saver,
+                allow_names=CANONICAL_WORKOUT_NAMES,
+                entitlement=entitlement,
             )
             return await _plan(
                 graph,
@@ -316,6 +320,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         interrupt_id: str,
         decision: str,
         edited_plan: str | None = None,
+        entitlement: Entitlements | None = None,
     ) -> Plan:
         """Resume a paused approval-gated plan with the athlete's decision (API-R12a/CKPT-R9).
 
@@ -328,7 +333,8 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         a partial/abstained/extraction-failed edit is REJECTED — the run resolves to a DEGRADED
         terminal state whose body is the already-grounded pre-edit plan, NEVER the unverified edit
         (H3 / GROUND-R3). The edit is re-grounded BEFORE the graph resume so its outcome decides the
-        resume payload.
+        resume payload. A per-request ``entitlement`` (MED-2) governs the resumed run's bounds when
+        supplied, else the config default.
         """
         state_db = await self._agent_state_db()
         conversation_id = conversation_id_of(thread_id)
@@ -352,10 +358,12 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
             }
             if accepted_edit is not None:
                 resume["edited_plan"] = accepted_edit
-            graph = self._graph(svc, saver, allow_names=CANONICAL_WORKOUT_NAMES)
+            graph = self._graph(
+                svc, saver, allow_names=CANONICAL_WORKOUT_NAMES, entitlement=entitlement
+            )
             config: RunnableConfig = {
                 "configurable": {"thread_id": thread_id},
-                "recursion_limit": _RECURSION_LIMIT,
+                "recursion_limit": RECURSION_LIMIT,
             }
             final = await graph.resume(Command(resume=resume), config)
         projected = _project_plan(final)
@@ -400,15 +408,23 @@ def build_agent_engine(database: Database, settings: Any) -> GraphAgentEngine | 
     jargon-free unavailable rather than failing the whole boot. When a model IS configured the
     engine is wired with a DEDICATED agent-state database (its own engine/pool, ARCH-R13/DEPLOY-R4)
     so the durable checkpointer never contends with the canonical pool (SPIKE-3 deadlock-freedom).
+
+    The config-resolved OSS entitlement (the all-permissive plan with the config-loaded
+    non-monetary bounds, AGT-ENT-R4) is resolved here once and becomes the engine's DEFAULT
+    authority: the model's per-call output budget is sized to its token bound (AGT-ENT-R1,
+    MODEL-R5a) and the engine reads its ceiling / tool-iteration / wall-clock guards from it. The
+    API may still thread a per-REQUEST entitlement into a deliverable call to override it (MED-2).
     """
     if settings.llm_api_key is None:
         return None
     state_db = build_agent_state_database(settings)
+    entitlement = OssEntitlementResolver.from_settings(settings).resolve(OWNER_SUBJECT)
     return GraphAgentEngine(
         database,
-        OpenAICompatibleModel(settings=settings),
+        OpenAICompatibleModel(settings=settings, max_output_tokens=entitlement.max_output_tokens),
         state_db=state_db,
         coach=CoachBundle.from_settings(settings),
+        entitlement=entitlement,
     )
 
 

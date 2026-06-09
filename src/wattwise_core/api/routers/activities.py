@@ -49,6 +49,7 @@ from wattwise_core.api.activity_schemas import (
     StreamChannelOut,
 )
 from wattwise_core.api.decimate import minmax_index, rdp_simplify
+from wattwise_core.api.deps import RateLimit
 from wattwise_core.api.errors import ProblemError
 from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
 from wattwise_core.api.problems import not_found, parameter_invalid, range_reversed
@@ -69,7 +70,7 @@ from wattwise_core.persistence.models import (
     StreamChannel,
 )
 
-router = APIRouter(prefix="/v1/activities", tags=["activities"])
+router = APIRouter(prefix="/v1/activities", tags=["activities"], dependencies=[RateLimit])
 
 # Closed line-chart channel allow-list (API-R48): every GBO-R20 channel whose
 # sample_basis is time/distance — i.e. all except the event-based rr_intervals_ms.

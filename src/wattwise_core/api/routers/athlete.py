@@ -48,6 +48,7 @@ from wattwise_core.api.athlete_schemas import (
     FitnessSignatureHistory,
     FitnessSignatureOut,
 )
+from wattwise_core.api.deps import RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
 
@@ -60,7 +61,7 @@ from wattwise_core.api.routers.activities import cursor_signing_key
 from wattwise_core.domain.enums import Sex, SignatureOrigin
 from wattwise_core.persistence.models import Athlete, FitnessSignature, Sport
 
-router = APIRouter(prefix="/v1/athlete", tags=["athlete"])
+router = APIRouter(prefix="/v1/athlete", tags=["athlete"], dependencies=[RateLimit])
 
 
 # --- dependency seams (overridden by the app factory) ---------------------------

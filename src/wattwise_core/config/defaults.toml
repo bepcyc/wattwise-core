@@ -27,6 +27,56 @@ port = 8000
 rate_limit_per_minute = 60
 request_max_bytes = 33554432   # 32 MiB upload ceiling for FIT/GPX/TCX imports
 
+[security]
+# CORS / allowed-host / transport-header policy (SEC-R10/.1/.2). Config-driven, never
+# hardcoded in code (SEC-R10.2: "no per-deployment values baked into code"). The OSS
+# defaults are first-party-web-client-correct out of the box; an operator overrides them
+# via the operator file / env. Wildcard origin '*' combined with allow_credentials=true is
+# REJECTED at startup (SEC-R10-AC) — these defaults deliberately avoid that combination.
+cors_allow_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+cors_allow_credentials = true
+cors_allow_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+cors_allow_headers = ["Authorization", "Content-Type", "Last-Event-ID"]
+# TrustedHostMiddleware allowed-host list (SEC-R10.2). The MECHANISM is always installed and
+# config-driven; the OSS default is permissive ("*") so a first-party web client works out of
+# the box (SEC-R10.2). An operator MUST narrow this to their real host(s) in production — set a
+# concrete list and a spoofed Host is rejected with 400 (host-header-attack guard).
+allowed_hosts = ["*"]
+# Transport security headers (SEC-R10.1): HSTS max-age (1 year), Referrer-Policy, and a
+# restrictive default Content-Security-Policy for any HTML surface.
+hsts_max_age_seconds = 31536000
+referrer_policy = "no-referrer"
+content_security_policy = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+[entitlement]
+# The OSS single all-permissive default plan's NON-monetary local guards (AGT-ENT-R4 /
+# COMM-R20). The OSS plan permits everything and carries NO monetary budget; these are the
+# per-request non-monetary bounds it carries, with GENEROUS, configurable defaults loaded
+# here (CFG-R1a) — never hardcoded in the gate/graph (AGT-ENT-R1). The single operator MAY
+# raise them. They must be strictly positive (a 0/negative bound is a degenerate plan,
+# rejected fail-closed at load). node_visit_ceiling comfortably exceeds the longest legal
+# agent path (ingest + bounded reflect/redraft cycles + finalize); it matches the graph's
+# historical generous default.
+node_visit_ceiling = 60
+max_output_tokens = 8192
+wall_clock_seconds = 120
+max_tool_iterations = 16
+# The per-athlete AGENT-class request-rate bound (LIMIT-R2): the production RateLimiter's
+# ``agent`` ceiling is built from THIS value, so it IS the documented agent baseline of
+# 20/min (ratelimit.py module docstring). READ (120) / MUTATING (30) are the separate
+# ``[ratelimit]`` ceilings below. Generous + operator-raisable; strictly positive.
+request_rate_per_minute = 20
+
+[ratelimit]
+# The per-athlete per-minute REQUEST ceilings for the READ and MUTATING endpoint classes
+# (LIMIT-R2). Loaded here (CFG-R1a) — never a code literal; the production RateLimiter is built
+# from these plus the AGENT-class ceiling, which is the entitlement-governed bound
+# (entitlement.request_rate_per_minute above) so the agent surface's request rate IS the
+# entitlement's non-monetary request-rate guard. Strictly positive (a 0/negative ceiling is a
+# degenerate limiter). The bucket capacity (max burst) equals the per-minute rate for each class.
+read_per_minute = 120
+mutating_per_minute = 30
+
 [object_store]
 # OSS default object store for verbatim original-file retention (RAW-R*): a
 # local directory. An S3-compatible store is configured via env for production.

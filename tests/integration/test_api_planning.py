@@ -30,6 +30,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -87,6 +88,7 @@ class _FakePlanEngine:
         locale: str,
         response_length: str,
         requires_approval: bool,
+        entitlement: Any = None,  # MED-2: the route threads the per-request resolved plan
     ) -> Plan:
         self.seen_athlete_id = athlete_id
         self.seen_request = request
@@ -294,6 +296,7 @@ class _ReadEnv:
     app: FastAPI
     session: AsyncSession
     athlete_id: str
+    limiter: RateLimiter
 
 
 @pytest_asyncio.fixture
@@ -305,14 +308,20 @@ async def seeded() -> AsyncIterator[_ReadEnv]:
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with factory() as session:
         athlete_id = await _seed(session)
-        app = _build_read_app(session, athlete_id)
+        limiter = RateLimiter()
+        app = _build_read_app(session, athlete_id, limiter)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
-            yield _ReadEnv(client, app, session, athlete_id)
+            yield _ReadEnv(client, app, session, athlete_id, limiter)
     await engine.dispose()
 
 
-def _build_read_app(session: AsyncSession, athlete_id: str) -> FastAPI:
-    """Mount the planning router and override the read-view identity/scope/session/cursor seams."""
+def _build_read_app(session: AsyncSession, athlete_id: str, limiter: RateLimiter) -> FastAPI:
+    """Mount the planning router and override the read-view identity/scope/session/cursor seams.
+
+    The read views debit the per-athlete ``read`` bucket (LIMIT-R1), so the ``rate_limiter`` seam is
+    bound to a real :class:`RateLimiter` exactly as the assembled app does in ``_wire_planning``
+    (otherwise the router's fail-closed default would 500 the wired read view).
+    """
     app = FastAPI()
     install_error_handlers(app)
     app.include_router(planning_router.router)
@@ -322,6 +331,7 @@ def _build_read_app(session: AsyncSession, athlete_id: str) -> FastAPI:
             planning_router.current_athlete_id: lambda: athlete_id,
             planning_router.current_session: lambda: session,
             planning_router.cursor_signing_key: lambda: "test-cursor-key-0123456789abcdef",
+            planning_router.rate_limiter: lambda: limiter,
         }
     )
     return app
@@ -486,7 +496,7 @@ async def test_get_schedule_no_active_plan_is_typed_empty_not_404() -> None:
         session.add(athlete)
         await session.flush()
         aid = str(athlete.athlete_id)
-        app = _build_read_app(session, aid)
+        app = _build_read_app(session, aid, RateLimiter())
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             resp = await client.get(
                 "/v1/planning/schedule?from=2026-06-01&to=2026-06-30", headers={}
@@ -496,3 +506,29 @@ async def test_get_schedule_no_active_plan_is_typed_empty_not_404() -> None:
     body = resp.json()
     assert body["plan_id"] is None
     assert body["days"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_workouts_read_view_is_rate_limited_per_athlete(seeded: _ReadEnv) -> None:
+    """The GET read view debits the per-athlete read bucket and 429s past it (LIMIT-R1/R2).
+
+    The planning READ views (``GET /v1/planning/workouts`` / ``/schedule``) attached only the
+    ``read`` scope gate and were unthrottled — LIMIT-R1 requires EVERY endpoint be rate-limited per
+    athlete/owner. This drives the wired read view over the SAME real :class:`RateLimiter` the
+    seeded fixture binds to the router's ``rate_limiter`` seam (no stubbed limiter): a served
+    (200) read burst exhausts the 120/min read bucket keyed on the server-derived id and yields the
+    catalog ``429 rate-limited`` problem. Mutation-proof: drop the ``limiter.check(...)`` line in
+    ``list_workouts`` and this burst never 429s.
+    """
+    first = await seeded.client.get("/v1/planning/workouts", headers={})
+    assert first.status_code == 200, "the read view must serve before the rate-limit assertion"
+    limited = None
+    # The read bucket is 120/min; a burst exhausts it. A margin past 120 absorbs the
+    # token-bucket's continuous refill (≈2 tokens/sec) over the loop's wall time.
+    for _ in range(160):
+        resp = await seeded.client.get("/v1/planning/workouts", headers={})
+        if resp.status_code == 429:
+            limited = resp
+            break
+    assert limited is not None, "the planning read view was never rate-limited (LIMIT-R1)"
+    assert limited.json()["type"].endswith("/rate-limited")

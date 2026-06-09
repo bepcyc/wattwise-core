@@ -52,6 +52,7 @@ from wattwise_core.api.errors import ProblemError, resolve_trace_id
 from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
 from wattwise_core.api.problems import not_found, range_reversed
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
+from wattwise_core.api.routers.agent_routes import attached_entitlement
 from wattwise_core.api.routers.agent_schemas import AgentAskResponse
 from wattwise_core.api.routers.planning_schemas import (
     PageOut,
@@ -66,6 +67,7 @@ from wattwise_core.api.routers.planning_schemas import (
     schedule_of,
 )
 from wattwise_core.domain.enums import PlanStatus
+from wattwise_core.entitlement import Entitlements
 from wattwise_core.persistence.models import Plan as PlanRow
 from wattwise_core.persistence.models import PlanDay, Workout
 
@@ -98,6 +100,7 @@ class PlanningEngine(Protocol):
         locale: str,
         response_length: str,
         requires_approval: bool,
+        entitlement: Entitlements | None = None,
     ) -> PlanDeliverable: ...
 
 
@@ -200,6 +203,7 @@ async def generate_workouts(
         locale=locale,
         response_length=resolve_length(body),
         requires_approval=True,
+        entitlement=attached_entitlement(request),
     )
     return render_plan(plan, trace_id, locale)
 
@@ -244,18 +248,22 @@ async def list_workouts(
     session: Session,
     athlete_id: AthleteId,
     key: CursorKey,
+    limiter: Limiter,
     *,
     limit: Annotated[int, Query()] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ) -> PrescribedWorkoutList:
     """List the canonical prescribed-workout library, cursor-paginated (API-R32 / PAGE-R1).
 
-    Requires the ``read`` scope (AUTH-R11). Reads ONLY the server-derived athlete's own templates
-    plus the shared NULL-athlete library (TEN-R1); each is projected source-agnostically into
-    :class:`PrescribedWorkout` (target zones/durations, GBO-R29). ``limit`` is clamped to
-    ``[1, 200]`` (PAGE-R3); the opaque signed ``cursor`` pages the ``(created_at, workout_id)``
-    keyset (PAGE-R7).
+    Requires the ``read`` scope (AUTH-R11) and debits the per-athlete ``read`` rate bucket
+    (``120/min``, LIMIT-R1) keyed by the server-derived id (AUTH-R3 / LIMIT-R6) — the read views
+    are rate-limited like every other per-subject surface, not just the generation path. Reads
+    ONLY the server-derived athlete's own templates plus the shared NULL-athlete library (TEN-R1);
+    each is projected source-agnostically into :class:`PrescribedWorkout` (target zones/durations,
+    GBO-R29). ``limit`` is clamped to ``[1, 200]`` (PAGE-R3); the opaque signed ``cursor`` pages the
+    ``(created_at, workout_id)`` keyset (PAGE-R7).
     """
+    limiter.check(athlete_id, LimitClass.READ)
     bounded = clamp_limit(int(limit))  # PAGE-R3 clamp; never unbounded / offset
     rows = await _query_workouts(session, athlete_id, cursor=cursor, key=key, limit=bounded + 1)
     has_more = len(rows) > bounded
@@ -309,17 +317,21 @@ async def _plan_days(
 async def get_schedule(
     session: Session,
     athlete_id: AthleteId,
+    limiter: Limiter,
     *,
     frm: Annotated[_dt.date, Query(alias="from", description="Inclusive local start date.")],
     to: Annotated[_dt.date, Query(description="Inclusive local end date.")],
 ) -> Schedule:
     """Read the active plan's immutable schedule for a date range (API-R32; read-only in v1).
 
-    Requires the ``read`` scope (AUTH-R11). Projects the server-derived athlete's most-recent ACTIVE
-    :class:`Plan` and its immutable ``PlanDay`` rows in ``[from, to]`` (GBO-R30b). No active plan ->
-    a typed empty schedule (``plan_id: null``), never a ``404``. ``from > to`` -> ``422`` (ERR-R6).
-    There is NO per-day mutation here — a ``schedule_adjustment`` is post-v1 (API-R32).
+    Requires the ``read`` scope (AUTH-R11) and debits the per-athlete ``read`` rate bucket
+    (``120/min``, LIMIT-R1) keyed by the server-derived id (AUTH-R3 / LIMIT-R6). Projects the
+    server-derived athlete's most-recent ACTIVE :class:`Plan` and its immutable ``PlanDay`` rows in
+    ``[from, to]`` (GBO-R30b). No active plan -> a typed empty schedule (``plan_id: null``), never a
+    ``404``. ``from > to`` -> ``422`` (ERR-R6). There is NO per-day mutation here — a
+    ``schedule_adjustment`` is post-v1 (API-R32).
     """
+    limiter.check(athlete_id, LimitClass.READ)
     if frm > to:
         raise range_reversed("from")
     plan = await _active_plan(session, athlete_id)

@@ -49,6 +49,7 @@ from wattwise_core.api.problems import not_found
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers.agent_routes import (
     agent_engine,
+    attached_entitlement,
     current_athlete_id,
     rate_limiter,
     require_agent_scope,
@@ -72,6 +73,7 @@ from wattwise_core.domain.enums import (
     DigestStatus,
     Weekday,
 )
+from wattwise_core.entitlement import Entitlements
 from wattwise_core.persistence.models import DigestSubscription, NotificationRoute
 
 # No prefix: this router is mounted ONTO the ``/v1/agent`` router in :mod:`agent_routes` (which
@@ -98,7 +100,9 @@ class BreadthEngine(Protocol):
 
     async def diagnose(self, *, athlete_id: str, locale: str) -> AgentDiagnosis: ...
 
-    async def digest(self, *, athlete_id: str, week_end: str) -> Digest: ...
+    async def digest(
+        self, *, athlete_id: str, week_end: str, entitlement: Entitlements | None = None
+    ) -> Digest: ...
 
     async def list_memory(
         self, *, athlete_id: str, limit: int, offset: int
@@ -227,7 +231,9 @@ async def agent_digest_last(
     trace_id = resolve_trace_id(request)
     locale = _header_locale(accept_language)
     resolved = week_end or _last_week_end(_dt.datetime.now(_dt.UTC).date())
-    digest = await engine.digest(athlete_id=athlete_id, week_end=resolved)
+    digest = await engine.digest(
+        athlete_id=athlete_id, week_end=resolved, entitlement=attached_entitlement(request)
+    )
     return render_digest(digest, trace_id, locale)
 
 

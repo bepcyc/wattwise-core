@@ -38,11 +38,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from wattwise_core.api.deps import RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.domain.enums import ZoneBasis, ZoneKind
 from wattwise_core.persistence.models import Athlete, TrainingZoneSet
 
-router = APIRouter(prefix="/v1/user-settings", tags=["user-settings"])
+router = APIRouter(prefix="/v1/user-settings", tags=["user-settings"], dependencies=[RateLimit])
 
 #: The athlete-facing answer-length tokens (API-R11f); mirrors the agent ResponseLength.
 ResponseLength = Literal["short", "standard", "detailed"]

@@ -235,6 +235,39 @@ def test_read_endpoint_emits_ratelimit_headers_on_success(
     assert int(resp.headers["RateLimit-Remaining"]) <= 120
 
 
+def test_activities_list_is_rate_limited_per_athlete(
+    db_client: tuple[TestClient, str]
+) -> None:
+    """GET /v1/activities debits the per-athlete read bucket and 429s past it (LIMIT-R1/R2).
+
+    The activities/athlete/performance/user-settings feature surfaces attached only scope
+    gates and were unthrottled (no per-subject rate limit) — LIMIT-R1 requires EVERY endpoint
+    be rate-limited per athlete/owner. This drives the REAL assembled ``create_app`` (no stubbed
+    limiter): a burst on a SUCCESSFULLY-served (200) read endpoint exhausts the 120/min read
+    bucket keyed on the server-derived id and yields the catalog ``429 rate-limited`` problem
+    with the ``Retry-After`` + ``RateLimit-*`` headers (LIMIT-R3). Mutation-proof: drop the
+    router-level ``dependencies=[RateLimit]`` on ``activities`` and this burst never 429s.
+    """
+    client, athlete_id = db_client
+    headers = _owner_token(athlete_id, scopes=["read"])
+    # Sanity: the endpoint really serves 200 (so the 429 is the limiter, not an auth/wiring 401).
+    first = client.get(f"{API_PREFIX}/activities", headers=headers)
+    assert first.status_code == 200, "GET /v1/activities must serve before the rate-limit assertion"
+    limited = None
+    # The read bucket is 120/min; a burst exhausts it. A margin past 120 absorbs the
+    # token-bucket's continuous refill (≈2 tokens/sec) over the loop's wall time.
+    for _ in range(160):
+        resp = client.get(f"{API_PREFIX}/activities", headers=headers)
+        if resp.status_code == 429:
+            limited = resp
+            break
+    assert limited is not None, "GET /v1/activities was never rate-limited in the burst (LIMIT-R1)"
+    assert limited.json()["type"].endswith("/rate-limited")
+    assert int(limited.headers["Retry-After"]) >= 1
+    assert limited.headers["RateLimit-Limit"] == "120"
+    assert limited.headers["RateLimit-Remaining"] == "0"
+
+
 # --- API-R3 / AUTH-R1: the factory wires the seam routers ------------------------
 
 

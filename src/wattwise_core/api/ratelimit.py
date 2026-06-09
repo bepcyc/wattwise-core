@@ -49,8 +49,13 @@ class LimitClass(StrEnum):
     AGENT = "agent"
 
 
-#: Default per-athlete per-minute REQUEST ceilings (LIMIT-R2 — "at least" these).
-#: The bucket capacity (max burst) equals the per-minute rate for each class.
+#: Fallback per-athlete per-minute REQUEST ceilings for an isolated ``RateLimiter()`` constructed
+#: with NO settings (a pure unit test that exercises the bucket mechanics, not the config wiring).
+#: This is NOT the PRODUCTION source of the ceilings (that would violate CFG-R1a): the app factory
+#: builds the limiter from the layered config — ``read``/``mutating`` from the ``[ratelimit]`` table
+#: and ``agent`` from the entitlement-governed ``entitlement.request_rate_per_minute`` — so no
+#: production rate value is a code literal. The bucket capacity (max burst) equals the per-minute
+#: rate for each class.
 DEFAULT_LIMITS: Final[dict[LimitClass, int]] = {
     LimitClass.READ: 120,
     LimitClass.MUTATING: 30,

@@ -42,25 +42,21 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
+from wattwise_core.agent import graph_routing as routing
 from wattwise_core.agent import graph_state as gs
 from wattwise_core.agent.contracts import (
     AgentState,
     ChatModel,
     GroundDecision,
-    ReflectVerdict,
     RunStatus,
     stamp_coverage_gaps,
     stamp_retrieved,
 )
 from wattwise_core.agent.seams import (
     AgentServices,
-    CapabilityGateway,
-    CostGate,
-    CoverageAssessor,
     GraphNode,
-    Grounder,
-    NoopCostGate,
-    Planner,
+    entitlement_max_tool_iterations,
+    entitlement_node_visit_ceiling,
 )
 
 # Bounded recovery budgets (REFLECT-R4), re-exported from :mod:`graph_state` so the cycle
@@ -68,12 +64,28 @@ from wattwise_core.agent.seams import (
 MAX_REFLECTIONS = gs.MAX_REFLECTIONS
 MAX_REDRAFTS = gs.MAX_REDRAFTS
 
-# Configured node-visit ceiling (GRAPH-R5). An overall step bound, independent of the
-# per-cycle counters, so a pathological run terminates GRACEFULLY at ``finalize`` with a
-# ``degraded`` status instead of raising langgraph's ``GraphRecursionError`` (OUTCOME-R3).
-# Passed into ``build_graph`` so a deployment can configure it; the default comfortably
-# exceeds the longest legal path (ingest + bounded reflect/redraft cycles + finalize).
+# Fallback node-visit ceiling (GRAPH-R5) for a caller that injects NO entitlement-supplied
+# bound. The AUTHORITATIVE ceiling is read FROM the resolved entitlement carried on the
+# cost gate (AGT-ENT-R1: the engine reads its gated limits from the entitlement, never a
+# hardcode) — see :func:`_resolve_node_visit_ceiling`. This constant is only the explicit
+# ``build_graph`` argument default for an isolated caller whose gate carries no bound
+# (e.g. a unit test constructing the graph with a bare ``AgentServices``); a deployment's
+# real ceiling lives in config (``entitlement.node_visit_ceiling``) and flows through the
+# entitlement. An overall step bound, independent of the per-cycle counters, so a
+# pathological run terminates GRACEFULLY at ``finalize`` with a ``degraded`` status instead
+# of raising langgraph's ``GraphRecursionError`` (OUTCOME-R3).
 DEFAULT_NODE_VISIT_CEILING = 60
+
+# Fallback tool-iteration bound (AGT-ENT-R4) for a caller that injects NO entitlement-supplied
+# bound — the tool-loop analogue of :data:`DEFAULT_NODE_VISIT_CEILING`. The AUTHORITATIVE bound is
+# read FROM the resolved entitlement carried on the cost gate (AGT-ENT-R1) via
+# :func:`~wattwise_core.agent.seams.entitlement_max_tool_iterations`; this constant is only the
+# explicit ``build_graph`` argument default for an isolated caller whose gate carries no bound. It
+# bounds the number of REAL gather/tool resolutions a single run may perform, independently of the
+# per-cycle reflect/redraft counters and the overall node-visit ceiling, so a re-plan loop that
+# keeps gathering terminates GRACEFULLY at ``compose`` (degraded), never by raising. Generous so a
+# legit run (which gathers only a handful of times) never trips it.
+DEFAULT_MAX_TOOL_ITERATIONS = 16
 
 
 # --- node implementations (GRAPH-R4: pure (state, svc) -> partial update) ---------------
@@ -154,7 +166,14 @@ def _make_gather(svc: AgentServices) -> GraphNode:
         # Every write to the turn-keyed accumulators MUST be stamped with the current turn_id
         # so the reducer self-resets across a turn boundary (CKPT-R5 leak backstop).
         tid = gs.turn_id(state)
-        update: dict[str, Any] = {"retrieved": stamp_retrieved(tid, dict(records))}
+        # Advance the monotonic tool-iteration counter on each REAL capability resolution
+        # (AGT-ENT-R4): this is the gather/tool-loop step the entitlement's max_tool_iterations
+        # bounds. A no-op gather (no planned requests, handled above) does NOT advance it, so the
+        # bound counts only real tool work.
+        update: dict[str, Any] = {
+            "retrieved": stamp_retrieved(tid, dict(records)),
+            "tool_iterations": state.get("tool_iterations", 0) + 1,
+        }
         truncated = gs.retrieved_truncation_gaps(state, dict(records))
         if truncated:
             update["coverage_gaps"] = stamp_coverage_gaps(tid, truncated)
@@ -277,6 +296,10 @@ def _make_interrupt_gate(recorder: gs.InterruptRecorder | None) -> GraphNode:
             return gs.tick_visit(state, {})
         interrupt_id = str(uuid.uuid4())
         thread_id = state.get("thread_id")
+        # KNOWN-ISSUE (HITL-hardening, out of scope here): langgraph re-runs this node body on every
+        # RESUME before ``interrupt()`` returns the resume value, so this mints a FRESH uuid and
+        # re-records a NEW ``live`` row on each resume — the interrupt-identity scheme needs a
+        # redesign (stable per-pause id). Do NOT fix here; tracked separately.
         if recorder is not None and thread_id:
             await recorder.record_interrupt(thread_id, interrupt_id)
         payload = {
@@ -343,78 +366,6 @@ def _make_finalize(svc: AgentServices, ceiling: int) -> GraphNode:
     return finalize
 
 
-# --- routing (GRAPH-R3: the only permitted cycles) -------------------------------------
-
-
-def _make_route_after_assess(ceiling: int) -> Any:
-    def _route_after_assess(state: AgentState) -> str:
-        """assess_coverage -> reflect | compose | finalize (GRAPH-R3/R5).
-
-        Loops back through reflection only while gaps remain AND the reflection budget is
-        unspent; a node-visit-ceiling breach routes straight to ``finalize`` (degraded).
-        """
-        if gs.over_ceiling(state, ceiling):
-            return "finalize"
-        if gs.open_gaps(state) and state.get("reflection_count", 0) < MAX_REFLECTIONS:
-            return "reflect"
-        return "compose"
-
-    return _route_after_assess
-
-
-def _make_route_after_reflect(ceiling: int) -> Any:
-    def _route_after_reflect(state: AgentState) -> str:
-        """reflect -> plan_retrieval | compose | finalize on the §6 verdict (REFLECT-R2a).
-
-        ``replan`` -> plan_retrieval; ``answer_with_caveat`` -> compose;
-        ``give_up_gracefully`` -> finalize; a ceiling breach -> finalize (GRAPH-R5).
-        """
-        if gs.over_ceiling(state, ceiling):
-            return "finalize"
-        verdict = gs.last_reflect_verdict(state)
-        if verdict is ReflectVerdict.ANSWER_WITH_CAVEAT:
-            return "compose"
-        if verdict is ReflectVerdict.GIVE_UP_GRACEFULLY:
-            return "finalize"
-        return "plan_retrieval"
-
-    return _route_after_reflect
-
-
-def _make_route_after_ground(ceiling: int) -> Any:
-    def _route_after_ground(state: AgentState) -> str:
-        """ground -> compose (redraft) | reflect (replan) | interrupt_gate | finalize.
-
-        REGENERATE redrafts within ``MAX_REDRAFTS``; REPLAN re-plans within
-        ``MAX_REFLECTIONS``; PROCEED/ABSTAIN or budget-exhaustion falls through to the
-        gate; a node-visit-ceiling breach routes straight to ``finalize`` (GRAPH-R5).
-        """
-        if gs.over_ceiling(state, ceiling):
-            return "finalize"
-        decision = gs.last_ground_decision(state)
-        if decision is GroundDecision.REGENERATE and state.get("redraft_count", 0) < MAX_REDRAFTS:
-            return "compose"
-        if decision is GroundDecision.REPLAN and state.get("reflection_count", 0) < MAX_REFLECTIONS:
-            return "reflect"
-        return "interrupt_gate"
-
-    return _route_after_ground
-
-
-def _make_redraft_tick() -> GraphNode:
-    """Spend one redraft-budget unit when ground routes back to compose (REFLECT-R4)."""
-
-    def tick(state: AgentState) -> dict[str, Any]:
-        return gs.tick_visit(state, {"redraft_count": state.get("redraft_count", 0) + 1})
-
-    return tick
-
-
-def _route_after_ingest(state: AgentState) -> str:
-    """ingest_request -> finalize (admission refused) | plan_retrieval (COST-R4)."""
-    return "finalize" if gs.budget_exceeded(state) else "plan_retrieval"
-
-
 def build_graph(
     model: ChatModel,
     svc: AgentServices,
@@ -422,18 +373,32 @@ def build_graph(
     *,
     coach_system: str = "",
     node_visit_ceiling: int = DEFAULT_NODE_VISIT_CEILING,
+    max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
 ) -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
     """Assemble and compile the agent graph (GRAPH-R1/R2/R3/R5).
 
     All services are injected; the returned graph is compiled with the supplied durable
     ``checkpointer`` so runs are resumable. ``awaiting_approval`` is emitted by a DURABLE
     langgraph ``interrupt`` raised inside ``interrupt_gate`` ONLY for an approval-gated
-    PLAN deliverable (CKPT-R5) — Phase-1 ships none, so the gate is a pass-through. The
-    configured ``node_visit_ceiling`` bounds total node visits; a breach routes to
-    ``finalize`` with ``degraded`` (GRAPH-R5/OUTCOME-R3), never a GraphRecursionError.
+    PLAN deliverable (CKPT-R5) — Phase-1 ships none, so the gate is a pass-through.
+
+    Two non-monetary local guards bound the run, BOTH read FROM the resolved entitlement carried
+    on ``svc.cost_gate`` (AGT-ENT-R1, config-loaded guards) when present, else the explicit
+    arguments (a caller override wins; an isolated caller with a bare gate falls back to the
+    module defaults): (1) the ``node_visit_ceiling`` bounds TOTAL node visits — a breach routes to
+    ``finalize`` with ``degraded`` (GRAPH-R5/OUTCOME-R3), never a GraphRecursionError; (2) the
+    ``max_tool_iterations`` bounds the gather/tool loop independently — a breach STOPS re-planning
+    and routes to ``compose`` (AGT-ENT-R4) so the run still composes a grounded answer from what it
+    has. Both degrade GRACEFULLY, never raise.
     """
     builder: StateGraph[AgentState, Any, AgentState, AgentState] = StateGraph(AgentState)
-    ceiling = node_visit_ceiling
+    # Read the non-monetary local guards FROM the resolved entitlement carried on the cost gate
+    # (AGT-ENT-R1) — the OSS plan's config-loaded guards govern the run; an explicit caller
+    # override wins, and an isolated caller with a bare gate falls back to the module default.
+    ceiling = entitlement_node_visit_ceiling(svc, DEFAULT_NODE_VISIT_CEILING, node_visit_ceiling)
+    tool_bound = entitlement_max_tool_iterations(
+        svc, DEFAULT_MAX_TOOL_ITERATIONS, max_tool_iterations
+    )
     # The interrupt-gate persists its ``live`` AgentInterrupt ledger row through the
     # checkpointer when (and only when) it satisfies the ``record_interrupt`` seam (CKPT-R9);
     # an in-memory checkpointer does not, so the gate records nothing (and nothing durable can
@@ -447,7 +412,7 @@ def build_graph(
     builder.add_node("gather", _make_gather(svc), input_schema=AgentState)
     builder.add_node("assess_coverage", _make_assess_coverage(svc), input_schema=AgentState)
     builder.add_node("reflect", _make_reflect(model), input_schema=AgentState)
-    builder.add_node("redraft_tick", _make_redraft_tick(), input_schema=AgentState)
+    builder.add_node("redraft_tick", routing.make_redraft_tick(), input_schema=AgentState)
     builder.add_node("compose", _make_compose(svc, model, coach_system), input_schema=AgentState)
     builder.add_node("ground", _make_ground(svc), input_schema=AgentState)
     builder.add_node("interrupt_gate", _make_interrupt_gate(recorder), input_schema=AgentState)
@@ -457,21 +422,22 @@ def build_graph(
     builder.add_edge(START, "ingest_request")
     builder.add_conditional_edges(
         "ingest_request",
-        _route_after_ingest,
+        routing.route_after_ingest,
         {"plan_retrieval": "plan_retrieval", "finalize": "finalize"},
     )
     builder.add_edge("plan_retrieval", "gather")
     builder.add_edge("gather", "assess_coverage")
 
     # Cycle 1: assess_coverage -> reflect -> plan_retrieval (GRAPH-R3); ceiling -> finalize.
+    # The tool-iteration bound stops the re-plan loop at compose (AGT-ENT-R4).
     builder.add_conditional_edges(
         "assess_coverage",
-        _make_route_after_assess(ceiling),
+        routing.make_route_after_assess(ceiling, tool_bound),
         {"reflect": "reflect", "compose": "compose", "finalize": "finalize"},
     )
     builder.add_conditional_edges(
         "reflect",
-        _make_route_after_reflect(ceiling),
+        routing.make_route_after_reflect(ceiling, tool_bound),
         {"plan_retrieval": "plan_retrieval", "compose": "compose", "finalize": "finalize"},
     )
 
@@ -481,7 +447,7 @@ def build_graph(
     # The redraft path runs through ``redraft_tick`` so the bounded counter advances.
     builder.add_conditional_edges(
         "ground",
-        _make_route_after_ground(ceiling),
+        routing.make_route_after_ground(ceiling),
         {
             "compose": "redraft_tick",
             "reflect": "reflect",
@@ -499,15 +465,10 @@ def build_graph(
 
 
 __all__ = [
+    "DEFAULT_MAX_TOOL_ITERATIONS",
     "DEFAULT_NODE_VISIT_CEILING",
     "MAX_REDRAFTS",
     "MAX_REFLECTIONS",
     "AgentServices",
-    "CapabilityGateway",
-    "CostGate",
-    "CoverageAssessor",
-    "Grounder",
-    "NoopCostGate",
-    "Planner",
     "build_graph",
 ]

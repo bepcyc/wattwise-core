@@ -76,6 +76,18 @@ def over_ceiling(state: AgentState, ceiling: int) -> bool:
     return state.get("node_visits", 0) >= ceiling
 
 
+def over_tool_ceiling(state: AgentState, max_tool_iterations: int) -> bool:
+    """True once the resolved entitlement's tool-iteration bound is reached (AGT-ENT-R4).
+
+    Reads the monotonic ``tool_iterations`` counter (advanced by ``gather`` on each real
+    capability resolution) against the bound the graph carries FROM the resolved entitlement
+    (AGT-ENT-R1), so the gather/tool loop is bounded independently of ``node_visits``. The
+    routers consult this to stop re-planning (route to compose) on a breach — a GRACEFUL bound,
+    never a raise.
+    """
+    return state.get("tool_iterations", 0) >= max_tool_iterations
+
+
 # --- turn boundary: the run-scoped reset + turn-keyed accumulator views (CKPT-R5) ---
 
 
@@ -131,6 +143,7 @@ def reset_run_scoped(state: AgentState) -> dict[str, Any]:
         "node_visits": TURN_COUNTER_FLOOR,
         "reflection_count": TURN_COUNTER_FLOOR,
         "redraft_count": TURN_COUNTER_FLOOR,
+        "tool_iterations": TURN_COUNTER_FLOOR,
         "retrieved": stamp_retrieved(tid, {}),
         "coverage_gaps": stamp_coverage_gaps(tid, set()),
         "run_epoch": tid,
@@ -383,6 +396,7 @@ __all__ = [
     "limitation_text",
     "open_gaps",
     "over_ceiling",
+    "over_tool_ceiling",
     "plan_requires_approval",
     "read_coverage_gaps",
     "read_retrieved",

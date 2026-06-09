@@ -78,6 +78,7 @@ class _FakeEngine:
         self._answer = answer
         self._readiness = readiness
         self.seen_athlete_id: str | None = None
+        self.seen_entitlement: Any = None
 
     async def answer(
         self,
@@ -88,8 +89,10 @@ class _FakeEngine:
         response_length: str,
         follow_up: dict[str, Any] | None,
         locale: str,
+        entitlement: Any = None,  # MED-2: the route threads the per-request resolved plan
     ) -> AgentAnswer:
         self.seen_athlete_id = athlete_id
+        self.seen_entitlement = entitlement
         return self._answer
 
     async def readiness(
@@ -512,6 +515,7 @@ class _FakeDecisionEngine:
         interrupt_id: str,
         decision: str,
         edited_plan: str | None,
+        entitlement: Any = None,  # MED-2: the route threads the per-request resolved plan
     ) -> Plan:
         self.seen_athlete_id = athlete_id
         self.seen_decision = decision

@@ -39,6 +39,7 @@ from wattwise_core.agent.state_db import (
     fallback_state_dsn,
 )
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.entitlement import Entitlements
 from wattwise_core.persistence import Database
 
 
@@ -105,7 +106,10 @@ class UnconfiguredAgentEngine:
         response_length: str,
         follow_up: dict[str, Any] | None,
         locale: str,
+        entitlement: Entitlements | None = None,
     ) -> AgentAnswer:
+        # ``entitlement`` (MED-2) is accepted for seam-parity with the live engine but unused here:
+        # the no-LLM fallback runs no graph, so there are no bounds to read — it always degrades.
         text = self._message(locale)
         return AgentAnswer(
             status=RunStatus.DEGRADED,
@@ -149,7 +153,9 @@ class UnconfiguredAgentEngine:
         async with self._db.session() as session:
             return await diagnose_coverage(AnalyticsService(session), athlete_id)
 
-    async def digest(self, *, athlete_id: str, week_end: str) -> Digest:
+    async def digest(
+        self, *, athlete_id: str, week_end: str, entitlement: Entitlements | None = None
+    ) -> Digest:
         """A DEGRADED weekly digest when no LLM is configured (RUN-R4.1, abstains visibly).
 
         No model means no grounded weekly review can be composed, so the digest abstains VISIBLY

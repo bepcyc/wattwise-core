@@ -40,6 +40,14 @@ from pydantic_settings import (
 
 _DEFAULTS_PATH = Path(__file__).with_name("defaults.toml")
 
+#: SEC-R3 signing-key entropy floor: >= 256 bits (32 bytes) of key material, mirroring the
+#: ``encryption_root_key`` 32-byte floor in ``security/crypto.py``. A key shorter than this
+#: is refused in a real environment.
+_SIGNING_KEY_MIN_BYTES = 32
+#: A trivially-weak-key guard: a key built from fewer than this many DISTINCT bytes (e.g.
+#: ``"k" * 64`` — long but degenerate) carries no real entropy and is refused (SEC-R3).
+_SIGNING_KEY_MIN_DISTINCT_BYTES = 8
+
 
 class Environment(StrEnum):
     """Deployment environment; governs which fail-closed rules are strict."""
@@ -138,6 +146,42 @@ class Settings(BaseSettings):
     api__rate_limit_per_minute: int = Field(ge=1)
     api__request_max_bytes: int = Field(ge=1)
 
+    # --- security: CORS / allowed-host / transport headers (SEC-R10/.1/.2, CFG-R1a) ---
+    # Config-driven, never hardcoded origins/hosts (SEC-R10.2 "no per-deployment values
+    # baked into code"). The OSS defaults are first-party-client-correct out of the box;
+    # an operator overrides them via the operator file / env. A TOML array flattens to one
+    # list setting.
+    security__cors_allow_origins: list[str]
+    security__cors_allow_credentials: bool
+    security__cors_allow_methods: list[str]
+    security__cors_allow_headers: list[str]
+    security__allowed_hosts: list[str]
+    # Security-header values (SEC-R10.1): HSTS max-age, the Referrer-Policy, and the CSP
+    # for any HTML surface. Loaded content (CFG-R1a), never a code literal.
+    security__hsts_max_age_seconds: int = Field(ge=0)
+    security__referrer_policy: str
+    security__content_security_policy: str
+
+    # --- entitlement: the OSS default plan's non-monetary local guards (AGT-ENT-R4) ---
+    # The single all-permissive OSS plan carries NO monetary budget (COMM-R20); these are
+    # the per-request NON-monetary bounds it carries with generous, configurable defaults
+    # (loaded content, CFG-R1a — never hardcoded in the gate/graph, AGT-ENT-R1). An
+    # operator MAY raise them. They are strictly positive (a 0/negative bound is a
+    # degenerate plan rejected fail-closed at load by ``entitlement.validate_plan``).
+    entitlement__node_visit_ceiling: int = Field(ge=1)
+    entitlement__max_output_tokens: int = Field(ge=1)
+    entitlement__wall_clock_seconds: float = Field(gt=0)
+    entitlement__max_tool_iterations: int = Field(ge=1)
+    entitlement__request_rate_per_minute: int = Field(ge=1)
+
+    # --- rate-limit: the READ / MUTATING per-minute request ceilings (LIMIT-R2, CFG-R1a) ---
+    # The per-athlete per-minute request ceilings for the read + mutating endpoint classes
+    # (LIMIT-R2). Loaded content (CFG-R1a) — never a code literal; the production RateLimiter is
+    # built from these (+ the AGENT class from ``entitlement__request_rate_per_minute``, the
+    # entitlement-governed bound) so NO rate value is baked into code. Strictly positive.
+    ratelimit__read_per_minute: int = Field(ge=1)
+    ratelimit__mutating_per_minute: int = Field(ge=1)
+
     # --- object store (verbatim original-file retention, RAW-R*) ---
     object_store__kind: str
     object_store__local_root: Path
@@ -187,11 +231,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _fail_closed(self) -> Settings:
-        """Refuse to boot when required secrets are absent in a real environment.
+        """Refuse to boot when required secrets are absent/weak or config is insecure.
 
         In development the engine may run without external secrets (it uses an
         ephemeral key path), but in staging/production every load-bearing secret
-        MUST be present or the boot fails closed (RUN-R4.1).
+        MUST be present or the boot fails closed (RUN-R4.1). The CORS configuration-cliff
+        guard (SEC-R10-AC) is enforced in EVERY environment — a wildcard origin combined
+        with credentials is always rejected.
         """
         strict = self.app__environment is not Environment.DEVELOPMENT
         missing: list[str] = []
@@ -208,6 +254,8 @@ class Settings(BaseSettings):
                 + ", ".join(sorted(missing))
                 + " (must be provided via the environment / a secret manager; BOOT-R4)"
             )
+        if strict:
+            self._require_strong_signing_key()
         if self.object_store__kind not in {"local", "s3"}:
             raise ConfigError(
                 f"object_store.kind must be 'local' or 's3', got {self.object_store__kind!r}"
@@ -216,7 +264,52 @@ class Settings(BaseSettings):
             self.object_store__s3_endpoint and self.object_store__s3_bucket
         ):
             raise ConfigError("object_store.kind='s3' requires s3_endpoint and s3_bucket")
+        self._reject_wildcard_cors_with_credentials()
         return self
+
+    def _require_strong_signing_key(self) -> None:
+        """Reject a weak/short token signing key in a real environment (SEC-R3 / RUN-R4.1).
+
+        Mirrors the ``encryption_root_key`` 32-byte floor in ``security/crypto.py``: the
+        signing/verification key material MUST carry at least 256 bits (32 bytes) of
+        entropy and MUST NOT be trivially weak. A key shorter than 32 bytes, or one whose
+        material is degenerate (a single repeated byte / a tiny distinct-character set —
+        no real entropy), is refused so the service never signs tokens under a guessable
+        key. In development the key may be absent (an ephemeral path) or a short test
+        value, so this floor is enforced only in the strict (staging/production)
+        environments — exactly where the presence check above already requires it.
+        """
+        key = self.token_signing_key
+        if key is None:  # presence already enforced above for strict; defensive guard
+            return
+        raw = key.get_secret_value().encode("utf-8")
+        if len(raw) < _SIGNING_KEY_MIN_BYTES:
+            raise ConfigError(
+                "fail-closed: WATTWISE_TOKEN_SIGNING_KEY carries insufficient entropy "
+                f"(needs >= {_SIGNING_KEY_MIN_BYTES} bytes / 256 bits, got {len(raw)}); "
+                "the service refuses to start with a weak signing key (SEC-R3)"
+            )
+        if len(set(raw)) < _SIGNING_KEY_MIN_DISTINCT_BYTES:
+            raise ConfigError(
+                "fail-closed: WATTWISE_TOKEN_SIGNING_KEY is trivially weak "
+                "(too few distinct bytes — a repeated/degenerate value, not real entropy); "
+                "the service refuses to start (SEC-R3)"
+            )
+
+    def _reject_wildcard_cors_with_credentials(self) -> None:
+        """Reject the wildcard-origin + credentials configuration cliff (SEC-R10 / SEC-R10-AC).
+
+        A configuration that allows the wildcard origin ``*`` AND sets
+        ``allow_credentials=true`` MUST be rejected at startup with a clear configuration
+        error (SEC-R10-AC) — it is an always-insecure combination the browser would refuse
+        anyway, so the service fails closed rather than starting in an undefined CORS state.
+        Enforced in every environment (a configuration-cliff guard, not an env-strict rule).
+        """
+        if self.security__cors_allow_credentials and "*" in self.security__cors_allow_origins:
+            raise ConfigError(
+                "fail-closed: CORS must not combine a wildcard origin '*' with "
+                "allow_credentials=true (SEC-R10); the service refuses to start"
+            )
 
     @classmethod
     def settings_customise_sources(

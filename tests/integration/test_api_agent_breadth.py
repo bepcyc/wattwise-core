@@ -29,6 +29,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -82,7 +83,9 @@ class _FakeBreadthEngine:
         self.seen_athlete_id = athlete_id
         return self.diagnosis
 
-    async def digest(self, *, athlete_id: str, week_end: str) -> Digest:
+    async def digest(
+        self, *, athlete_id: str, week_end: str, entitlement: Any = None
+    ) -> Digest:
         self.seen_athlete_id = athlete_id
         return self.digest_body
 

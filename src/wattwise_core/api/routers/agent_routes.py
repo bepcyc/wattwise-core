@@ -11,7 +11,8 @@ outcome.
 Boundary contract enforced here:
 
 - **AUTH-R13** the endpoint requires the ``agent`` scope and is request-rate-limited
-  in the ``agent`` class (``20/min``, LIMIT-R2) keyed by the server-derived athlete id.
+  in the ``agent`` class (LIMIT-R2; the per-minute ceiling is the config-loaded
+  entitlement request-rate bound, not a code literal) keyed by the server-derived athlete id.
 - **API-R11a / API-R12a** the response is a status-discriminated union on ``status``; OSS
   surfaces ``completed``, ``degraded``, AND ``awaiting_approval`` (an approval-gated multi-day
   PLAN paused at the durable interrupt-gate, carrying the ``interrupt_id`` the decision endpoint
@@ -44,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Annotated, Any, Final, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -59,8 +60,14 @@ from wattwise_core.api.agent_stream import (
     problem_event,
     sse_event,
 )
-from wattwise_core.api.errors import FieldError, ProblemError, resolve_trace_id
+from wattwise_core.api.errors import ProblemError, resolve_trace_id
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
+from wattwise_core.api.routers.agent_request import (
+    header_locale,
+    resolve_locale,
+    resolve_response_length,
+    validate_request,
+)
 from wattwise_core.api.routers.agent_schemas import (
     AgentAskRequest,
     AgentAskResponse,
@@ -74,6 +81,8 @@ from wattwise_core.api.routers.agent_schemas import (
     render_readiness,
     render_response,
 )
+from wattwise_core.api.security import attached_entitlement
+from wattwise_core.entitlement import Entitlements
 
 router: APIRouter = APIRouter(prefix="/v1/agent", tags=["agent"])
 
@@ -102,6 +111,7 @@ class AgentEngine(Protocol):
         response_length: ResponseLength,
         follow_up: dict[str, Any] | None,
         locale: str,
+        entitlement: Entitlements | None = None,
     ) -> AgentAnswer: ...
 
     async def readiness(
@@ -120,6 +130,7 @@ class AgentEngine(Protocol):
         interrupt_id: str,
         decision: DecisionKind,
         edited_plan: str | None,
+        entitlement: Entitlements | None = None,
     ) -> Plan:
         """Resume a paused approval-gated PLAN with the athlete's HITL verdict (API-R12a/CKPT-R9).
 
@@ -192,83 +203,30 @@ Engine = Annotated[AgentEngine, Depends(agent_engine)]
 Limiter = Annotated[RateLimiter, Depends(rate_limiter)]
 
 
-# --- request validation ----------------------------------------------------------
-
-
-def _validate_request(body: AgentAskRequest) -> None:
-    """Enforce the API-R11/R11e body invariants beyond pydantic types.
-
-    ``question`` is REQUIRED unless a ``follow_up`` is present (API-R11e); a request
-    with neither is a semantic ``422`` ``validation-error`` (ERR-R6), not a model call.
-    The human copy comes from the catalog title (API-R21); the machine-readable cause
-    is the ``errors[]`` code clients branch on (ERR-R3), not an inline sentence.
-    """
-    if body.question is None and body.follow_up is None:
-        raise ProblemError(
-            "validation-error",
-            errors=[FieldError(code="question_required", message="", pointer="/question")],
-        )
-
-
-#: The languages this surface localizes athlete-facing copy into (API-R37).
-_SUPPORTED_LOCALES: Final[frozenset[str]] = frozenset({"en", "de", "ru"})
-
-
-def _header_locale(accept_language: str | None) -> str:
-    """The first supported ``Accept-Language`` tag (en/de/ru), else the default ``en``.
-
-    The single header-scan both locale resolvers share (API-R37): it reads the first
-    supported two-letter language tag from the comma-separated header, ignoring quality
-    weights, and falls back to ``en`` (the commercial layer inserts the persisted
-    per-athlete language between the header and this default).
-    """
-    if accept_language:
-        for part in accept_language.split(","):
-            tag = part.split(";", 1)[0].strip().lower()[:2]
-            if tag in _SUPPORTED_LOCALES:
-                return tag
-    return "en"
-
-
-def resolve_locale(body: AgentAskRequest, accept_language: str | None) -> str:
-    """Resolve the response language: body ``language`` -> Accept-Language -> ``en`` (API-R37).
-
-    The body ``language`` field takes precedence over the ``Accept-Language`` header when
-    both are present; otherwise the first supported language tag in the header is used,
-    falling back to the default ``en``. (OSS has no persisted per-athlete language
-    setting; the commercial layer inserts it between the header and the default.)
-    """
-    if body.language is not None:
-        return body.language
-    return _header_locale(accept_language)
-
-
-def _resolve_response_length(body: AgentAskRequest) -> ResponseLength:
-    """Apply the persisted response-length default when omitted, else ``standard`` (API-R11f).
-
-    OSS has no persisted per-athlete response-length store, so an omitted value resolves
-    to ``standard``; the commercial layer resolves the athlete's saved preference here.
-    """
-    return body.response_length or "standard"
-
-
 async def _run_engine(
-    engine: AgentEngine, athlete_id: str, body: AgentAskRequest, locale: str
+    engine: AgentEngine,
+    athlete_id: str,
+    body: AgentAskRequest,
+    locale: str,
+    *,
+    entitlement: Entitlements | None = None,
 ) -> AgentAnswer:
     """Drive the injected engine for ``body`` and enforce fail-closed grounding (API-R12).
 
     Passes the server-derived ``athlete_id`` (AUTH-R3) — never a client value — and the
-    resolved ``locale`` (API-R37) and ``response_length`` (API-R11f). A terminal outcome
-    that is not grounded raises ``422`` ``agent-grounding-failed`` (API-R12 / ERR-R9):
-    the API never returns a ``completed`` answer with ``grounding.grounded == false``.
+    resolved ``locale`` (API-R37) and ``response_length`` (API-R11f). The per-request resolved
+    ``entitlement`` (MED-2) is threaded so the engine reads its bounds FROM the attached plan. A
+    terminal outcome that is not grounded raises ``422`` ``agent-grounding-failed`` (API-R12 /
+    ERR-R9): the API never returns a ``completed`` answer with ``grounding.grounded == false``.
     """
     answer = await engine.answer(
         athlete_id=athlete_id,
         question=body.question,
         thread_id=body.thread_id,
-        response_length=_resolve_response_length(body),
+        response_length=resolve_response_length(body),
         follow_up=body.follow_up.model_dump() if body.follow_up else None,
         locale=locale,
+        entitlement=entitlement,
     )
     if not grounded_flag(answer):
         raise ProblemError("agent-grounding-failed")
@@ -302,10 +260,13 @@ async def _stream_answer(
     if last_event_id == SSE_TERMINAL_DONE:
         yield sse_event("restart", {"status": "restarting"}, event_id="restart")
     yield sse_event("status", {"status": "working"}, event_id="0")
+    entitlement = attached_entitlement(request)
     try:
         if await request.is_disconnected():
             return
-        run = asyncio.ensure_future(_run_engine(engine, athlete_id, body, locale))
+        run = asyncio.ensure_future(
+            _run_engine(engine, athlete_id, body, locale, entitlement=entitlement)
+        )
         async for frame in heartbeat_until(run, request):
             yield frame
         answer = run.result()
@@ -347,7 +308,7 @@ async def agent_ask(
     identical union (API-R22 / PERF-R10(b)).
     """
     limiter.check(athlete_id, LimitClass.AGENT)
-    _validate_request(body)
+    validate_request(body)
     trace_id = resolve_trace_id(request)
     locale = resolve_locale(body, accept_language)
     if body.stream:
@@ -356,7 +317,9 @@ async def agent_ask(
             media_type="text/event-stream",
             headers=SSE_HEADERS,
         )
-    answer = await _run_engine(engine, athlete_id, body, locale)
+    answer = await _run_engine(
+        engine, athlete_id, body, locale, entitlement=attached_entitlement(request)
+    )
     return render_response(answer, trace_id, locale)
 
 
@@ -388,7 +351,7 @@ async def agent_readiness(
     """
     limiter.check(athlete_id, LimitClass.AGENT)
     trace_id = resolve_trace_id(request)
-    locale = _header_locale(accept_language)
+    locale = header_locale(accept_language)
     readiness = await engine.readiness(
         athlete_id=athlete_id, locale=locale, response_length="standard"
     )
@@ -451,6 +414,7 @@ async def agent_decision(
             interrupt_id=body.interrupt_id,
             decision=body.decision,
             edited_plan=body.edited_plan,
+            entitlement=attached_entitlement(request),
         )
     except DecisionRefused as exc:
         raise await _decision_problem(
@@ -478,6 +442,7 @@ __all__ = [
     "AgentEngine",
     "ReadinessResponse",
     "agent_engine",
+    "attached_entitlement",
     "current_athlete_id",
     "current_session",
     "rate_limiter",
