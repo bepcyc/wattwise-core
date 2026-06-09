@@ -1,6 +1,6 @@
-"""Import-direction + source-leak architecture linter (ARCH-R21 / ARCH-R22).
+"""Import-direction + source-leak architecture linter (ARCH-R21 / ARCH-R22 / ARCH-R2).
 
-Two architecture invariants, both static over ``import``/``from ... import``:
+Three architecture invariants, all static over the module AST:
 
   (1) INWARD-ONLY layer imports (ARCH-R21 / ARCH-R1).
       The engine is layered L1..L7, outer (more volatile) -> inner (more stable).
@@ -16,6 +16,21 @@ Two architecture invariants, both static over ``import``/``from ... import``:
       "consumers never branch on source" invariant (Principle A). The adapter
       package's ``__init__`` / base / registry modules are NOT source-specific and
       are allowed.
+
+  (3) NO hardcoded source-NAME literal in control flow / logic (ARCH-R2 / ARCH-R22).
+      A static scan over L3..L7 (every layered module OUTSIDE the L2 adapter
+      packages) for the REGISTERED SET OF SOURCE NAMES appearing as hardcoded string
+      literals in code (e.g. ``if source_key == "intervals_icu"``). The registered
+      set is read from the adapter registry (the ``wattwise_core.adapters``
+      entry-point group) — never a literal baked into this linter (CFG-R1a). Source
+      identity that flows at RUNTIME as data is fine; what is barred is source
+      identity embedded in CODE. **Exemption (AUTH-R15):** the Connections
+      (``/v1/connections``) / Sync (``/v1/sync/*``) / Data-health
+      (``/v1/data-health/*``) surface and the internal source-registry that BACKS
+      that surface, where a source's name and status ARE legitimate runtime data
+      drawn from the registry and the athlete's own connections (e.g. "we couldn't
+      reach Garmin"). A bare docstring / string-expression mention of a name is
+      prose, not control flow or logic, and is not flagged.
 
 Layer map (package subtree -> layer number), per doc 10 §1:
   L2 adapters         : ingestion/adapters/**
@@ -34,6 +49,7 @@ so an L4 model importing ``domain.enums`` is NOT an inward-rule violation.
 from __future__ import annotations
 
 import ast
+import functools
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -41,11 +57,31 @@ from tools.lint.core import Violation, iter_python_files
 
 _RULE_LAYER = "import-direction"
 _RULE_SOURCE = "source-name-import"
+_RULE_LITERAL = "source-name-literal"
 _REQ_LAYER = "ARCH-R21"
 _REQ_SOURCE = "ARCH-R22"
+_REQ_LITERAL = "ARCH-R2"
 
 _PKG = "wattwise_core"
 _SUPPRESS = "# noqa: import-direction"
+
+# Modules (parts below ``wattwise_core``) that constitute the AUTH-R15 surfaces on
+# which a source name is legitimate runtime DATA, plus the internal source-registry
+# that BACKS them — explicitly EXEMPT from the source-name-literal scan (ARCH-R2/R22):
+# Connections (``/v1/connections``), Sync (``/v1/sync/*``), Data-health
+# (``/v1/data-health/*``), the connections catalog backing the Connections surface,
+# and the adapter registry. This is the linter's own scope definition (which surfaces
+# carry source identity as data), not an operational config value (CFG-R1a concerns
+# model ids / thresholds / budgets, not a static rule's exemption set).
+_SOURCE_LITERAL_EXEMPT: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("api", "routers", "connections"),
+        ("api", "routers", "sync"),
+        ("api", "routers", "data_health"),
+        ("api", "connection_catalog"),
+        ("ingestion", "registry"),
+    }
+)
 
 # Subpackage -> import-budget rank, modelling ARCH-R1 "every dependency points
 # INWARD toward the L4/L5 canonical core". This is NOT doc 10's presentation L-label:
@@ -122,6 +158,104 @@ def _is_source_specific_adapter(parts: list[str]) -> bool:
     return parts[2] not in _ADAPTER_NEUTRAL_MODULES
 
 
+def _is_adapter_module(parts: list[str]) -> bool:
+    """True when a module lives inside the L2 adapter package (scan exempt, ARCH-R2)."""
+    return len(parts) >= 2 and parts[0] == "ingestion" and parts[1] == "adapters"
+
+
+@functools.cache
+def _registered_source_names() -> frozenset[str]:
+    """The registered set of source names, read from the adapter registry (CFG-R1a).
+
+    Derived from the ``wattwise_core.adapters`` entry-point group via the engine's
+    own :func:`load_registry` — the authoritative source identities are each
+    adapter's ``source_key`` — so the scan never hardcodes a source-name literal of
+    its own. Cached: the registry is process-stable packaging data.
+
+    Fail-CLOSED on the gate path. The ONLY tolerated failure is the engine package
+    not being importable (the linter is run standalone outside the installed env):
+    that legitimately yields an empty set and rule (3) cannot scan. But if the
+    package IS importable and the registry is reachable yet exposes NO source names,
+    that is a broken-registry error state — the scan would silently pass every
+    consumer — so we raise loudly rather than degrade the gate to a no-op.
+    """
+    try:
+        # Lazy by design: the linter must not hard-depend on the engine package
+        # being importable (it runs standalone), nor import-couple tools/ to
+        # wattwise_core at module load.
+        from wattwise_core.ingestion.registry import load_registry  # noqa: PLC0415
+    except ImportError:
+        # Engine package absent (standalone run) — the only fail-open we allow.
+        return frozenset()
+
+    names = frozenset(load_registry().source_keys())
+    if not names:
+        raise RuntimeError(
+            "adapter registry resolved but exposed no source names; the "
+            "source-name-literal scan (ARCH-R2/R22) cannot run fail-closed against "
+            "an empty registered set — refusing to degrade the gate to a silent no-op"
+        )
+    return names
+
+
+def _docstring_constant_ids(tree: ast.AST) -> set[int]:
+    """Ids of string ``Constant`` nodes that are docstrings / bare string statements.
+
+    A string that stands alone as an expression statement (a module/class/function
+    docstring or a free-standing string expression) is PROSE, not control flow or
+    logic, so a registered source name mentioned there is exempt (ARCH-R2 scopes to
+    source identity embedded in *code*).
+    """
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            out.add(id(node.value))
+    return out
+
+
+def _scan_source_name_literals(path: Path, own_parts: list[str], tree: ast.AST) -> list[Violation]:
+    """Flag registered source-NAME string literals used in control flow / logic (ARCH-R2).
+
+    Scans L3..L7 modules outside the adapter packages; the AUTH-R15
+    Connections/Sync/Data-health surface and the backing source-registry are exempt
+    (source identity is runtime data there). Docstrings / bare string expressions are
+    prose and not flagged.
+    """
+    if _is_adapter_module(own_parts) or tuple(own_parts) in _SOURCE_LITERAL_EXEMPT:
+        return []
+    if _layer_of(own_parts) is None:
+        return []  # rankless cross-cutting / contract module — not an L3..L7 layer
+    names = _registered_source_names()
+    if not names:
+        return []
+    doc_ids = _docstring_constant_ids(tree)
+    found: list[Violation] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if id(node) in doc_ids or node.value not in names:
+            continue
+        found.append(
+            Violation(
+                path=path,
+                line=node.lineno,
+                rule=_RULE_LITERAL,
+                requirement=_REQ_LITERAL,
+                message=(
+                    f"hardcoded registered source-name literal '{node.value}' in "
+                    f"control flow/logic; consumers MUST stay source-blind and select "
+                    f"by key via the registry/seam (source identity is runtime data, "
+                    f"named only on the Connections/Sync/Data-health surface, AUTH-R15)"
+                ),
+            )
+        )
+    return list(dict.fromkeys(found))
+
+
 def _imported_names(tree: ast.AST, path: Path) -> list[tuple[str, int]]:
     """Collect ``(dotted_module, lineno)`` for every import in a module.
 
@@ -169,7 +303,7 @@ def _line_suppressed(lines: list[str], lineno: int) -> bool:
 
 
 def _check_source(path: Path, source: str) -> list[Violation]:
-    """Apply both architecture invariants to one engine module."""
+    """Apply all three architecture invariants to one engine module."""
     own_parts = _module_parts(path)
     if own_parts is None:
         return []
@@ -185,6 +319,7 @@ def _check_source(path: Path, source: str) -> list[Violation]:
         if _line_suppressed(lines, lineno):
             continue
         violations.extend(_evaluate_edge(path, lineno, own_parts, own_layer, target))
+    violations.extend(_scan_source_name_literals(path, own_parts, tree))
     # The module-name and its alias-qualified form can both yield the same edge
     # finding; de-duplicate so one offending import is reported once.
     return list(dict.fromkeys(violations))

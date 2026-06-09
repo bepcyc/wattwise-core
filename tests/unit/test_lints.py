@@ -38,6 +38,8 @@ from tools.lint import (  # noqa: E402  (import after sys.path bootstrap, intent
 from tools.lint.core import Severity  # noqa: E402
 from tools.lint.runner import collect  # noqa: E402
 
+from wattwise_core.ingestion.registry import load_registry  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 
@@ -286,6 +288,126 @@ def test_import_direction_allows_adapter_registry_import(tmp_path: Path) -> None
     )
     found = import_direction.check_paths([tmp_path])
     assert [v for v in found if v.rule == "source-name-import"] == []
+
+
+# ------------------------------------------------- source-name literal scan (ARCH-R2/R22)
+
+
+def _registered_source_name() -> str:
+    """A real registered source name (registry-derived, never hardcoded — CFG-R1a)."""
+    keys = load_registry().source_keys()
+    assert keys, "the OSS registry must expose at least one registered source name"
+    return keys[0]
+
+
+def test_source_literal_flags_control_flow_branch_on_registered_name(tmp_path: Path) -> None:
+    """A consumer branching on a REGISTERED source-name literal in logic is flagged (ARCH-R2)."""
+    name = _registered_source_name()
+    pkg = tmp_path / "src" / "wattwise_core"
+    bad = _write(
+        pkg / "analytics",
+        "service.py",
+        '"""Mod."""\n\n\n'
+        "def pick(source_key: str) -> int:\n"
+        '    """Doc."""\n'
+        f'    if source_key == "{name}":\n'
+        "        return 1\n"
+        "    return 0\n",
+    )
+    found = import_direction.check_paths([tmp_path])
+    assert any(v.path == bad and v.rule == "source-name-literal" for v in found)
+    hit = next(v for v in found if v.path == bad and v.rule == "source-name-literal")
+    assert hit.requirement == "ARCH-R2"
+
+
+def test_source_literal_clean_when_no_registered_name_literal(tmp_path: Path) -> None:
+    """A source-agnostic consumer (selects via the registry/key argument) is silent."""
+    pkg = tmp_path / "src" / "wattwise_core"
+    _write(
+        pkg / "analytics",
+        "service.py",
+        '"""Mod."""\n\n\n'
+        "def pick(source_key: str, registry: object) -> object:\n"
+        '    """Doc."""\n'
+        "    return registry.get(source_key)\n",
+    )
+    found = import_direction.check_paths([tmp_path])
+    assert [v for v in found if v.rule == "source-name-literal"] == []
+
+
+def test_source_literal_allows_unregistered_string(tmp_path: Path) -> None:
+    """A generic/unregistered string equal to no registered source name is allowed."""
+    pkg = tmp_path / "src" / "wattwise_core"
+    _write(
+        pkg / "analytics",
+        "service.py",
+        '"""Mod."""\n\n\n'
+        "def pick(kind: str) -> int:\n"
+        '    """Doc."""\n'
+        '    if kind == "definitely_not_a_registered_source":\n'
+        "        return 1\n"
+        "    return 0\n",
+    )
+    found = import_direction.check_paths([tmp_path])
+    assert [v for v in found if v.rule == "source-name-literal"] == []
+
+
+def test_source_literal_allows_adapter_package(tmp_path: Path) -> None:
+    """An L2 adapter module MAY embed its own source name — scan is OUTSIDE adapters (ARCH-R2)."""
+    name = _registered_source_name()
+    pkg = tmp_path / "src" / "wattwise_core"
+    _write(
+        pkg / "ingestion" / "adapters",
+        "some_source.py",
+        '"""Mod."""\n\n\n'
+        "def claim(source_key: str) -> int:\n"
+        '    """Doc."""\n'
+        f'    if source_key == "{name}":\n'
+        "        return 1\n"
+        "    return 0\n",
+    )
+    found = import_direction.check_paths([tmp_path])
+    assert [v for v in found if v.rule == "source-name-literal"] == []
+
+
+def test_source_literal_exempts_connections_sync_datahealth_and_registry(tmp_path: Path) -> None:
+    """The AUTH-R15 surfaces carry source identity as runtime DATA — exempt (ARCH-R2/R22)."""
+    name = _registered_source_name()
+    pkg = tmp_path / "src" / "wattwise_core"
+    body = (
+        '"""Mod."""\n\n\n'
+        "def reach(source_key: str) -> str:\n"
+        '    """Doc."""\n'
+        f'    if source_key == "{name}":\n'
+        f'        return "we could not reach {name}"\n'
+        '    return "ok"\n'
+    )
+    exempt = [
+        _write(pkg / "api" / "routers", "connections.py", body),
+        _write(pkg / "api" / "routers", "sync.py", body),
+        _write(pkg / "api" / "routers", "data_health.py", body),
+        _write(pkg / "api", "connection_catalog.py", body),
+        _write(pkg / "ingestion", "registry.py", body),
+    ]
+    found = import_direction.check_paths([tmp_path])
+    flagged = {v.path for v in found if v.rule == "source-name-literal"}
+    assert flagged.isdisjoint(set(exempt))
+
+
+def test_source_literal_ignores_docstring_mention_of_registered_name(tmp_path: Path) -> None:
+    """A registered name in a docstring is prose, not control flow/logic — not flagged."""
+    name = _registered_source_name()
+    pkg = tmp_path / "src" / "wattwise_core"
+    _write(
+        pkg / "analytics",
+        "service.py",
+        f'"""Mod that documents the {name} source as an example."""\n\n\n'
+        "def pick(source_key: str, registry: object) -> object:\n"
+        f'    """The built-in {name} importer registers one descriptor."""\n'
+        "    return registry.get(source_key)\n",
+    )
+    found = import_direction.check_paths([tmp_path])
+    assert [v for v in found if v.rule == "source-name-literal"] == []
 
 
 # ------------------------------------------------------------------ content-copy
