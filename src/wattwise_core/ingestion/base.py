@@ -17,10 +17,16 @@ analytics, or agent change. Adapters are discovered via the
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from wattwise_core.domain.candidate import GboCandidate
-from wattwise_core.domain.enums import ActivityFileFormat, AuthArchetype, SourceKind
+from wattwise_core.domain.enums import (
+    ActivityFileFormat,
+    AuthArchetype,
+    GapReason,
+    SourceKind,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +86,80 @@ class SourceAdapter(Protocol):
         ...
 
 
+class FetchErrorKind(StrEnum):
+    """The typed cause a client converts a fetch failure into (CLI-R2/CLI-R7).
+
+    A client NEVER lets a raw ``httpx``/``pydantic`` exception leak to the engine; it
+    converts the failure to a :class:`FetchError` carrying one of these kinds so the
+    engine can branch on the CAUSE (auth vs schema vs transport) without parsing a
+    stringly error. ``SCHEMA_MISMATCH`` is the CLI-R2 validation failure; the auth
+    kinds carry the AUT-R4 revocation/expiry distinction.
+    """
+
+    SCHEMA_MISMATCH = "schema_mismatch"
+    AUTH_REVOKED = "auth_revoked"
+    AUTH_EXPIRED = "auth_expired"
+    INSUFFICIENT_SCOPE = "insufficient_scope"
+    RATE_LIMITED = "rate_limited"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    FETCH_FAILED = "fetch_failed"
+
+
+class FetchError(Exception):
+    """The single typed error a typed client raises to the engine (CLI-R2/CLI-R7).
+
+    Non-transient failures (a 4xx other than 429, a schema mismatch, an auth error)
+    MUST be converted to this typed shape and surfaced to the engine (CLI-R7) — never a
+    raw ``httpx.HTTPStatusError`` or ``pydantic.ValidationError``. Carries ONLY the
+    typed ``kind`` plus a short, non-sensitive ``detail``; never response bytes,
+    credentials, or PII (AUT-R2/ING-SEC-R3).
+    """
+
+    def __init__(self, kind: FetchErrorKind, detail: str = "") -> None:
+        self.kind = kind
+        self.detail = detail
+        super().__init__(f"{kind.value}: {detail}" if detail else kind.value)
+
+
+class AuthError(FetchError):
+    """A :class:`FetchError` whose cause is a credential break (AUT-R4).
+
+    A revoked / expired / insufficient-scope credential (the OSS api_key 401/403 path)
+    is surfaced as this typed error so the engine flips the Connection to
+    ``reauth_required`` and stops the source rather than degrading silently. ``kind``
+    defaults to ``AUTH_REVOKED`` and MUST be one of the auth kinds.
+    """
+
+    def __init__(
+        self, kind: FetchErrorKind = FetchErrorKind.AUTH_REVOKED, detail: str = ""
+    ) -> None:
+        super().__init__(kind, detail)
+
+
+@dataclass(frozen=True, slots=True)
+class AuthGapSignal:
+    """An in-memory auth-gap SIGNAL the fetch boundary hands the sync flow (§7, AUT-R4).
+
+    NOT the persisted gap (that is the ORM ``persistence.models.source.IngestionGap``,
+    opened via the watermark module's ``open_gap``). This is the lightweight, transport-
+    level envelope a client/orchestrator passes around BEFORE the gap is written: it
+    carries the canonical :class:`~wattwise_core.domain.enums.GapReason`, whether the
+    failure is ``transient`` (auto-retryable) or terminal (needs user/operator action),
+    and a short non-sensitive ``detail`` (never secrets/PII/response bytes). A terminal
+    auth signal (``needs_reauth`` / ``auth_revoked``) is the AUT-R4 reauth indication the
+    sync flow records as a persisted typed gap and the data-health surface (§9) renders.
+    """
+
+    reason: GapReason
+    transient: bool
+    detail: str = ""
+
+    @classmethod
+    def needs_reauth(cls, detail: str = "") -> AuthGapSignal:
+        """A terminal reauth signal for a revoked/expired credential (AUT-R4)."""
+        return cls(reason=GapReason.NEEDS_REAUTH, transient=False, detail=detail)
+
+
 class FileImportError(Exception):
     """An uploaded recording file could not be decoded into canonical candidates (FIL-R*).
 
@@ -128,9 +208,14 @@ class FileImportAdapter(Protocol):
 
 
 __all__ = [
+    "AuthError",
+    "AuthGapSignal",
     "FetchContext",
+    "FetchError",
+    "FetchErrorKind",
     "FileImportAdapter",
     "FileImportError",
+    "GapReason",
     "SourceAdapter",
     "SourceDescriptorRef",
     "UploadDecode",

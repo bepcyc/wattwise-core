@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Final
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
 
+from wattwise_core.config import Settings
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import (
     AuthArchetype,
@@ -36,90 +36,38 @@ from wattwise_core.domain.enums import (
     StreamChannelName,
 )
 from wattwise_core.ingestion.adapters import _intervals_map as _im
+from wattwise_core.ingestion.adapters._intervals_asbo import (
+    ActivityWithStreams,
+    IntervalsActivityAsbo,
+    IntervalsStreamAsbo,
+    IntervalsWellnessAsbo,
+)
+from wattwise_core.ingestion.adapters._resilience import (
+    AttemptBudget,
+    RetryExhaustedError,
+    TokenBucket,
+    intervals_icu_bucket,
+    intervals_icu_budget,
+    resilient_get,
+    validate_or_fetch_error,
+)
 
 # ``ingestion.base`` is the rankless adapter CONTRACT (the SourceAdapter Protocol,
 # SourceDescriptorRef, FetchContext) that every L2 adapter is DEFINED against — the
 # one inbound edge an adapter must have. The layer linter ranks the whole
 # ``ingestion`` subpackage L3 and does not carve the contract module out the way it
 # carves ``domain`` out, so this single contract import is suppressed (ARCH-R21).
-from wattwise_core.ingestion.base import FetchContext, SourceDescriptorRef  # noqa: import-direction
+from wattwise_core.ingestion.base import (  # noqa: import-direction
+    AuthError,
+    FetchContext,
+    FetchError,
+    FetchErrorKind,
+    SourceDescriptorRef,
+)
 from wattwise_core.storage import content_hash
 
 _BASE_URL: Final = "https://intervals.icu"
 _BASIC_USERNAME: Final = "API_KEY"  # literal username per CLI-R13 (NOT a secret)
-
-class IntervalsActivityAsbo(BaseModel):
-    """Validated source-shaped activity payload (CLI-R2; fail-closed at the boundary)."""
-
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-    id: str
-    type: str | None = None
-    sub_type: str | None = None
-    start_date: str | None = None
-    start_date_local: str | None = None
-    name: str | None = None
-    description: str | None = None
-    device_name: str | None = None
-    source: str | None = None
-    distance: float | None = None
-    moving_time: int | None = None
-    elapsed_time: int | None = None
-    icu_recording_time: int | None = None
-    total_elevation_gain: float | None = None
-    icu_joules: float | None = None
-    icu_average_watts: float | None = None
-    icu_weighted_avg_watts: float | None = None
-    p_max: float | None = None
-    average_heartrate: float | None = None
-    max_heartrate: float | None = None
-    average_cadence: float | None = None
-    average_speed: float | None = None
-    max_speed: float | None = None
-    average_temp: float | None = None
-    calories: float | None = None
-    device_watts: bool | None = None
-    power_meter: bool | None = None
-    trainer: bool | None = None
-    has_heartrate: bool | None = None
-    icu_lap_count: int | None = None
-
-
-class IntervalsStreamAsbo(BaseModel):
-    """One per-sample stream channel as Intervals returns it (CLI-R2)."""
-
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-    type: str
-    data: list[Any] = Field(default_factory=list)
-
-
-class IntervalsWellnessAsbo(BaseModel):
-    """Validated source-shaped daily-wellness payload (CLI-R2)."""
-
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-    id: str  # the wellness record id IS the local ISO date (e.g. "2026-05-01")
-    restingHR: int | None = None
-    hrv: float | None = None  # rmssd
-    hrvSDNN: float | None = None
-    sleepScore: float | None = None
-    sleepSecs: int | None = None
-    steps: int | None = None
-    weight: float | None = None
-    readiness: float | None = None
-    spO2: float | None = None
-    respiration: float | None = None
-    vo2max: float | None = None
-
-
-class ActivityWithStreams(BaseModel):
-    """A fetched activity plus its decoded streams — the unit the map consumes."""
-
-    model_config = ConfigDict(frozen=True)
-
-    activity: IntervalsActivityAsbo
-    streams: list[IntervalsStreamAsbo] = Field(default_factory=list)
 
 
 class IntervalsIcuClient:
@@ -138,13 +86,48 @@ class IntervalsIcuClient:
         base_url: str = _BASE_URL,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 30.0,
+        budget: AttemptBudget,
+        bucket: TokenBucket | None = None,
     ) -> None:
         self._athlete_id = athlete_id
+        self._budget = budget
+        self._bucket = bucket
         self._client = httpx.AsyncClient(
             base_url=base_url,
             auth=httpx.BasicAuth(_BASIC_USERNAME, api_key),
             timeout=httpx.Timeout(timeout, connect=10.0),
             transport=transport,
+        )
+
+    @classmethod
+    def from_settings(
+        cls,
+        api_key: str,
+        athlete_id: str,
+        settings: Settings,
+        *,
+        base_url: str = _BASE_URL,
+        transport: httpx.AsyncBaseTransport | None = None,
+        bucket: TokenBucket | None = None,
+    ) -> IntervalsIcuClient:
+        """Build the production client with its resilience read FROM config (CFG-R1a).
+
+        The per-source retry budget (CLI-R6) + the request timeout (CLI-R4) come from the
+        ``adapters.intervals_icu`` config section — NO resilience literal is baked into code
+        (CFG-R1a: a value absent from every layer fails closed at load, never a code default).
+        When no shared ``bucket`` is supplied, the client-side token-bucket limiter (CLI-R10/R11)
+        is also built from config, with the adaptive-429 ``reduce_factor`` / ``min_rate`` set so a
+        quota signal persistently lowers the issue rate rather than failing closed. The
+        budget/bucket assembly lives in :mod:`_resilience` (its primitives' home).
+        """
+        return cls(
+            api_key,
+            athlete_id,
+            base_url=base_url,
+            transport=transport,
+            timeout=settings.adapters__intervals_icu__http_timeout_s,
+            budget=intervals_icu_budget(settings),
+            bucket=bucket if bucket is not None else intervals_icu_bucket(settings),
         )
 
     async def __aenter__(self) -> IntervalsIcuClient:
@@ -156,50 +139,95 @@ class IntervalsIcuClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _get(self, path: str, *, params: dict[str, Any] | None = None) -> httpx.Response:
+        """Issue a resilient read GET: token-bucket throttle + retry/backoff + typed errors.
+
+        The per-source token bucket (CLI-R10) gates issue rate client-side; the GET is
+        retried on a transient 429/5xx/reset/timeout with exponential backoff + full
+        jitter, bounded by the per-source budget (CLI-R6), honoring ``Retry-After`` on a
+        429 (CLI-R11). A 401/403 becomes a typed :class:`AuthError` (AUT-R4); any other
+        non-2xx (incl. a budget-exhausted transient) becomes a typed :class:`FetchError`
+        (CLI-R7) — never a raw ``httpx`` exception leaking to the engine.
+        """
+        resp = await self._raw_get(path, params=params)
+        if resp.status_code >= 400:
+            raise FetchError(FetchErrorKind.FETCH_FAILED, f"source returned {resp.status_code}")
+        return resp
+
+    async def _raw_get(self, path: str, *, params: dict[str, Any] | None = None) -> httpx.Response:
+        """Resilient GET that still converts auth/transient faults but RETURNS a non-auth 4xx.
+
+        Used for the optional streams endpoint, where a ``404`` legitimately means "no
+        streams" rather than a failure: the auth (AUT-R4) and budget-exhaustion (CLI-R7)
+        conversions still apply, but a non-auth 4xx is returned for the caller to treat as
+        empty. The token bucket (CLI-R10) and retry/backoff budget (CLI-R6) gate the call;
+        on a 429 the shared bucket's issue rate is adaptively reduced (CLI-R11).
+        """
+        if self._bucket is not None:
+            await self._bucket.acquire()
+        bucket = self._bucket
+        on_quota: Callable[[], object] | None = (
+            bucket.reduce_rate  # CLI-R11: a 429 lowers the shared bucket's issue rate
+            if bucket is not None and bucket.adaptive_reduction_enabled
+            else None
+        )
+        try:
+            resp = await resilient_get(
+                self._client, path, budget=self._budget, params=params, on_quota_signal=on_quota
+            )
+        except RetryExhaustedError as exc:
+            raise FetchError(
+                FetchErrorKind.SOURCE_UNAVAILABLE, "source unavailable after retries"
+            ) from exc
+        if resp.status_code in (401, 403):
+            raise AuthError(
+                FetchErrorKind.AUTH_REVOKED
+                if resp.status_code == 401
+                else FetchErrorKind.INSUFFICIENT_SCOPE,
+                "source credential rejected",
+            )
+        return resp
+
     async def probe(self) -> Mapping[str, Any]:
         """Mandatory read-only credential probe (AUT-R17): GET the athlete profile.
 
-        Returns the profile mapping on success; raises ``httpx.HTTPStatusError`` on a
-        non-2xx so the caller can refuse to mark the connection ``connected``.
+        Returns the profile mapping on success; raises a typed :class:`AuthError` on a
+        401/403 (AUT-R4) so the caller never marks the connection ``connected``.
         """
-        resp = await self._client.get(f"/api/v1/athlete/{self._athlete_id}")
-        resp.raise_for_status()
+        resp = await self._get(f"/api/v1/athlete/{self._athlete_id}")
         result: Mapping[str, Any] = resp.json()
         return result
 
     async def discover_activities(self, oldest: str, newest: str) -> list[dict[str, Any]]:
         """List activity summaries in an ISO-date window (ADP-R5; oldest/newest)."""
-        resp = await self._client.get(
+        resp = await self._get(
             f"/api/v1/athlete/{self._athlete_id}/activities",
             params={"oldest": oldest, "newest": newest},
         )
-        resp.raise_for_status()
         payload: list[dict[str, Any]] = resp.json()
         return payload
 
     async def fetch_activity(self, activity_id: str) -> ActivityWithStreams:
-        """Fetch one activity detail + its streams as a validated ASBO (ADP-R8)."""
-        detail = await self._client.get(f"/api/v1/activity/{activity_id}")
-        detail.raise_for_status()
-        streams = await self._client.get(
+        """Fetch one activity detail + its streams as a validated ASBO (ADP-R8, CLI-R2)."""
+        detail = await self._get(f"/api/v1/activity/{activity_id}")
+        streams = await self._raw_get(
             f"/api/v1/activity/{activity_id}/streams",
             params={"types": ",".join(_im.STREAM_CHANNELS)},
         )
         stream_rows = streams.json() if streams.status_code == httpx.codes.OK else []
         return ActivityWithStreams(
-            activity=IntervalsActivityAsbo.model_validate(detail.json()),
-            streams=[IntervalsStreamAsbo.model_validate(s) for s in stream_rows],
+            activity=validate_or_fetch_error(IntervalsActivityAsbo, detail.json()),
+            streams=[validate_or_fetch_error(IntervalsStreamAsbo, s) for s in stream_rows],
         )
 
     async def fetch_wellness(self, oldest: str, newest: str) -> list[IntervalsWellnessAsbo]:
-        """Fetch daily-wellness rows in an ISO-date window (ADP-R8)."""
-        resp = await self._client.get(
+        """Fetch daily-wellness rows in an ISO-date window (ADP-R8, CLI-R2)."""
+        resp = await self._get(
             f"/api/v1/athlete/{self._athlete_id}/wellness",
             params={"oldest": oldest, "newest": newest},
         )
-        resp.raise_for_status()
         rows: list[dict[str, Any]] = resp.json()
-        return [IntervalsWellnessAsbo.model_validate(r) for r in rows]
+        return [validate_or_fetch_error(IntervalsWellnessAsbo, r) for r in rows]
 
 
 def _parse_utc(value: str | None) -> _dt.datetime | None:

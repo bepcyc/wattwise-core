@@ -29,7 +29,9 @@ import pydantic
 import pytest
 import respx
 
+from wattwise_core.config import load_settings
 from wattwise_core.domain.enums import Fidelity, SourceKind
+from wattwise_core.ingestion.adapters._resilience import AttemptBudget
 from wattwise_core.ingestion.adapters.intervals_icu import (
     ActivityWithStreams,
     IntervalsActivityAsbo,
@@ -38,7 +40,7 @@ from wattwise_core.ingestion.adapters.intervals_icu import (
     IntervalsStreamAsbo,
     IntervalsWellnessAsbo,
 )
-from wattwise_core.ingestion.base import FetchContext, SourceDescriptorRef
+from wattwise_core.ingestion.base import AuthError, FetchContext, SourceDescriptorRef
 
 pytestmark = pytest.mark.contract
 
@@ -63,7 +65,16 @@ def _ctx() -> FetchContext:
 
 def _client() -> IntervalsIcuClient:
     # A non-secret placeholder key; respx intercepts so nothing leaves the process.
-    return IntervalsIcuClient("test-key", _ATHLETE, base_url=_BASE)
+    # A test budget retries fast (zero backoff) — a value supplied by the TEST, never a
+    # code default (CFG-R1a: production budgets come from config).
+    return IntervalsIcuClient(
+        "test-key",
+        _ATHLETE,
+        base_url=_BASE,
+        budget=AttemptBudget(
+            max_attempts=2, max_elapsed_s=5.0, base_backoff_s=0.0, max_backoff_s=0.0
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- probe
@@ -82,10 +93,15 @@ async def test_probe_succeeds_before_connected() -> None:
 
 @respx.mock
 async def test_probe_raises_on_unauthorized() -> None:
-    """A bad key (401) MUST raise so the caller never reports ``connected`` (AUT-R17)."""
+    """A bad key (401) MUST raise a typed AuthError so the caller never reports ``connected``.
+
+    The typed client converts the 401 to :class:`AuthError` (AUT-R4/CLI-R7) instead of
+    leaking a raw ``httpx.HTTPStatusError``, so the engine can flip the connection to
+    ``reauth_required`` rather than degrading silently.
+    """
     respx.get(f"{_BASE}/api/v1/athlete/{_ATHLETE}").mock(return_value=httpx.Response(401))
     async with _client() as client:
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(AuthError):
             await client.probe()
 
 
@@ -290,3 +306,38 @@ def test_adapter_satisfies_source_adapter_protocol() -> None:
     assert adapter.auth_archetype.value == "api_key"
     assert adapter.adapter_version and adapter.mapping_version
     assert callable(adapter.map)
+
+
+# ------------------------------------------------- resilience built from config
+
+
+async def test_from_settings_builds_resilience_from_config_not_code() -> None:
+    """The client's retry budget + token bucket are BUILT FROM CONFIG, not code (CFG-R1a).
+
+    CFG-R1a forbids any resilience VALUE (attempt count, backoff, issue rate, …) as a
+    code-baked literal — every value lives in ``defaults.toml`` and is built into the client
+    at construction. ``from_settings`` reads the ``adapters.intervals_icu`` section and
+    assembles the :class:`AttemptBudget` + :class:`TokenBucket` from it, so we assert the live
+    budget/timeout/limiter rate equal the resolved config values (the defaults.toml values,
+    here loaded through the real layered loader). Non-vacuous: a code-baked literal would NOT
+    track the resolved config.
+    """
+    settings = load_settings(
+        app__environment="development",
+        database_dsn="sqlite+aiosqlite:///:memory:",
+        token_signing_key="k" * 32,
+    )
+    icu = settings  # short alias to keep the per-field assertions on one line
+    client = IntervalsIcuClient.from_settings("test-key", _ATHLETE, settings, base_url=_BASE)
+    try:
+        budget = client._budget
+        assert budget.max_attempts == icu.adapters__intervals_icu__budget_max_attempts
+        assert budget.max_elapsed_s == icu.adapters__intervals_icu__budget_max_elapsed_s
+        assert budget.base_backoff_s == icu.adapters__intervals_icu__budget_base_backoff_s
+        assert budget.max_backoff_s == icu.adapters__intervals_icu__budget_max_backoff_s
+        assert client._bucket is not None
+        assert client._bucket.rate_per_s == icu.adapters__intervals_icu__bucket_rate_per_s
+        # The adaptive-429 reduction is configured (CLI-R11): a quota signal reduces, never raises.
+        assert client._bucket.adaptive_reduction_enabled is True
+    finally:
+        await client.aclose()

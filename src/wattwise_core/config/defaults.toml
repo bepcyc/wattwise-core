@@ -94,6 +94,26 @@ local_root = "/var/lib/wattwise/objects"
 # literal — operator-tunable.
 batch_size = 500
 
+[adapters.intervals_icu]
+# Intervals.icu outbound-client resilience values (CLI-R6/R10/R11, CFG-R1a). The typed
+# client's per-source retry budget + client-side token-bucket limiter are BUILT from these
+# (IntervalsIcuClient.from_settings) — never code-baked literals (CFG-R1a). Loaded here (the
+# lowest config layer), overridable by the operator file / env. All strictly positive; the
+# token-bucket reduce_factor is a fraction in (0,1) and min_rate floors the adaptive 429
+# reduction (CLI-R11). HTTP timeout caps the total per-request wall time (CLI-R4).
+# --- retry budget (CLI-R6: bounded attempts AND bounded elapsed wall time) ---
+budget_max_attempts = 4
+budget_max_elapsed_s = 30.0
+budget_base_backoff_s = 0.5
+budget_max_backoff_s = 8.0
+# --- client-side token bucket (CLI-R10/R11: per source+credential issue-rate limiter) ---
+bucket_rate_per_s = 5.0
+bucket_capacity = 10.0
+bucket_reduce_factor = 0.5
+bucket_min_rate = 0.5
+# --- request timeout (CLI-R4: connect + total read ceiling, seconds) ---
+http_timeout_s = 30.0
+
 [analytics]
 # PMC time constants (doc 40 PMC-R*): CTL=42d, ATL=7d exponential decay.
 ctl_time_constant_days = 42

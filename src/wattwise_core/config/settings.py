@@ -198,6 +198,23 @@ class Settings(BaseSettings):
     # never a code literal.
     ingestion__batch_size: int = Field(ge=1)
 
+    # --- adapters: Intervals.icu outbound-client resilience (CLI-R6/R10/R11, CFG-R1a) ---
+    # The typed client's per-source retry budget (CLI-R6) + client-side token-bucket limiter
+    # (CLI-R10/R11) are BUILT from these settings (IntervalsIcuClient.from_settings) so NO
+    # resilience value is code-baked (CFG-R1a). Schema + constraints only — the VALUES live in
+    # defaults.toml, overridable by the operator file / env. The budget caps attempts AND total
+    # elapsed wall time; the bucket reduce_factor is a fraction in (0,1) and min_rate floors the
+    # adaptive 429 issue-rate reduction (CLI-R11). All rates/counts/durations strictly positive.
+    adapters__intervals_icu__budget_max_attempts: int = Field(ge=1)
+    adapters__intervals_icu__budget_max_elapsed_s: float = Field(gt=0)
+    adapters__intervals_icu__budget_base_backoff_s: float = Field(ge=0)
+    adapters__intervals_icu__budget_max_backoff_s: float = Field(ge=0)
+    adapters__intervals_icu__bucket_rate_per_s: float = Field(gt=0)
+    adapters__intervals_icu__bucket_capacity: float = Field(gt=0)
+    adapters__intervals_icu__bucket_reduce_factor: float = Field(gt=0, lt=1)
+    adapters__intervals_icu__bucket_min_rate: float = Field(gt=0)
+    adapters__intervals_icu__http_timeout_s: float = Field(gt=0)
+
     # --- analytics (doc 40 constants) ---
     analytics__ctl_time_constant_days: float = Field(gt=0)
     analytics__atl_time_constant_days: float = Field(gt=0)
