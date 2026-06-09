@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import decoupling as _dec
 from wattwise_core.analytics import hrv as _hrv
+from wattwise_core.analytics import load_substitution as _ls
 from wattwise_core.analytics import mmp_cp as _mmp
 from wattwise_core.analytics import np_if_tss as _np
 from wattwise_core.analytics import pmc as _pmc
@@ -39,7 +40,8 @@ from wattwise_core.analytics.result import (
     is_computed,
 )
 from wattwise_core.analytics.series import Stream, resample_to_1hz
-from wattwise_core.domain.enums import StreamChannelName, StreamSetKind
+from wattwise_core.domain.coverage import Coverage
+from wattwise_core.domain.enums import Fidelity, StreamChannelName, StreamSetKind
 from wattwise_core.persistence.models import (
     Activity,
     ActivityStreamSet,
@@ -174,9 +176,9 @@ class AnalyticsService:  # noqa: size-limits
     Intentionally ONE class slightly over the derived class-size guard: ARCH-R5/R23
     mandate a SINGLE canonical entry point per analytics capability shared by the API
     and the agent, so splitting this facade into sibling classes would create multiple
-    entry points — the opposite of the spec invariant. The module stays well under the
-    400-line module ceiling and every method under the 60-line function ceiling; the
-    stateless loaders are already factored to module level.
+    entry points — the opposite of the spec invariant. Every method stays under the
+    60-line function ceiling; stateless loaders and the substitution carriers
+    (:mod:`wattwise_core.analytics.load_substitution`) are factored to module level.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -312,41 +314,64 @@ class AnalyticsService:  # noqa: size-limits
     ) -> dict[_dt.date, float | None]:
         """Per-day summed training load over resolved canonical activities (LOAD-R1).
 
-        Reads RESOLVED canonical activities (DEDUP-R4 — never per-source rows); each
-        contributes its computed power-TSS once. A day with no activity is a real ``0``
-        rest day; a day whose only activity has no computable load contributes ``None``
-        (surfaced), never a silent zero.
+        Reads RESOLVED canonical activities (DEDUP-R4 — never per-source rows); a no-activity
+        day is a real ``0`` rest day, a computable-load-less day is a surfaced ``None`` (never
+        a silent zero). See :meth:`_daily_loads_with_coverage` for the per-day coverage.
+        """
+        loads, _ = await self._daily_loads_with_coverage(athlete_id, from_date, to_date)
+        return loads
+
+    async def _daily_loads_with_coverage(
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+    ) -> tuple[dict[_dt.date, float | None], dict[_dt.date, Coverage | None]]:
+        """Resolve per-day load AND its equivalence-class coverage in one pass (LOAD-R1/DEGR-R2).
+
+        Each resolved activity contributes its load once via the LOAD-R3 fallback; a day is
+        flagged SUBSTITUTED iff ANY contributing activity's load came from a lower-fidelity
+        member (DEGR-R2 — a partially substituted day is never presented at full fidelity).
         """
         activities = await self._activities_in_range(athlete_id, from_date, to_date)
         by_day: dict[_dt.date, float] = defaultdict(float)
+        substituted_day: set[_dt.date] = set()
+        loaded_day: set[_dt.date] = set()
         seen: set[_dt.date] = set()
         for act in activities:
             day = act.start_time.date()
             seen.add(day)
-            load = await self._activity_load(str(act.activity_id))
-            if load is not None:
-                by_day[day] += load
-        out: dict[_dt.date, float | None] = {}
+            contribution = await self._activity_load(str(act.activity_id))
+            if contribution is not None:
+                by_day[day] += contribution.value
+                loaded_day.add(day)
+                if contribution.coverage.fidelity is Fidelity.SUBSTITUTED:
+                    substituted_day.add(day)
+        loads: dict[_dt.date, float | None] = {}
+        coverage: dict[_dt.date, Coverage | None] = {}
         cur = from_date
         while cur <= to_date:
             # A day with no activity is a real 0 rest day; a day that had an activity
             # but no computable load is a surfaced None, never a silent zero (LOAD-R1).
-            out[cur] = by_day.get(cur, None if cur in seen else 0.0)
+            loads[cur] = by_day.get(cur, None if cur in seen else 0.0)
+            coverage[cur] = _ls.day_load_coverage(
+                has_load=cur in loaded_day, substituted=cur in substituted_day
+            )
             cur += _dt.timedelta(days=1)
-        return out
+        return loads, coverage
 
-    async def _activity_load(self, activity_id: str) -> float | None:
+    async def _activity_load(self, activity_id: str) -> _ls.LoadContribution | None:
         """Per-activity training load by the LOAD-R3 priority: power_tss -> hr_load -> None.
 
-        Power TSS when a mechanical-power channel + effective FTP are present; otherwise
-        the Banister HR load (TRIMP-R1) when HR + HR_max/HR_rest are present; otherwise
-        the activity contributes nothing (a surfaced unknown-load day, never a silent 0).
+        Resolves the ``training_load`` equivalence class (DM-SUB-R1): power-TSS (the
+        ``raw_stream`` top member) else the Banister HR load (the ``modeled`` member) carried as
+        a SUBSTITUTED contribution (DEGR-R2) — so a withdrawn power source never presents an HR
+        load as power-TSS — else ``None`` (empty class: a surfaced unknown-load day, DEGR-R3).
         """
         bundle = await self.coggan(activity_id)
         if is_computed(bundle) and is_computed(bundle.value.tss):
-            return float(bundle.value.tss.value)
+            return _ls.LoadContribution(float(bundle.value.tss.value), _ls.LOAD_TOP_COVERAGE)
         hr_load = await self.trimp(activity_id)
-        return float(hr_load.value) if is_computed(hr_load) else None
+        if is_computed(hr_load):
+            return _ls.LoadContribution(float(hr_load.value), _ls.LOAD_SUBSTITUTED_COVERAGE)
+        return None
 
     async def _earliest_activity_date(self, athlete_id: str) -> _dt.date | None:
         """The local-date of the athlete's first-ever activity, or None if none."""
@@ -377,9 +402,12 @@ class AnalyticsService:  # noqa: size-limits
         origin = from_date if seed is not None else (await self._earliest_activity_date(athlete_id))
         if origin is None or origin > from_date:
             origin = from_date
-        loads = await self.daily_load_series(athlete_id, origin, to_date)
-        series = [loads[d] for d in sorted(loads)]
-        full = _pmc.pmc(series, seed=seed)
+        loads, day_cov = await self._daily_loads_with_coverage(athlete_id, origin, to_date)
+        ordered = sorted(loads)
+        series = [loads[d] for d in ordered]
+        # Thread per-day load coverage: a day fed by a substituted member carries
+        # SUBSTITUTED + reduced confidence (DEGR-R2), never presented as raw power-TSS.
+        full = _pmc.pmc(series, seed=seed, day_load_coverage=[day_cov[d] for d in ordered])
         start_index = (from_date - origin).days
         return full[start_index:]
 

@@ -81,14 +81,22 @@ def dispute_tolerance(field_name: str) -> float | None:
     return _DEFAULT_DISPUTE_TOLERANCE
 
 
-def coverage_for(present: bool, fidelity: Fidelity, *, disputed: bool) -> Coverage:
-    """A real :class:`Coverage` for a resolved canonical field (CONF-R5/GAP-R2).
+def coverage_for(
+    present: bool, fidelity: Fidelity, *, disputed: bool, failed: bool = False
+) -> Coverage:
+    """A real :class:`Coverage` for a resolved canonical field (CONF-R5/GAP-R2/GAP-R3).
 
     Carries no source identity; ``disputed`` surfaces material multi-source
     disagreement without hiding it (the winner is still the resolved value).
+
+    On a typed absence (``present=False``), ``failed`` selects the GAP-R3 distinction:
+    ``absent_failed`` (a source that SHOULD have supplied the channel failed to fetch — an
+    open gap) versus ``absent_true`` (no source supplies it at all). The caller passes
+    ``failed=True`` only when it holds a real fetch-failure signal; the default
+    ``absent_true`` is the honest state for a field no contributor provided.
     """
     if not present:
-        return Coverage.absent()
+        return Coverage.absent(failed=failed)
     return Coverage(present=True, fidelity=fidelity, disputed=disputed)
 
 
@@ -328,6 +336,10 @@ async def write_wellness_canonical(
         contributors = field_candidates(candidates, fname, tier_of)
         winner = resolve_field(contributors, dispute_tolerance=dispute_tolerance(fname))
         if winner is None:
+            # No contributor: a typed absent_true descriptor, not a silent skip
+            # (GAP-R1/GAP-R3) — the wellness field is honestly "no data", never zero-filled.
+            absent = coverage_for(False, Fidelity.ABSENT_TRUE, disputed=False)
+            coverage[fname] = absent.to_jsonable()
             continue
         values[fname] = winner.value
         update_columns.append(fname)

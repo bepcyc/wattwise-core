@@ -31,14 +31,27 @@ _FAILED_REASONS: Final = frozenset(
 
 
 def present_coverage(quality: Any) -> CoverageDescriptor:
-    """Map a computed metric's ``QualityReport`` to a present coverage (PMC-R6 provisional)."""
+    """Map a computed metric's ``QualityReport`` to a present coverage (PMC-R6 provisional).
+
+    When the metric's load was re-resolved to a lower-fidelity equivalence-class member
+    (DEGR-R2), the ``QualityReport.extra`` carries ``substitution_class`` + ``from_fidelity``;
+    these populate the consumer-visible ``substitution:{class, from_fidelity}`` so a client can
+    retrieve the displaced top tier from the API response (API-R29 / SUB-R1(c)). Without a
+    substitution the field stays ``None``.
+    """
     extra = getattr(quality, "extra", {}) or {}
     fidelity = str(extra.get("fidelity", "raw_stream"))
+    sub_class = extra.get("substitution_class")
+    from_fid = extra.get("from_fidelity")
+    substitution = (
+        {"class": sub_class, "from_fidelity": from_fid} if sub_class and from_fid else None
+    )
     return CoverageDescriptor(
         present=True,
         fidelity=fidelity,
         gap_fraction=1.0 - float(getattr(quality, "coverage_fraction", 1.0)),
         provisional=bool(extra.get("provisional", False)),
+        substitution=substitution,
     )
 
 

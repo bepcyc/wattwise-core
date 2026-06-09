@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import ActivityFileFormat, Fidelity
-from wattwise_core.ingestion._canonical import field_candidates
+from wattwise_core.ingestion._canonical import coverage_for, field_candidates
 from wattwise_core.ingestion.dedup import resolve_field
 from wattwise_core.ingestion.ingest import IngestService, OriginalFile
 from wattwise_core.persistence.models import (
@@ -624,3 +624,48 @@ async def test_whole_source_override_keeps_sole_carrier_stream_channel(
     # ...and the badge reflects the demoted summary_only tier, NOT the carrier's RAW_STREAM
     # adapter tier — proving the "*" override threaded through (non-vacuous: differs from adapter).
     assert cov["fidelity"] == Fidelity.SUMMARY_ONLY.value
+
+
+# ----------------------------------------- GAP-R3: typed absent_true on the write path
+
+
+async def test_gap_r3_no_contributor_field_is_typed_absent_true(session: AsyncSession) -> None:
+    """GAP-R3/GAP-R1: a scalar NO source supplied is written as typed absent_true, not skipped.
+
+    The ingest write path used to ``continue`` on a no-contributor field, leaving neither
+    coverage nor value — making a true absence indistinguishable from anything else. GAP-R3
+    requires the union-of-presence AND a typed absence: a channel ``absent_true`` only when no
+    source provides it at all. Here the ride supplies ``avg_power_w`` but no HR scalar, so the
+    canonical coverage MUST carry a present power badge AND an ``absent_true`` HR badge.
+    """
+    athlete_id, file_src, _ = await _seed(session)
+    ingest = IngestService(session)
+    await ingest.ingest(
+        athlete_id, file_src,
+        [_ride(native_id="ride-1", watts=250.0, seconds=3600, tier=Fidelity.RAW_STREAM)],
+    )
+    await session.commit()
+    act = (await session.execute(select(Activity))).scalars().one()
+    cov = act.coverage
+    # Union-of-presence: the supplied power scalar is present (GAP-R3 conforms).
+    assert cov["avg_power_w"]["present"] is True
+    # The HR scalar NO source supplied is a typed absence — absent_true (not failed), never skipped.
+    assert "avg_hr_bpm" in cov, "no-contributor field was silently skipped (GAP-R1/GAP-R3 gap)"
+    assert cov["avg_hr_bpm"]["present"] is False
+    assert cov["avg_hr_bpm"]["fidelity"] == Fidelity.ABSENT_TRUE.value
+    # ...and it is NOT zero-filled onto the record (GAP-R1: no fabricated value).
+    assert act.avg_hr_bpm is None
+
+
+async def test_gap_r3_coverage_for_failed_produces_absent_failed(session: AsyncSession) -> None:
+    """GAP-R3/HLT-R3: coverage_for can emit absent_failed for a fetch-failure, distinct from true.
+
+    The fetch-failure trigger is owned by the ingestion-failure lifecycle (ING-GAP/ING-SUB,
+    out of this slice); this pins the write-path CAPABILITY the descriptor must expose so a
+    "source should have supplied it but failed" gap is distinguishable from "no source at all".
+    """
+    failed = coverage_for(False, Fidelity.ABSENT_FAILED, disputed=False, failed=True)
+    true_absent = coverage_for(False, Fidelity.ABSENT_TRUE, disputed=False)
+    assert failed.fidelity is Fidelity.ABSENT_FAILED
+    assert true_absent.fidelity is Fidelity.ABSENT_TRUE
+    assert failed.fidelity is not true_absent.fidelity

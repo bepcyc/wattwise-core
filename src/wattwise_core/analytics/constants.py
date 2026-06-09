@@ -8,7 +8,29 @@ requirement that owns its default.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
 from typing import Final
+
+_DEFAULTS_PATH = Path(__file__).parents[1] / "config" / "defaults.toml"
+
+
+def _analytics_default(key: str) -> float:
+    """Read one ``[analytics]`` scalar from the packaged dead config file (CFG-R1a).
+
+    The VALUE lives in ``defaults.toml`` — never as a code-baked literal. A key absent
+    from the packaged defaults fails closed (CFG-R6), never silently falling back to a
+    literal. This is a one-time module-load read, so the pure metric functions that import
+    the resolved constant stay free of per-call I/O (ANL-R2/R30).
+    """
+    with _DEFAULTS_PATH.open("rb") as fh:
+        analytics = tomllib.load(fh).get("analytics", {})
+    if key not in analytics:
+        raise RuntimeError(
+            f"fail-closed: analytics.{key} is absent from {_DEFAULTS_PATH.name} "
+            "(CFG-R1a: the value belongs in defaults.toml, not a code literal)"
+        )
+    return float(analytics[key])
 
 # --- resampling / time base ---
 MAX_INTERP_GAP_S: Final = 3.0  # ANL-R8
@@ -18,6 +40,23 @@ RDP_MAX_BISECTION_STEPS: Final = 32  # ANL-R8b
 CTL_TIME_CONSTANT_DAYS: Final = 42.0  # PMC-R1
 ATL_TIME_CONSTANT_DAYS: Final = 7.0  # PMC-R1
 WINDOWED_EQUIV_ABS_TOL: Final = 1e-9  # PMC-R4 (× max(1,|value|))  # noqa: RUF003 - math notation
+
+# --- training-load equivalence class (DM-SUB-R1 worked example; LOAD-R3 priority) ---
+# The canonical ``training_load`` channel's declared equivalence-class label. Power-based
+# TSS is the top (``raw_stream``) member; the HR-derived Banister load (TRIMP) is the
+# lowest ``modeled`` member (DM-SUB-R1 worked example). When a higher member is withdrawn
+# and the load is recomputed from a lower one, coverage carries ``Fidelity.SUBSTITUTED`` +
+# ``Substitution(class, from_fidelity)`` (DEGR-R2). The label is config (CFG-R1a), not a
+# formula constant; the member fidelity tiers live in :mod:`wattwise_core.analytics.service`
+# beside the LOAD-R3 fallback that produces them.
+TRAINING_LOAD_CLASS: Final = "training_load"  # DM-SUB-R1 / DEGR-R2 equivalence-class label
+# DEGR-R2 reduced-confidence multiplier on substitution. The VALUE is NOT a code literal
+# (CFG-R1a): it is loaded from ``[analytics]`` in the packaged defaults.toml (the dead config
+# file), typed + range-validated by ``Settings.analytics__training_load_confidence_penalty``,
+# and overridable by the operator file / environment via that schema field.
+TRAINING_LOAD_CONFIDENCE_PENALTY: Final[float] = _analytics_default(
+    "training_load_confidence_penalty"
+)
 
 # --- Normalized Power / TSS ---
 NP_ROLLING_WINDOW_S: Final = 30  # NP-R1

@@ -201,6 +201,9 @@ class Settings(BaseSettings):
     # --- analytics (doc 40 constants) ---
     analytics__ctl_time_constant_days: float = Field(gt=0)
     analytics__atl_time_constant_days: float = Field(gt=0)
+    # DEGR-R2 substitution confidence multiplier (in (0,1]); the VALUE lives in defaults.toml
+    # (CFG-R1a), this declares only the typed schema + range constraint.
+    analytics__training_load_confidence_penalty: float = Field(gt=0, le=1)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str

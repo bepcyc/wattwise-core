@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from wattwise_core.analytics.constants import (
     ATL_TIME_CONSTANT_DAYS,
     CTL_TIME_CONSTANT_DAYS,
+    TRAINING_LOAD_CONFIDENCE_PENALTY,
     WINDOWED_EQUIV_ABS_TOL,
 )
 from wattwise_core.analytics.result import (
@@ -58,6 +59,8 @@ from wattwise_core.analytics.result import (
     Unavailable,
     UnavailableReason,
 )
+from wattwise_core.domain.coverage import Coverage
+from wattwise_core.domain.enums import Fidelity
 
 __all__ = [
     "PmcDay",
@@ -71,15 +74,28 @@ __all__ = [
 # covariant Sequence (so a plain ``list[float]`` is fine) OR a date-keyed Mapping.
 _DailyLoad = Sequence[float | None]
 _DailyLoadInput = _DailyLoad | Mapping[_dt.date, float | None]
+# Per-day load-coverage carrier (DEGR-R2): the fidelity / substitution of the load that
+# fed each day, aligned to the dense calendar grid (positional list) or date-keyed.
+_DayCoverage = Sequence[Coverage | None]
+_DayCoverageInput = _DayCoverage | Mapping[_dt.date, Coverage | None]
 
 
 @dataclass(frozen=True, slots=True)
 class PmcDay:
-    """One materialized calendar day of the chart (the value of each Computed)."""
+    """One materialized calendar day of the chart (the value of each Computed).
+
+    ``load_coverage`` carries the fidelity of the training load that fed this day
+    (DEGR-R2): when the day's load was recomputed from a lower-fidelity equivalence-class
+    member (e.g. HR-derived load after the power source was withdrawn) it is
+    ``Fidelity.SUBSTITUTED`` with a populated ``substitution`` — so a client badges
+    reduced precision rather than reading it as full-fidelity power-TSS. ``None`` when no
+    per-day coverage was threaded (back-compat / pure-recurrence callers).
+    """
 
     ctl: float
     atl: float
     tsb: float
+    load_coverage: Coverage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +139,29 @@ def _normalize_input(
         loads = [daily_load.get(d) for d in dates]
         return loads, dates
     return list(daily_load), None
+
+
+def _align_coverage(
+    day_load_coverage: _DayCoverageInput | None,
+    dates: list[_dt.date] | None,
+    n: int,
+) -> list[Coverage | None]:
+    """Align per-day load coverage to the dense grid (DEGR-R2), or all-``None``.
+
+    A date-keyed mapping is read against the materialized ``dates``; a positional
+    sequence must already match the dense grid length (else it is a caller defect).
+    Absent coverage threads ``None`` so the recurrence is unchanged for pure callers.
+    """
+    if day_load_coverage is None:
+        return [None] * n
+    if isinstance(day_load_coverage, Mapping):
+        if dates is None:
+            raise ValueError("date-keyed day_load_coverage requires a date-keyed daily_load")
+        return [day_load_coverage.get(d) for d in dates]
+    seq = list(day_load_coverage)
+    if len(seq) != n:
+        raise ValueError("positional day_load_coverage must match the daily_load grid length")
+    return seq
 
 
 def _validate_loads(loads: list[float | None]) -> None:
@@ -186,6 +225,7 @@ def pmc(
     seed: PmcSeed | tuple[float, float] | None = None,
     window: tuple[int, int] | None = None,
     sport: str | None = None,
+    day_load_coverage: _DayCoverageInput | None = None,
 ) -> list[MetricResult[PmcDay]]:
     """Compute the per-day PMC series (one :class:`MetricResult` per calendar day).
 
@@ -214,6 +254,13 @@ def pmc(
     sport:
         Optional resolved sport recorded in lineage (PMC is sport-partitioned via
         its load series upstream; the recurrence itself is sport-agnostic).
+    day_load_coverage:
+        Optional per-day load coverage (DEGR-R2), aligned to the dense grid (a
+        positional sequence matching ``daily_load`` length, or a date-keyed mapping).
+        When a day's load came from a substituted lower-fidelity class member its
+        :class:`PmcDay` carries that coverage and the day's ``QualityReport`` shows
+        reduced confidence — never presenting a substituted load as raw fidelity. It
+        is annotation-only: the numeric CTL/ATL/TSB recurrence is unaffected.
 
     Returns
     -------
@@ -227,6 +274,7 @@ def pmc(
     loads, dates = _normalize_input(daily_load)
     _validate_loads(loads)
     n = len(loads)
+    coverage = _align_coverage(day_load_coverage, dates, n)
 
     d0, d1 = _resolve_window(window, n)
 
@@ -241,6 +289,7 @@ def pmc(
     return _run(
         loads=loads,
         dates=dates,
+        coverage=coverage,
         d0=d0,
         d1=d1,
         seed_ctl=seed_ctl,
@@ -264,12 +313,16 @@ def _pmc_day_result(
     tau_ctl: float,
     tau_atl: float,
     sport: str | None,
+    load_coverage: Coverage | None,
 ) -> MetricResult[PmcDay]:
     """Build one day's :class:`PmcDay` result from the recurrence outputs (PMC-R1).
 
     A provisional day (the load was a gap) carries reduced confidence and a gap-flag in
-    its :class:`QualityReport`. A non-finite CTL/ATL/TSB fails closed to ``OUT_OF_DOMAIN``
-    so no NaN/Inf escapes into a ``Computed`` (ANL-R32).
+    its :class:`QualityReport`. A day whose load was SUBSTITUTED from a lower-fidelity
+    equivalence-class member (DEGR-R2) carries that ``load_coverage`` on the :class:`PmcDay`
+    and a further-reduced confidence + ``substituted``/``from_fidelity`` in the
+    :class:`QualityReport` — so the day is never presented as full-fidelity power-TSS. A
+    non-finite CTL/ATL/TSB fails closed to ``OUT_OF_DOMAIN`` so no NaN/Inf escapes (ANL-R32).
     """
     if not (math.isfinite(ctl) and math.isfinite(atl) and math.isfinite(tsb)):
         # No NaN/Inf may escape into a Computed (ANL-R32).
@@ -278,17 +331,30 @@ def _pmc_day_result(
             detail="non-finite PMC value (ANL-R32)",
         )
 
+    substituted = load_coverage is not None and load_coverage.fidelity is Fidelity.SUBSTITUTED
+    confidence = 0.5 if provisional else 1.0
+    extra: dict[str, object] = {
+        "provisional": provisional,
+        "day_kind": "provisional" if provisional else "true_rest_or_load",
+        "tau_ctl_days": tau_ctl,
+        "tau_atl_days": tau_atl,
+    }
+    if substituted and load_coverage is not None and load_coverage.substitution is not None:
+        # DEGR-R2: surface the in-class downgrade — reduced confidence + the substituted
+        # fidelity token + from_fidelity, so a consumer (incl. the API coverage descriptor)
+        # NEVER presents this day at the displaced raw-stream tier.
+        confidence *= TRAINING_LOAD_CONFIDENCE_PENALTY
+        extra["fidelity"] = Fidelity.SUBSTITUTED.value
+        extra["substituted"] = True
+        extra["substitution_class"] = load_coverage.substitution.equivalence_class
+        extra["from_fidelity"] = load_coverage.substitution.from_fidelity.value
+
     quality = QualityReport(
         coverage_fraction=1.0,
         sample_rate_hz=None,
         gap_count=1 if provisional else 0,
-        confidence=0.5 if provisional else 1.0,
-        extra={
-            "provisional": provisional,
-            "day_kind": "provisional" if provisional else "true_rest_or_load",
-            "tau_ctl_days": tau_ctl,
-            "tau_atl_days": tau_atl,
-        },
+        confidence=confidence,
+        extra=extra,
     )
     lineage = InputLineage(
         sport=sport,
@@ -301,7 +367,7 @@ def _pmc_day_result(
         },
     )
     return Computed(
-        value=PmcDay(ctl=ctl, atl=atl, tsb=tsb),
+        value=PmcDay(ctl=ctl, atl=atl, tsb=tsb, load_coverage=load_coverage),
         quality=quality,
         provenance=lineage,
     )
@@ -311,6 +377,7 @@ def _run(
     *,
     loads: list[float | None],
     dates: list[_dt.date] | None,
+    coverage: list[Coverage | None],
     d0: int,
     d1: int,
     seed_ctl: float,
@@ -346,6 +413,7 @@ def _run(
                 tau_ctl=tau_ctl,
                 tau_atl=tau_atl,
                 sport=sport,
+                load_coverage=coverage[i],
             )
         )
         ctl_prev, atl_prev = ctl, atl

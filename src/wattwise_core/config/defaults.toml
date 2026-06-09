@@ -98,6 +98,10 @@ batch_size = 500
 # PMC time constants (doc 40 PMC-R*): CTL=42d, ATL=7d exponential decay.
 ctl_time_constant_days = 42
 atl_time_constant_days = 7
+# DEGR-R2: confidence multiplier applied to a PMC day whose training-load was re-resolved
+# from a LOWER-fidelity equivalence-class member (substituted), so the day is never presented
+# at full fidelity. A factor in (0,1]; lives here (CFG-R1a), never baked into code.
+training_load_confidence_penalty = 0.7
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.

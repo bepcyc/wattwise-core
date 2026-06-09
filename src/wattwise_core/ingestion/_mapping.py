@@ -69,6 +69,11 @@ def _resolve_scalars(
         contributors = _cw.field_candidates(candidates, fname, tier_of)
         winner = resolve_field(contributors, dispute_tolerance=_cw.dispute_tolerance(fname))
         if winner is None:
+            # No contributor supplied this field: a typed absence, NOT a silent skip
+            # (GAP-R1/GAP-R3). absent_true (no source provides it) — never zero-filled.
+            coverage[fname] = _cw.coverage_for(
+                False, Fidelity.ABSENT_TRUE, disputed=False
+            ).to_jsonable()
             continue
         resolved[fname] = winner.value
         # Badge the RESOLVED WINNER's tier, NOT an arbitrary scanned contributor (PRV-R6).
