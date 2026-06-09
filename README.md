@@ -6,8 +6,6 @@
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Code style: Ruff](https://img.shields.io/badge/code%20style-Ruff-261230?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff)
 [![Typed: mypy](https://img.shields.io/badge/typed-mypy-2A6DB2.svg)](https://mypy-lang.org/)
-[![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](#)
 
 Connect your training-data sources and wattwise-core unifies everything into **one canonical record of truth**, then computes **sports-science-correct analytics** — PMC, NP/IF/TSS, CP/W', W'bal, aerobic decoupling, HRV, TRIMP. On top of that sits a **LangGraph coaching agent** that answers questions and reviews your training load, **grounded fail-closed** against your real data: if it can't back a number with your canonical record, it won't say it. Self-hostable, single-athlete, Apache-2.0.
 
