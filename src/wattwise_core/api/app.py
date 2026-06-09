@@ -26,15 +26,18 @@ Requirements realized here (doc 60 / doc 70):
 
 from __future__ import annotations
 
+import datetime as _dt
 import hmac
+from collections.abc import Callable
 from importlib import import_module
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Depends, FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.agent.engine import UnconfiguredAgentEngine, build_agent_engine
+from wattwise_core.agent.state_db import build_agent_state_database
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.api.auth import (
     Principal,
@@ -49,17 +52,20 @@ from wattwise_core.api.middleware import JSONBodySizeLimitMiddleware
 from wattwise_core.api.openapi import install_openapi
 from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import activities as activities_router
+from wattwise_core.api.routers import agent_breadth as agent_breadth_router
 from wattwise_core.api.routers import agent_routes as agent_router
 from wattwise_core.api.routers import athlete as athlete_router
 from wattwise_core.api.routers import connections as connections_router
 from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import performance as performance_router
+from wattwise_core.api.routers import planning as planning_router
 from wattwise_core.api.routers import sync as sync_router
 from wattwise_core.api.routers import user_settings as user_settings_router
+from wattwise_core.api.routers import users as users_router
 from wattwise_core.api.wiring import build_ingestion_seams
 from wattwise_core.config import Settings, get_settings
 from wattwise_core.identity import OWNER_SUBJECT
-from wattwise_core.observability.logging import configure_logging
+from wattwise_core.observability.logging import configure_logging, get_logger
 from wattwise_core.persistence import Database
 
 #: The WWW-Authenticate challenge returned with an invalid sign-in (AUTH-R1/API-R23).
@@ -136,7 +142,17 @@ def _wire_router_seams(app: FastAPI) -> None:
     connect/import/sync routers' seams are bound to the real OSS ingestion services (the
     file-upload import processor, the on-demand sync orchestrator, and the credential
     store) via :func:`wattwise_core.api.wiring.build_ingestion_seams` so the built stack
-    can connect → sync → land canonical data (ARCH-R22 — routers stay source-blind).
+    can connect → sync → land canonical data (ARCH-R22 — routers stay source-blind). The
+    planning router's agent-path + read-view seams are bound by :func:`_wire_planning` to the
+    SAME server-derived identity, scope gates, agent engine, session, cursor key, and process
+    limiter (ARCH-R21). The agent-breadth surfaces (diagnose / digest / memory) reuse the agent
+    router's identity/scope/engine/limiter overrides; only the breadth-local ``current_session``
+    is bound here to the shared session so the digest CRUD + email-verified gate are live (H1).
+    The users router self-wires its read/write surfaces through the shared ``deps`` providers
+    (server-derived principal + scopes + session + rate limit); its deletion-erasure seam is bound
+    here to a DURABLE audit-log-backed async recorder so DELETE /v1/users/me records a
+    ``pending_deletion`` erasure request (PRIV-R8 / retention §11) rather than 500-ing on its
+    fail-closed default (H4) — it never hard-deletes inline.
     """
     overrides = app.dependency_overrides
     overrides[performance_router.require_read_scope] = require_scopes(Scope.READ)
@@ -155,14 +171,90 @@ def _wire_router_seams(app: FastAPI) -> None:
     overrides[agent_router.require_agent_scope] = require_scopes(Scope.AGENT)
     overrides[agent_router.current_athlete_id] = _athlete_id_seam
     overrides[agent_router.rate_limiter] = get_rate_limiter
-    engine = build_agent_engine(app.state.database, app.state.settings) or UnconfiguredAgentEngine()
+    engine = _build_engine(app)
     overrides[agent_router.agent_engine] = lambda: engine
+    # The breadth surfaces (diagnose / digest / memory) reuse the agent router's identity/scope/
+    # engine/limiter overrides (above); only the breadth-local DB-session seam is new — bind it to
+    # the shared transactional session so digest persistence + the email-verified gate are live
+    # (H1: an unwired ``current_session`` fails closed and 500s the digest CRUD).
+    overrides[agent_breadth_router.current_session] = get_db
+    # The owner account-deletion endpoint records an ASYNC erasure request via a durable recorder
+    # (PRIV-R8 / retention §11); bind it so DELETE /v1/users/me acknowledges rather than 500-ing on
+    # its fail-closed default (H4).
+    overrides[users_router.deletion_requester] = lambda: _record_deletion_request
+    _wire_planning(overrides, engine)
     seams = build_ingestion_seams(app.state.database, app.state.settings)
     overrides[imports_router.import_processor] = lambda: seams.import_processor
     overrides[sync_router.sync_orchestrator] = lambda: seams.sync_orchestrator
     if seams.credential_sink is not None:
         sink = seams.credential_sink
         overrides[connections_router.credential_sink] = lambda: sink
+
+
+def _wire_planning(
+    overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object
+) -> None:
+    """Bind the planning router's seams to the real gates + the shared agent engine (API-R32).
+
+    The planning surface mirrors the agent/performance routers: GENERATION (``POST
+    /v1/planning/workouts``) is gated on the ``agent`` scope and the READ views
+    (``GET /v1/planning/workouts``, ``/schedule``) on ``read`` (AUTH-R11/R13); the acting
+    athlete id is server-derived from the verified principal (AUTH-R3 — never a client value);
+    the plan-generation seam is the SAME ``GraphAgentEngine`` the ``/v1/agent`` surface drives
+    (ARCH-R21), so an OSS deployment with no LLM phase-gates to a degraded answer rather than
+    fabricating a plan (RUN-R4.1). The session is the shared transactional one, the keyset cursor
+    is signed with the engine key (PAGE-R5), and the per-athlete ``agent`` bucket is the process
+    limiter (LIMIT-R2).
+    """
+    overrides[planning_router.require_agent_scope] = require_scopes(Scope.AGENT)
+    overrides[planning_router.require_read_scope] = require_scopes(Scope.READ)
+    overrides[planning_router.current_athlete_id] = _athlete_id_seam
+    overrides[planning_router.planning_engine] = lambda: engine
+    overrides[planning_router.current_session] = get_db
+    overrides[planning_router.rate_limiter] = get_rate_limiter
+    overrides[planning_router.cursor_signing_key] = _cursor_signing_key_seam
+
+
+#: The durable audit logger the async account-deletion recorder appends erasure requests to.
+_DELETION_LOGGER: Final = get_logger("wattwise_core.api.users.deletion")
+
+
+def _build_engine(app: FastAPI) -> object:
+    """Build the agent engine the API drives — the live coach, else the no-LLM fallback (RUN-R4.1).
+
+    With an LLM key configured this is the live :class:`GraphAgentEngine`; with none it is the
+    :class:`UnconfiguredAgentEngine` wired with the canonical ``Database`` (read-only for the
+    DETERMINISTIC ``diagnose``, API-R15) and a DEDICATED agent-state store on its OWN engine/pool
+    (ARCH-R13/DEPLOY-R4) so the NON-LLM memory seam (MEM-R3 / PRIV-R8 — a privacy MUST that never
+    requires a model) reads/erases durable memory even with no LLM configured (H2). The same single
+    engine instance is shared by the ``/v1/agent`` (incl. breadth) and ``/v1/planning`` surfaces.
+    """
+    live = build_agent_engine(app.state.database, app.state.settings)
+    if live is not None:
+        return live
+    return UnconfiguredAgentEngine(
+        app.state.database,
+        state_db=build_agent_state_database(app.state.settings),
+    )
+
+
+async def _record_deletion_request(athlete_id: str, requested_at: _dt.datetime) -> None:
+    """Durably record an account-deletion request for the async erasure path (PRIV-R8 / §11).
+
+    The single-owner OSS engine has no scheduled erasure worker of its own; the deletion endpoint
+    must still NEVER silently no-op (fail-closed) and must NOT hard-delete inline (retention §11).
+    This appends a durable, structured audit record (the operator's JSON log sink is the durable
+    right-to-be-forgotten queue a background sweeper / the commercial layer consumes) stamped with
+    the SERVER-DERIVED owner id (AUTH-R3) and the request instant, then returns so the endpoint
+    acknowledges ``pending_deletion`` asynchronously. A logging failure propagates so the endpoint
+    fails closed rather than acknowledging an erasure that was never recorded.
+    """
+    _DELETION_LOGGER.info(
+        "account_deletion_requested",
+        athlete_id=athlete_id,
+        requested_at=requested_at.isoformat(),
+        status="pending_deletion",
+    )
 
 
 def _athlete_id_seam(principal: Annotated[Principal, Depends(authenticate)]) -> str:

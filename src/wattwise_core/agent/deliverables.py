@@ -311,6 +311,17 @@ async def weekly_digest(graph: CoachGraph, athlete_id: str, week_end: str) -> Di
 # sibling imports its shared graph-driving/projection primitives from the LEAF :mod:`projection`
 # module (NOT from here), so there is no ``deliverables`` <-> ``plan_deliverable`` cycle. Every
 # public path stays stable — ``Plan`` / ``plan`` remain importable from ``deliverables``.
+# Re-export the data-quality / coverage DIAGNOSIS deliverable from its focused sibling
+# :mod:`diagnose_deliverable` (QUAL-R9 size split, API-R15). The import is ONE-WAY (the diagnose
+# sibling depends only on the contracts + analytics, never back on ``deliverables``), so there is
+# no cycle; re-exporting keeps ``AgentDiagnosis``/``InputCoverage``/``InputStatus`` importable from
+# ``wattwise_core.agent.deliverables`` like every other deliverable type.
+from wattwise_core.agent.diagnose_deliverable import (  # noqa: E402
+    AgentDiagnosis,
+    InputCoverage,
+    InputStatus,
+    diagnose_coverage,
+)
 from wattwise_core.agent.plan_deliverable import (  # noqa: E402
     Plan,
     plan,
@@ -328,9 +339,12 @@ from wattwise_core.agent.readiness_deliverable import (  # noqa: E402
 
 __all__ = [
     "AgentAnswer",
+    "AgentDiagnosis",
     "Citation",
     "CoachGraph",
     "Digest",
+    "InputCoverage",
+    "InputStatus",
     "Observation",
     "Plan",
     "Readiness",
@@ -341,6 +355,7 @@ __all__ = [
     "answer_question",
     "conversation_id_of",
     "count_foregrounded_numbers",
+    "diagnose_coverage",
     "first_sentence",
     "leads_with_state",
     "new_conversation_id",

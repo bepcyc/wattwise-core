@@ -203,6 +203,17 @@ class AnalyticsService:  # noqa: size-limits
         rate = float(stream_set.sample_rate_hz) if stream_set.sample_rate_hz else 1.0
         return {c.channel: _channel_to_stream(c, rate) for c in channels}
 
+    async def current_sport(self, athlete_id: str) -> str | None:
+        """The athlete's current primary sport code from the canonical profile, else ``None``.
+
+        Resolved from the ``Athlete`` row (GBO-R13b) — a HINT the signature/coverage probes key on,
+        never hardcoded (CFG-R1a). A missing athlete or an unset ``current_sport`` returns ``None``
+        so a caller fails closed (e.g. reports the sport-keyed signature MISSING) rather than
+        guessing a sport.
+        """
+        athlete = await self._session.get(Athlete, _uid(athlete_id))
+        return None if athlete is None else athlete.current_sport
+
     async def resolve_signature(
         self, athlete_id: str, signature_type: str, as_of: _dt.date
     ) -> SignatureParams:

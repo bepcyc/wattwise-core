@@ -18,8 +18,10 @@ from wattwise_core.api.routers import (
     imports,
     onboarding,
     performance,
+    planning,
     sync,
     user_settings,
+    users,
 )
 
 #: Every feature router, in mount order. Each already carries its full ``/v1/...``
@@ -30,6 +32,8 @@ ROUTERS: list[APIRouter] = [
     agent_routes.router,
     athlete.router,
     user_settings.router,
+    users.router,
+    planning.router,
     connections.router,
     imports.router,
     sync.router,

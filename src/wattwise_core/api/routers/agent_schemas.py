@@ -405,26 +405,66 @@ def render_readiness(readiness: Readiness, trace_id: str) -> ReadinessResponse:
     )
 
 
+# The diagnose / digest / memory wire shapes live in the focused :mod:`agent_breadth_schemas`
+# sibling (QUAL-R9 size split); they are re-exported here so every public path stays importable
+# from ``agent_schemas`` exactly as before. The import sits AFTER the shared members above
+# (``ObservationOut`` / ``GroundingOut`` / ``_expand_chips`` / ``DEGRADED_REASON_BY_LOCALE`` …) so
+# the breadth-schema module can import them without an import cycle.
+from wattwise_core.api.routers.agent_breadth_schemas import (  # noqa: E402
+    AgentDiagnosisResponse,
+    DeliveryChannelOut,
+    DigestBody,
+    DigestCadenceOut,
+    DigestStatusOut,
+    DigestSubscribeRequest,
+    DigestSubscriptionList,
+    DigestSubscriptionOut,
+    InputCoverageOut,
+    MemoryEraseAck,
+    MemoryItemList,
+    MemoryItemOut,
+    WeekdayOut,
+    memory_item_out,
+    render_diagnosis,
+    render_digest,
+)
+
 __all__ = [
     "DEGRADED_REASON_BY_LOCALE",
     "AgentAskRequest",
     "AgentAskResponse",
     "AgentDecisionRequest",
     "AgentDecisionResponse",
+    "AgentDiagnosisResponse",
     "CitationOut",
     "DecisionKind",
     "DegradedOut",
+    "DeliveryChannelOut",
+    "DigestBody",
+    "DigestCadenceOut",
+    "DigestStatusOut",
+    "DigestSubscribeRequest",
+    "DigestSubscriptionList",
+    "DigestSubscriptionOut",
     "FollowUp",
     "FollowUpKind",
     "GroundingOut",
+    "InputCoverageOut",
+    "MemoryEraseAck",
+    "MemoryItemList",
+    "MemoryItemOut",
     "ObservationOut",
     "ReadinessResponse",
     "ReadinessVerdictOut",
     "ResponseLength",
     "SuggestedFollowupOut",
+    "WeekdayOut",
     "citations_out",
     "grounded_flag",
+    "memory_item_out",
     "render_decision",
+    "render_diagnosis",
+    "render_digest",
     "render_plan_awaiting",
     "render_readiness",
     "render_response",

@@ -50,21 +50,28 @@ _REGRESSION_EPS = 1e-9
 # The safety suites whose regression is treated as the highest severity (QA-EVAL-R7): a
 # drop here fails the build even though it would also fail the absolute 1.0 gate. Recorded
 # so the regression report can flag a safety regression distinctly.
-_SAFETY_SUITES = frozenset({"grounding", "abstention", "injection"})
+_SAFETY_SUITES = frozenset({"grounding", "abstention", "injection", "voice"})
 
 # Metrics that are "higher is better" rates/counts. Every tracked metric is monotone-good
 # (a higher value is never worse), so the non-regression rule is uniformly ``>=`` baseline.
 # Per-suite we extract only the metrics that suite actually gates on, keyed by a stable
 # ``<gate>.<metric>`` name so the diff is human-readable.
+# The safety suites track ``pass_k.all_pass_rate`` — the pass^k all-trials certificate (1.0 iff
+# EVERY trial passed) — NOT the per-trial ``trial_pass_rate``: a flaky safety suite passing 4/5
+# trials reads 0.8 on the per-trial rate (which would silently clear the floor) but collapses to
+# 0.0 on the certificate, correctly tripping this non-regression gate (QA-EVAL-R10).
 _SUITE_METRICS: dict[str, tuple[str, ...]] = {
-    "grounding": ("grounding.faithfulness", "schema.rate"),
-    "abstention": ("abstention.rate", "schema.rate"),
-    "injection": ("injection.rate", "schema.rate"),
+    "grounding": ("grounding.faithfulness", "schema.rate", "pass_k.all_pass_rate"),
+    "abstention": ("abstention.rate", "schema.rate", "pass_k.all_pass_rate"),
+    "injection": ("injection.rate", "schema.rate", "pass_k.all_pass_rate"),
     "termination": ("termination.rate",),
+    "reflection_termination": ("termination.rate",),
     "intent_plan": ("intent_plan.precision", "intent_plan.recall"),
     "multilingual": ("termination.rate",),
     "judge": ("judge.passed_cases",),
     "readiness": ("readiness.consistency_rate", "readiness.voice_rate"),
+    "plan": ("plan.grounding_rate", "plan.progression_rate", "plan.consistency_rate"),
+    "voice": ("voice.rate", "pass_k.all_pass_rate"),
 }
 
 

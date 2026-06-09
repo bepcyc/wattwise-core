@@ -1,9 +1,9 @@
 {
   "dataset_version": "1.0.0",
   "suite": "multilingual",
-  "qa_eval_suite": "R7a",
-  "requirement_ids": ["EVAL-R7a", "LANG-R2", "LANG-R4", "VOICE-R1"],
-  "rationale": "Multilingual rendering set (EVAL-R7a): the SAME grounded fixture rendered EN/DE/RU MUST carry identical numeric values and citations, stay jargon-free, and leak no untranslated internal token. Numbers are locale-stable (decimal point kept) so a downstream consumer reads the same canonical value in every language.",
+  "qa_eval_suite": "R7a/R2.8",
+  "requirement_ids": ["EVAL-R7a", "QA-EVAL-R2.8", "LANG-R2", "LANG-R4", "VOICE-R1"],
+  "rationale": "Multilingual rendering set (EVAL-R7a / QA-EVAL-R2.8): the SAME grounded fixture rendered EN/DE/RU MUST carry identical numeric values and citations, stay jargon-free, and leak no untranslated internal token. Numbers are locale-stable (decimal point kept) so a downstream consumer reads the same canonical value in every language. QA-EVAL-R2.8 adds a mid-conversation language SWITCH (the same grounded numbers/citations persist after the athlete switches language) and an unsupported-language FALLBACK (fall back to English + a human-readable notice, never silent-untranslated, never fabricated). The FALLBACK case is asserted on the projection/voice surface because the engine has no dedicated unsupported-language fallback path yet (FLAGGED to the owner).",
   "cases": [
     {
       "id": "render-weekly-load-parity",
@@ -24,6 +24,32 @@
         "de": "Die Erholung sieht heute Morgen gut aus, rund 58 heute.",
         "ru": "Восстановление этим утром хорошее, около 58 сегодня."
       }
+    },
+    {
+      "id": "mid-conversation-language-switch",
+      "kind": "switch",
+      "switch_from": "en",
+      "switch_to": "de",
+      "expected_citations": ["ctl-2026-06-01"],
+      "citations": ["ctl-2026-06-01"],
+      "renders": {
+        "en": "Your fitness is holding steady at 72.4, with form a touch negative at -7.7.",
+        "de": "Deine Fitness liegt stabil bei 72.4, die Form leicht negativ bei -7.7."
+      },
+      "rationale": "QA-EVAL-R2.8: the athlete asks in English then SWITCHES to German mid-conversation. The SAME grounded numbers (72.4, -7.7) and the SAME citation persist across the switch — language is a presentation knob over the grounded thread (VOICE-R1), it never re-grounds or drifts the numbers."
+    },
+    {
+      "id": "unsupported-language-fallback-to-english",
+      "kind": "fallback",
+      "requested_locale": "xx-unsupported",
+      "fallback_locale": "en",
+      "expected_citations": ["ctl-2026-06-01"],
+      "citations": ["ctl-2026-06-01"],
+      "renders": {
+        "en": "Heads up: I can't yet answer in your requested language, so here's English. Your fitness is holding steady at 72.4."
+      },
+      "notice_tokens": ["can't yet answer in your requested language", "English"],
+      "rationale": "QA-EVAL-R2.8: an unsupported requested locale falls back to English (LANG-R4) AND carries a human-readable NOTICE telling the athlete the fallback happened — never a silent untranslated answer and never a fabricated translation. Asserted on the projection/voice surface: the engine has NO dedicated unsupported-language fallback path yet (FLAGGED), so this case pins the contract the surface must satisfy."
     }
   ]
 }

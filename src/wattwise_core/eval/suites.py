@@ -401,26 +401,57 @@ def _reference_plan(case: dict[str, Any]) -> set[str]:
 
 
 def grade_multilingual() -> tuple[int, tuple[str, ...]]:
-    """Assert EN/DE/RU renders carry identical numbers/citations + no internal token."""
+    """Assert EN/DE/RU renders carry identical numbers/citations + no internal token.
+
+    QA-EVAL-R2.8 adds two case kinds beyond the EN/DE/RU parity render: a mid-conversation
+    language ``switch`` (the SAME grounded numbers + citation persist across the switch) and
+    an unsupported-language ``fallback`` (fall back to English AND carry a human-readable
+    notice). Both reuse the number/citation-parity core; ``fallback`` additionally asserts
+    the fallback locale rendered and the notice tokens are present.
+    """
     cases = _load("multilingual")["cases"]
     failures: list[str] = []
     for case in cases:
-        renders = case["renders"]
-        numbers = {
-            lang: sorted(re.findall(r"-?\d+(?:\.\d+)?", text))
-            for lang, text in renders.items()
-        }
-        first = next(iter(numbers.values()))
-        if any(nums != first for nums in numbers.values()):
-            failures.append(f"{case['id']}: numbers differ across languages {numbers}")
-        for lang, text in renders.items():
-            if _INTERNAL_TOKEN.search(text) and lang != "en":
-                # Internal jargon tokens (ctl/rmssd/coverage_gaps) must not leak untranslated
-                # into a localized render (EVAL-R7a jargon-free).
-                failures.append(f"{case['id']}/{lang}: leaked internal token")
-        if sorted(case["expected_citations"]) != sorted(case.get("citations", [])):
-            failures.append(f"{case['id']}: citations changed across languages")
+        failures.extend(_multilingual_parity_failures(case))
+        if str(case.get("kind", "")) == "fallback":
+            failures.extend(_multilingual_fallback_failures(case))
     return len(cases), tuple(failures)
+
+
+def _multilingual_parity_failures(case: dict[str, Any]) -> list[str]:
+    """Number/citation parity + jargon-free checks shared by every multilingual case."""
+    failures: list[str] = []
+    renders = case["renders"]
+    numbers = {
+        lang: sorted(re.findall(r"-?\d+(?:\.\d+)?", text)) for lang, text in renders.items()
+    }
+    first = next(iter(numbers.values()))
+    if any(nums != first for nums in numbers.values()):
+        failures.append(f"{case['id']}: numbers differ across languages {numbers}")
+    for lang, text in renders.items():
+        # Internal jargon tokens (ctl/rmssd/coverage_gaps) must not leak untranslated into a
+        # localized render (EVAL-R7a jargon-free); the en render may name a metric in prose.
+        if _INTERNAL_TOKEN.search(text) and lang != "en":
+            failures.append(f"{case['id']}/{lang}: leaked internal token")
+    if sorted(case["expected_citations"]) != sorted(case.get("citations", [])):
+        failures.append(f"{case['id']}: citations changed across languages")
+    return failures
+
+
+def _multilingual_fallback_failures(case: dict[str, Any]) -> list[str]:
+    """Assert an unsupported-language case fell back to English + carries a notice (R2.8)."""
+    failures: list[str] = []
+    cid = case["id"]
+    fallback = str(case.get("fallback_locale", "en"))
+    text = case["renders"].get(fallback)
+    if text is None:
+        failures.append(f"{cid}: unsupported locale did not render the {fallback!r} fallback")
+        return failures
+    for token in case.get("notice_tokens", []):
+        if str(token).lower() not in text.lower():
+            failures.append(f"{cid}: fallback render is missing the human-readable notice")
+            break
+    return failures
 
 
 # --- LLM-as-judge rubric suite (EVAL-R5) -----------------------------------------------

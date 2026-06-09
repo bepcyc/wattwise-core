@@ -34,10 +34,13 @@ from wattwise_core.eval.grading import (
     GROUNDING_MIN_FAITHFULNESS,
     SCHEMA_MIN_RATE,
     ReadinessGrade,
+    VoiceGrade,
     grade_abstention,
     grade_grounding,
     grade_schema,
 )
+from wattwise_core.eval.passk import compute_pass_k, degenerate_pass_k
+from wattwise_core.eval.reflection_suite import grade_reflection_termination
 from wattwise_core.eval.runner import (
     EvalMode,
     EvalRunner,
@@ -58,8 +61,18 @@ from wattwise_core.eval.suites import (
 from wattwise_core.eval.suites import (
     grade_intent_plan,
     grade_judge,
+    grade_multilingual,
     grade_readiness,
     grade_termination,
+)
+from wattwise_core.eval.voice_suite import (
+    _load as load_voice,
+)
+from wattwise_core.eval.voice_suite import (
+    case_failure as voice_case_failure,
+)
+from wattwise_core.eval.voice_suite import (
+    grade_voice,
 )
 
 pytestmark = pytest.mark.unit
@@ -282,7 +295,18 @@ async def test_grounding_suite_runs_the_production_grounder() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("name", ["termination", "intent_plan", "multilingual", "judge"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "termination",
+        "reflection_termination",
+        "intent_plan",
+        "multilingual",
+        "judge",
+        "plan",
+        "voice",
+    ],
+)
 async def test_engine_suite_passes_and_is_listed(name: str) -> None:
     assert name in list_suites()
     card = await run_suite(name)
@@ -448,16 +472,191 @@ def test_readiness_positive_hrv_prose_is_not_a_false_unavailable() -> None:
     assert failures, "positive-HRV prose must FAIL the must-state-HRV-unavailable check"
 
 
+# --------------------------------------------------------------------------- #
+# ROAD-R2-EXIT coach-capability gated suites: plan / voice / reflection_term.  #
+# --------------------------------------------------------------------------- #
+
+
+async def test_plan_suite_is_gated_in_the_scorecard() -> None:
+    # QA-EVAL-R2.5: the multi-day-plan coach-quality suite is part of the GATED scorecard
+    # (no longer an isolated test-only grader) and clears its three deterministic certificates.
+    assert "plan" in list_suites()
+    card = await run_suite("plan")
+    assert card.passed
+    blob = card.to_jsonable()
+    assert blob["plan"]["passed"] is True
+    assert blob["plan"]["grounding_rate"] == 1.0
+    assert blob["plan"]["progression_rate"] == 1.0
+    assert blob["plan"]["consistency_rate"] == 1.0
+
+
+async def test_reflection_termination_drives_all_three_loops() -> None:
+    # QA-EVAL-R2.11 / EVAL-R7: the richer 3-loop catalog (coverage / redraft / ground_replan)
+    # is gated and every loop terminates DEGRADED at its bound, NEVER budget_exceeded.
+    assert "reflection_termination" in list_suites()
+    grade = await grade_reflection_termination()
+    assert grade.total == 3
+    assert grade.passed
+    assert grade.failures == ()
+    card = await run_suite("reflection_termination")
+    assert card.passed
+    assert card.total_cases == 3
+
+
+async def test_voice_suite_is_gated_and_passes() -> None:
+    # QA-EVAL-R2.12 / QA-EVAL-R11: the voice follow-up liveness suite is gated; every
+    # EXPAND/DRILL/REVEAL/MONOTONE case clears its deterministic property.
+    assert "voice" in list_suites()
+    grade = grade_voice()
+    assert grade.passed
+    assert grade.failures == ()
+    assert grade.rate == 1.0
+    card = await run_suite("voice")
+    assert card.passed
+    assert card.to_jsonable()["voice"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "neg_id",
+    [
+        "expand-must-not-shorten",
+        "reveal-widens-scope-rejected",
+        "reveal-fabricated-number-rejected",
+        "reveal-cross-identity-thread-rejected",
+    ],
+)
+def test_voice_negative_cases_are_flagged(neg_id: str) -> None:
+    # Teeth (non-vacuous): each planted defect — an EXPAND that shortened, a reveal that
+    # widened scope, a reveal that surfaced a non-grounded number, and a reveal on a
+    # cross-identity durable thread — MUST be flagged by the deterministic check, so the
+    # voice gate cannot silently pass a real regression (COACH-R8 / GROUND-R7 / AGT-SEC-R1).
+    case = next(c for c in load_voice()["negative_cases"] if c["id"] == neg_id)
+    assert voice_case_failure(case) is not None
+
+
+def test_voice_grade_fails_on_nonempty_failures_despite_perfect_rate() -> None:
+    # Mirrors ReadinessGrade FIX 1: a recorded failure fails the gate even at a perfect rate.
+    grade = VoiceGrade(total=1, passed_cases=1, failures=("synthetic: a reveal widened scope",))
+    assert grade.rate == 1.0
+    assert grade.passed is False
+
+
+def test_multilingual_switch_and_fallback_cases_pass() -> None:
+    # QA-EVAL-R2.8: a mid-conversation language SWITCH keeps the grounded numbers/citations
+    # and an unsupported-language FALLBACK renders English + a human-readable notice. Both
+    # are present in the dataset and grade cleanly.
+    total, failures = grade_multilingual()
+    assert total == 4
+    assert failures == ()
+    ids = {c["id"] for c in load_dataset("multilingual").cases}
+    assert "mid-conversation-language-switch" in ids
+    assert "unsupported-language-fallback-to-english" in ids
+
+
+# --------------------------------------------------------------------------- #
+# pass^k offline plumbing (QA-EVAL-R10)                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_pass_k_recorded_is_degenerate_k1_and_exact() -> None:
+    # QA-EVAL-R10 / TIER-R1: the recorded tier is deterministic, so pass^k is a degenerate
+    # k=1 — one trial decides all k; a passing safety suite reports pass^k = 100%.
+    pk = degenerate_pass_k("grounding", True)
+    assert pk.k == 1
+    assert pk.pass_k is True
+    assert pk.trial_pass_rate == 1.0
+    assert pk.all_pass_rate == 1.0
+    assert pk.passed is True
+
+
+def test_pass_k_all_pass_rate_is_the_certificate_not_the_per_trial_rate() -> None:
+    # M6: the baseline must track the pass^k all-trials CERTIFICATE, not the per-trial rate. A
+    # flaky safety suite passing 4/5 trials reads 0.8 on the per-trial rate (which would silently
+    # clear a 1.0 floor only by a near-miss) but the certificate collapses to 0.0 the moment ANY
+    # trial fails — so the baseline gate trips. The two metrics MUST diverge here.
+    pk = compute_pass_k("grounding", (True, True, True, True, False))
+    assert pk.trial_pass_rate == 0.8  # per-trial single-shot rate
+    assert pk.all_pass_rate == 0.0  # the all-trials pass^k certificate (any failure -> 0.0)
+    assert pk.pass_k is False
+    # an all-passing run yields 1.0 on the certificate (and the per-trial rate)
+    clean = compute_pass_k("grounding", (True, True, True))
+    assert clean.all_pass_rate == 1.0
+    assert clean.trial_pass_rate == 1.0
+
+
+def test_pass_k_safety_suite_blocks_on_any_failed_trial() -> None:
+    # QA-EVAL-R10: a SAFETY suite gates pass^k = 100%; a single failed trial fails the gate.
+    pk = compute_pass_k("voice", (True, False, True))
+    assert pk.pass_k is False
+    assert pk.passed is False, "a safety suite with any failed trial MUST fail pass^k"
+
+
+def test_pass_k_non_safety_suite_reports_but_does_not_block() -> None:
+    # QA-EVAL-R10 gates ONLY safety suites at 100%; a non-safety flaky pass^k is informative,
+    # not build-failing (its hard gate is the absolute threshold + non-regression baseline).
+    pk = compute_pass_k("judge", (True, False))
+    assert pk.pass_k is False
+    assert pk.passed is True
+
+
+async def test_scorecard_carries_pass_k_and_safety_pass_k_in_baseline() -> None:
+    # Every scorecard carries pass^k; the safety suites + voice track the pass^k all-trials
+    # CERTIFICATE (pass_k.all_pass_rate), not the per-trial rate, so a pass^k erosion is a tracked
+    # regression (QA-EVAL-R10 + QA-EVAL-R7 + M6).
+    card = await run_suite("grounding")
+    blob = card.to_jsonable()
+    assert blob["pass_k"]["passed"] is True
+    assert blob["pass_k"]["is_safety"] is True
+    assert blob["pass_k"]["all_pass_rate"] == 1.0  # the tracked certificate
+    assert "trial_pass_rate" in blob["pass_k"]  # the per-trial rate is kept for visibility only
+    doc = load_baseline()
+    assert doc is not None
+    assert "pass_k.all_pass_rate" in doc["suites"]["grounding"]["metrics"]
+    assert "pass_k.all_pass_rate" in doc["suites"]["voice"]["metrics"]
+    # the per-trial rate is NOT a tracked baseline metric (it would mask a flaky safety suite)
+    assert "pass_k.rate" not in doc["suites"]["grounding"]["metrics"]
+
+
+# --------------------------------------------------------------------------- #
+# INJ-R2 multilingual + multi-surface injection corpus                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_injection_corpus_spans_languages_and_surfaces() -> None:
+    # INJ-R2: the expanded corpus carries non-English (DE/RU) probes AND probes on the plan,
+    # readiness, and decision-edit surfaces — every athlete-facing surface is isolated.
+    cases = load_dataset("injection").cases
+    locales = {c.get("locale") for c in cases}
+    assert {"de", "ru"} <= locales, "INJ-R2 corpus MUST carry DE + RU probes"
+    surfaces = {c.get("surface") for c in cases if c.get("surface")}
+    assert {"plan", "readiness", "decision_edit"} <= surfaces
+
+
+async def test_injection_corpus_fully_neutralized_after_expansion() -> None:
+    # INJ-R2 / EVAL-R6: every probe in the expanded multilingual/multi-surface corpus is
+    # neutralized — identity/scope/tooling unchanged and zero injected number/URL survives.
+    card = await run_suite("injection")
+    assert card.passed
+    assert card.grades.injection.rate == 1.0
+    assert card.total_cases == 9
+
+
 def test_full_scorecard_lists_every_gated_suite() -> None:
+    # ROAD-R2-EXIT (DOD-R3 / QA-EVAL-R6/-R7): the coach-capability suites plan (QA-EVAL-R2.5),
+    # voice (QA-EVAL-R2.12) and reflection_termination (QA-EVAL-R2.11) are GATED alongside the
+    # pre-existing safety + engine suites — the gated set now INCLUDES plan.
     assert set(list_suites()) == {
         "grounding",
         "abstention",
         "injection",
         "termination",
+        "reflection_termination",
         "intent_plan",
         "multilingual",
         "judge",
         "readiness",
+        "plan",
+        "voice",
     }
 
 

@@ -75,7 +75,7 @@ from wattwise_core.api.routers.agent_schemas import (
     render_response,
 )
 
-router = APIRouter(prefix="/v1/agent", tags=["agent"])
+router: APIRouter = APIRouter(prefix="/v1/agent", tags=["agent"])
 
 
 # --- engine seam (injected; reached only through this Protocol, ARCH-R21) --------
@@ -459,6 +459,17 @@ async def agent_decision(
     return render_decision(plan, body.decision, trace_id)
 
 
+# The remaining doc-60 §6/§7 agent surfaces (diagnose / digest-subscription / memory) live in the
+# focused :mod:`agent_breadth` sibling (QUAL-R9 size split); it is mounted onto THIS router so the
+# app factory's single ``include_router(agent_routes.router)`` picks up every agent endpoint. The
+# import sits at module END (after every seam above is defined) so the breadth module can import
+# these seams without an import cycle; ``router`` is fully typed (the ``has-type`` is the cycle, not
+# a real ambiguity). ``current_session`` is re-exported so the factory wires it on this module.
+from wattwise_core.api.routers import agent_breadth as _breadth  # noqa: E402
+
+router.include_router(_breadth.router)  # type: ignore[has-type]
+current_session = _breadth.current_session
+
 __all__ = [
     "AgentAskRequest",
     "AgentAskResponse",
@@ -468,6 +479,7 @@ __all__ = [
     "ReadinessResponse",
     "agent_engine",
     "current_athlete_id",
+    "current_session",
     "rate_limiter",
     "require_agent_scope",
     "router",

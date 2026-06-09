@@ -23,6 +23,8 @@ class and a builder.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -198,6 +200,20 @@ class AgentStateDatabase:
         await self._engine.dispose()
 
 
+def fallback_state_dsn() -> str:
+    """A per-process FILE-sqlite DSN for the lazy agent-state fallback (a REAL pool, not memory).
+
+    A unique temp file (NOT ``:memory:``) so the store runs on a REAL multi-connection pool — the
+    durable saver's benign-race ``_ensure_thread`` rollback poisons a shared single StaticPool
+    connection and FK-fails the checkpoint, and ``:memory:`` cannot model a real pool. Production
+    injects a real pooled ``state_db`` instead; this is only the lazy no-injection fallback the
+    engines (live + unconfigured) share.
+    """
+    fd, path = tempfile.mkstemp(prefix="wattwise-agent-state-", suffix=".sqlite")
+    os.close(fd)
+    return f"sqlite+aiosqlite:///{path}"
+
+
 def build_agent_state_database(
     settings: Settings | None = None,
     *,
@@ -221,4 +237,5 @@ __all__ = [
     "AgentStateDatabase",
     "build_agent_state_database",
     "create_agent_state_engine",
+    "fallback_state_dsn",
 ]

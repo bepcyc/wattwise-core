@@ -12,8 +12,6 @@ follow-ups and approval pauses resumable (CKPT-R5/-R9).
 
 from __future__ import annotations
 
-import os
-import tempfile
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -29,18 +27,14 @@ from wattwise_core.agent.checkpoint import SqlAlchemyCheckpointSaver
 from wattwise_core.agent.contracts import AgentState, ChatModel, RunStatus
 from wattwise_core.agent.deliverables import (
     AgentAnswer,
+    Digest,
     Plan,
-    Readiness,
     answer_question,
     conversation_id_of,
     new_conversation_id,
-    readiness_assessment,
     weekly_digest,
 )
-from wattwise_core.agent.engine_readiness import (
-    gather_readiness_inputs,
-    readiness_narrator,
-)
+from wattwise_core.agent.engine_extras import DeliverableEngineMixin
 from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (historical paths)
     CANONICAL_WORKOUT_NAMES,
     ClaimGrounder,
@@ -58,7 +52,13 @@ from wattwise_core.agent.model import OpenAICompatibleModel
 from wattwise_core.agent.plan_deliverable import _project_plan, safe_plan_html
 from wattwise_core.agent.plan_deliverable import plan as _plan
 from wattwise_core.agent.plan_regrounding import accept_edit
-from wattwise_core.agent.state_db import AgentStateDatabase, build_agent_state_database
+from wattwise_core.agent.state_db import (
+    AgentStateDatabase,
+    build_agent_state_database,
+)
+from wattwise_core.agent.state_db import (
+    fallback_state_dsn as _fallback_state_dsn,
+)
 from wattwise_core.agent.unconfigured import UnconfiguredAgentEngine
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.persistence import Database
@@ -74,18 +74,6 @@ _CompiledGraph = CompiledStateGraph[AgentState, Any, AgentState, AgentState]
 # termination well before either bound on every legal path.
 _NODE_VISIT_CEILING = DEFAULT_NODE_VISIT_CEILING
 _RECURSION_LIMIT = _NODE_VISIT_CEILING + 20
-
-
-def _fallback_state_dsn() -> str:
-    """A per-process FILE-sqlite DSN for the lazy agent-state fallback (real pool, not memory).
-
-    A unique temp file (not ``:memory:``) so the store runs on a REAL multi-connection pool — the
-    durable saver's benign-race ``_ensure_thread`` rollback poisons a shared single StaticPool
-    connection and FK-fails the checkpoint. Production injects a real pooled ``state_db`` instead.
-    """
-    fd, path = tempfile.mkstemp(prefix="wattwise-agent-state-", suffix=".sqlite")
-    os.close(fd)
-    return f"sqlite+aiosqlite:///{path}"
 
 
 def _conversation_id(athlete_id: str, thread_id: str | None) -> str:
@@ -152,7 +140,7 @@ class DecisionRefused(RuntimeError):
     """
 
 
-class GraphAgentEngine:  # noqa: size-limits
+class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
     """The deployable :class:`~wattwise_core.api.routers.agent_routes.AgentEngine`.
 
     Over the class-size guard (documented suppression, QUAL-R9): one cohesive implementation of the
@@ -160,7 +148,9 @@ class GraphAgentEngine:  # noqa: size-limits
     (grounded Q&A + follow-ups, weekly digest, multi-day plan, the HITL decision + its
     interrupt-status probe) must live behind this single seam; each method stays well under the
     60-line function ceiling, and the plan re-grounding bodies already moved to
-    :mod:`plan_regrounding` and the interrupt ledger to :mod:`checkpoint_interrupts`.
+    :mod:`plan_regrounding` and the interrupt ledger to :mod:`checkpoint_interrupts`. The
+    DETERMINISTIC diagnosis (API-R15) + athlete-scoped memory seam (MEM-R3/-R4) are inherited from
+    :class:`~wattwise_core.agent.engine_extras.DeliverableEngineMixin` (QUAL-R9 size split).
 
     Per call it opens a canonical session, builds the analytics service + the concrete agent
     services + the compiled graph over a DURABLE :class:`SqlAlchemyCheckpointSaver` bound to the
@@ -262,7 +252,13 @@ class GraphAgentEngine:  # noqa: size-limits
                 follow_up=follow_up,
             )
 
-    async def digest(self, *, athlete_id: str, week_end: str) -> Any:
+    async def digest(self, *, athlete_id: str, week_end: str) -> Digest:
+        """Build the weekly digest (== weekly load review) for ``week_end`` (COACH-R1 #1).
+
+        Drives a ``scheduled_digest`` run over a deterministic per-week conversation id and projects
+        the grounded trailing-week review into :class:`Digest`, abstaining visibly (``degraded`` +
+        caveat) when the week's canonical inputs are missing (OUTCOME-R3/-R4, GROUND-R7).
+        """
         state_db = await self._agent_state_db()
         conversation_id = f"digest:{week_end}"
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
@@ -274,7 +270,8 @@ class GraphAgentEngine:  # noqa: size-limits
         self,
         *,
         athlete_id: str,
-        request: str,
+        request_text: str | None = None,
+        request: str | None = None,
         thread_id: str | None = None,
         locale: str = "en",
         response_length: str = "detailed",
@@ -285,8 +282,11 @@ class GraphAgentEngine:  # noqa: size-limits
         Drives the graph with the canonical workout-NAME library so prescribed names ground (not
         auto-scrubbed). With ``requires_approval`` the durable interrupt-gate pauses the run and
         records a ``live`` ledger row; the :class:`Plan` is ``awaiting_approval`` carrying the
-        ``interrupt_id`` the decision endpoint consumes (CKPT-R9).
+        ``interrupt_id`` the decision endpoint consumes (CKPT-R9). ``athlete_id`` is server-derived
+        (AGT-SEC-R1). ``request_text`` is the planning prompt the planning router passes;
+        ``request`` is a backward-compatible alias for the same value.
         """
+        prompt = request_text if request_text is not None else (request or "")
         state_db = await self._agent_state_db()
         conversation_id = _conversation_id(athlete_id, thread_id)
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
@@ -297,7 +297,7 @@ class GraphAgentEngine:  # noqa: size-limits
             return await _plan(
                 graph,
                 athlete_id,
-                request,
+                prompt,
                 locale=locale,
                 response_length=response_length,  # type: ignore[arg-type]
                 thread_id=thread_id,
@@ -387,32 +387,6 @@ class GraphAgentEngine:  # noqa: size-limits
         conversation_id = conversation_id_of(thread_id)
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         return await saver.interrupt_status(thread_id, interrupt_id)
-
-    async def readiness(
-        self, *, athlete_id: str, locale: str = "en", response_length: str = "standard"
-    ) -> Readiness:
-        """Build the readiness/form deliverable from canonical inputs (QA-EVAL-R2.4).
-
-        Gathers the readiness inputs DETERMINISTICALLY (the fixed readiness JTBD does NOT route
-        through the retrieval planner) then drives :func:`readiness_assessment` with the same
-        model-backed narrator + canonical grounder the answers use; the delivered verdict is always
-        the deterministic oracle's (canonical wins), numbers surface only as grounded citations.
-        Readiness does NOT route through the durable checkpointer (a single deterministic
-        assessment, not a resumable conversation), so no agent-state pool is opened here.
-        """
-        async with self._db.session() as session:
-            svc = AnalyticsService(session)
-            form, as_of, rmssd, baseline = await gather_readiness_inputs(svc, athlete_id)
-            return await readiness_assessment(
-                athlete_id,
-                form=form,
-                as_of=as_of,
-                hrv_rmssd=rmssd,
-                hrv_baseline=baseline,
-                narrate=readiness_narrator(self._model),
-                grounder=self._coach.grounder(self._model, svc),
-                response_length=response_length,  # type: ignore[arg-type]
-            )
 
 
 def build_agent_engine(database: Database, settings: Any) -> GraphAgentEngine | None:

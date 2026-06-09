@@ -38,7 +38,7 @@ from wattwise_core.agent.contracts import (
 )
 from wattwise_core.agent.grounding import ground
 from wattwise_core.agent.model import FakeModel
-from wattwise_core.eval import injection, suites
+from wattwise_core.eval import injection, reflection_suite, suites, voice_suite
 from wattwise_core.eval.grading import (
     AbstentionGrade,
     GroundingGrade,
@@ -51,6 +51,8 @@ from wattwise_core.eval.grading import (
     grade_injection,
     grade_schema,
 )
+from wattwise_core.eval.passk import degenerate_pass_k
+from wattwise_core.eval.plan_suite import grade_plan
 from wattwise_core.eval.scorecard import EvalMode, Scorecard
 
 _DATASETS_DIR = Path(__file__).parent / "datasets"
@@ -354,51 +356,85 @@ def grade_suite(suite: str, outcomes: Sequence[RunnerOutcome]) -> SuiteGrades:
 
 
 # Suites driven by the production graph/planner/judge (EVAL-R2a/-R3/-R5/-R7), in addition
-# to the claim-level grounding/abstention/injection suites above.
+# to the claim-level grounding/abstention/injection suites above. ``plan`` (QA-EVAL-R2.5),
+# ``voice`` (QA-EVAL-R2.12) and ``reflection_termination`` (QA-EVAL-R2.11) are the
+# ROAD-R2-EXIT coach-capability suites promoted into the gate.
 _ENGINE_SUITES: frozenset[str] = frozenset(
-    {"termination", "intent_plan", "multilingual", "judge", "readiness"}
+    {
+        "termination",
+        "reflection_termination",
+        "intent_plan",
+        "multilingual",
+        "judge",
+        "readiness",
+        "plan",
+        "voice",
+    }
 )
+# The dataset stem each engine suite loads for its dataset_version / case count (some suite
+# names differ from their datafile stem, e.g. ``voice`` -> ``voice_liveness``).
+_ENGINE_SUITE_DATASET: dict[str, str] = {"voice": "voice_liveness"}
 
 
 def list_suites() -> tuple[str, ...]:
-    """Every CI-gated suite name (EVAL-R1/-R9), claim-level + engine-level."""
+    """Every CI-gated suite name (EVAL-R1/-R9): safety + engine + ROAD-R2-EXIT coach suites."""
     return (
         "grounding",
         "abstention",
         "injection",
         "termination",
+        "reflection_termination",
         "intent_plan",
         "multilingual",
         "judge",
         "readiness",
+        "plan",
+        "voice",
     )
+
+
+def _sync_engine_grades(name: str) -> SuiteGrades | None:
+    """The SYNC engine grades, or ``None`` when ``name`` needs the async path below."""
+    if name == "intent_plan":
+        return SuiteGrades(intent_plan=suites.grade_intent_plan())
+    if name == "readiness":
+        return SuiteGrades(readiness=suites.grade_readiness())
+    if name == "plan":
+        return SuiteGrades(plan=grade_plan())
+    if name == "voice":
+        return SuiteGrades(voice=voice_suite.grade_voice())
+    if name == "multilingual":
+        # A parity check expressed via the all-or-nothing termination grade shape.
+        total, failures = suites.grade_multilingual()
+        return SuiteGrades(
+            termination=TerminationGrade(total, total - len(failures), failures)
+        )
+    return None
+
+
+async def _engine_grades(name: str) -> SuiteGrades:
+    """Compute the typed grades for one engine suite (EVAL-R2a/-R3/-R5/-R7, QA-EVAL-R2.*)."""
+    sync = _sync_engine_grades(name)
+    if sync is not None:
+        return sync
+    if name == "reflection_termination":
+        return SuiteGrades(termination=await reflection_suite.grade_reflection_termination())
+    if name == "judge":
+        return SuiteGrades(judge=await suites.grade_judge())
+    return SuiteGrades(termination=await suites.grade_termination())
 
 
 async def _run_engine_suite(name: str, mode: EvalMode) -> Scorecard:
     """Run an EVAL-R2a/-R3/-R5/-R7 suite that drives the production engine."""
-    grades = SuiteGrades()
-    raw = _load_raw(name)
-    if name == "termination":
-        grades = SuiteGrades(termination=await suites.grade_termination())
-    elif name == "intent_plan":
-        grades = SuiteGrades(intent_plan=suites.grade_intent_plan())
-    elif name == "judge":
-        grades = SuiteGrades(judge=await suites.grade_judge())
-    elif name == "readiness":
-        grades = SuiteGrades(readiness=suites.grade_readiness())
-    elif name == "multilingual":
-        total, failures = suites.grade_multilingual()
-        # Multilingual rendering is a parity check; express pass/fail via the termination
-        # grade shape (all-or-nothing parity gate).
-        grades = SuiteGrades(
-            termination=TerminationGrade(total, total - len(failures), failures)
-        )
+    raw = _load_raw(_ENGINE_SUITE_DATASET.get(name, name))
+    grades = await _engine_grades(name)
     return Scorecard(
         suite=name,
         dataset_version=str(raw.get("dataset_version", "1.0.0")),
         mode=mode,
         total_cases=len(raw.get("cases", [])),
         grades=grades,
+        pass_k=degenerate_pass_k(name, grades.passed),
     )
 
 
@@ -409,7 +445,11 @@ def _load_raw(name: str) -> dict[str, Any]:
 
 
 async def run_suite(name: str, *, mode: EvalMode = EvalMode.RECORDED) -> Scorecard:
-    """Run a whole named suite and return its scorecard (EVAL-R9)."""
+    """Run a whole named suite and return its scorecard (EVAL-R9 + degenerate k=1 pass^k).
+
+    The OSS recorded tier is deterministic (TIER-R1) so one trial is exact (QA-EVAL-R10);
+    the env-gated live nightly leg is the only place k>1 real trials are spent.
+    """
     if name in _ENGINE_SUITES:
         return await _run_engine_suite(name, mode)
     dataset = load_dataset(name)
@@ -420,12 +460,14 @@ async def run_suite(name: str, *, mode: EvalMode = EvalMode.RECORDED) -> Scoreca
         )
         for case in dataset.cases
     ]
+    grades = grade_suite(dataset.suite, outcomes)
     return Scorecard(
         suite=dataset.suite,
         dataset_version=dataset.version,
         mode=mode,
         total_cases=len(outcomes),
-        grades=grade_suite(dataset.suite, outcomes),
+        grades=grades,
+        pass_k=degenerate_pass_k(dataset.suite, grades.passed),
     )
 
 

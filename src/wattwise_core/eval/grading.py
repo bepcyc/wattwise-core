@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from wattwise_core.eval.plan_suite import PlanGrade
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -49,6 +51,13 @@ READINESS_VOICE_MIN_RATE = 1.0
 # the persona-keyed ``number_cap`` here, because a readiness summary is a terse, one-
 # state message and must stay number-light independent of the response-length persona.
 READINESS_MAX_NUMBERS = 2
+# Voice-liveness follow-up gate (QA-EVAL-R2.12 / QA-EVAL-R11 / COACH-R8). The follow-up
+# contract is a deterministic 100% mandate: an EXPAND turn must be LONGER (climb the
+# verbosity ladder, never shorter), a DRILL / REVEAL_NUMBERS turn must surface the
+# requested canonical number VERBATIM on the SAME durable thread WITHOUT widening scope,
+# and the length ladder must be monotone (short <= standard <= detailed). Any single
+# violation fails CI, exactly like the readiness voice gate.
+VOICE_FOLLOWUP_MIN_RATE = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +223,35 @@ class ReadinessGrade:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceGrade:
+    """Outcome of grading the voice follow-up liveness suite (QA-EVAL-R2.12 / QA-EVAL-R11).
+
+    Deterministic follow-up properties over the projection/voice surface, a 100% gate:
+    each case asserts its named property — an EXPAND follow-up climbs the verbosity ladder
+    so the next answer is strictly longer; a DRILL / REVEAL_NUMBERS follow-up surfaces the
+    requested canonical number VERBATIM on the SAME durable thread with NO scope widen; and
+    a MONOTONE case asserts length-monotonicity (short <= standard <= detailed in the
+    foregrounded-number budget). ``passed_cases`` is the count clearing their property;
+    ``passed`` additionally requires ``failures == ()`` so a recorded defect cannot hide
+    behind a perfect rate (mirrors ReadinessGrade FIX 1).
+    """
+
+    total: int
+    passed_cases: int
+    failures: tuple[str, ...] = ()
+
+    @property
+    def rate(self) -> float:
+        """Fraction of follow-up cases clearing their voice property (1.0 if empty)."""
+        return 1.0 if self.total == 0 else self.passed_cases / self.total
+
+    @property
+    def passed(self) -> bool:
+        """Gate: every voice follow-up property holds on every case AND zero failures."""
+        return self.rate >= VOICE_FOLLOWUP_MIN_RATE and self.failures == ()
+
+
+@dataclass(frozen=True, slots=True)
 class JudgeGrade:
     """Outcome of the LLM-as-judge qualitative rubric suite (EVAL-R5).
 
@@ -246,6 +284,8 @@ class SuiteGrades:
     intent_plan: IntentPlanGrade = field(default_factory=lambda: IntentPlanGrade(0, 1.0, 1.0))
     judge: JudgeGrade = field(default_factory=lambda: JudgeGrade(0, 0, 1.0))
     readiness: ReadinessGrade = field(default_factory=lambda: ReadinessGrade(0, 0, 0, 0))
+    plan: PlanGrade = field(default_factory=lambda: PlanGrade(0, 0, 0, 0))
+    voice: VoiceGrade = field(default_factory=lambda: VoiceGrade(0, 0))
 
     @property
     def passed(self) -> bool:
@@ -258,6 +298,8 @@ class SuiteGrades:
             and self.intent_plan.passed
             and self.judge.passed
             and self.readiness.passed
+            and self.plan.passed
+            and self.voice.passed
         )
 
 
@@ -383,15 +425,18 @@ __all__ = [
     "READINESS_MAX_NUMBERS",
     "READINESS_VOICE_MIN_RATE",
     "SCHEMA_MIN_RATE",
+    "VOICE_FOLLOWUP_MIN_RATE",
     "AbstentionGrade",
     "GroundingGrade",
     "InjectionGrade",
     "IntentPlanGrade",
     "JudgeGrade",
+    "PlanGrade",
     "ReadinessGrade",
     "SchemaGrade",
     "SuiteGrades",
     "TerminationGrade",
+    "VoiceGrade",
     "grade_abstention",
     "grade_grounding",
     "grade_injection",

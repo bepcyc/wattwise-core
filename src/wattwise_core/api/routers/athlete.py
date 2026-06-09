@@ -39,10 +39,24 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import desc, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from wattwise_core.api.activity_schemas import Page
+from wattwise_core.api.athlete_schemas import (
+    ChangeSportRequest,
+    FitnessSignatureHistory,
+    FitnessSignatureOut,
+)
 from wattwise_core.api.errors import FieldError, ProblemError
+from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
+
+# The cursor HMAC-key seam is SHARED by identity with the activities router: the app
+# factory overrides ``activities.cursor_signing_key`` once and FastAPI keys
+# ``dependency_overrides`` by the callable, so re-using the SAME object here binds this
+# router's signed cursors to the engine ``token_signing_key`` without a second wiring
+# site (mirrors how activities re-uses the performance router's identity/scope seams).
+from wattwise_core.api.routers.activities import cursor_signing_key
 from wattwise_core.domain.enums import Sex, SignatureOrigin
 from wattwise_core.persistence.models import Athlete, FitnessSignature, Sport
 
@@ -76,27 +90,10 @@ _Read = Depends(require_read_scope)
 _Write = Depends(require_write_scope)
 AthleteId = Annotated[str, Depends(current_athlete_id)]
 Session = Annotated[AsyncSession, Depends(current_session)]
+CursorKey = Annotated[str, Depends(cursor_signing_key)]
 
 
 # --- wire shapes ----------------------------------------------------------------
-
-
-class FitnessSignatureOut(BaseModel):
-    """The effective FTP/threshold signature surfaced on the profile (GBO-R26).
-
-    Source-agnostic and number-typed; carries no provider name (AUTH-R15). ``null``
-    everywhere when the owner has not yet set a signature for the current sport.
-    """
-
-    signature_type: str
-    effective_date: _dt.date
-    ftp_w: float | None = None
-    cp_w: float | None = None
-    w_prime_j: float | None = None
-    threshold_hr_bpm: int | None = None
-    max_hr_bpm: int | None = None
-    resting_hr_bpm: int | None = None
-    origin: SignatureOrigin
 
 
 class AthleteProfile(BaseModel):
@@ -368,13 +365,120 @@ def _apply_signature(sig: FitnessSignature, body: FitnessSignatureIn) -> None:
     sig.origin = SignatureOrigin.USER_ENTERED
 
 
+# --- §8.1 fitness-signature history (cursor-paginated) --------------------------
+
+
+def _sig_keyset(effective_date: _dt.date) -> _dt.datetime:
+    """Lift ``effective_date`` onto the cursor's UTC datetime keyset axis (PAGE-R7)."""
+    return _dt.datetime.combine(effective_date, _dt.time.min, _dt.UTC)
+
+
+def _history_out(sig: FitnessSignature) -> FitnessSignatureOut:
+    """Project one signature row onto the wire shape (the row is always non-``None``)."""
+    out = _signature_out(sig)
+    if out is None:  # pragma: no cover - the row is non-None by construction
+        raise ProblemError("internal-error")
+    return out
+
+
+@router.get(
+    "/fitness-signature/history",
+    response_model=FitnessSignatureHistory,
+    operation_id="listAthleteSignatureHistory",
+    dependencies=[_Read],
+)
+async def list_signature_history(
+    session: Session,
+    athlete_id: AthleteId,
+    key: CursorKey,
+    *,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> FitnessSignatureHistory:
+    """List the owner's effective-dated signatures, newest first, cursor-paged (GBO-R26/R27).
+
+    Cursor-paginated over the full versioned series (PAGE-R1/R5), bound to the server-derived
+    owner id (AUTH-R3), ordered ``effective_date desc`` tie-broken on the ``signature_id``
+    keyset (PAGE-R7); the limit is clamped to ``[1, 200]`` (PAGE-R3). A tampered/replayed
+    cursor fails closed. Every value is number-typed + provider-agnostic (AUTH-R15); an owner
+    with no signatures returns ``data: []`` (never a ``404``).
+    """
+    bounded = clamp_limit(int(limit))
+    rows = await _query_history(session, athlete_id, key=key, cursor=cursor, limit=bounded + 1)
+    has_more = len(rows) > bounded
+    page_rows = rows[:bounded]
+    last = page_rows[-1] if (has_more and page_rows) else None
+    nxt = (
+        encode_cursor(_sig_keyset(last.effective_date), str(last.signature_id), params={}, key=key)
+        if last is not None
+        else None
+    )
+    return FitnessSignatureHistory(
+        data=[_history_out(r) for r in page_rows],
+        page=Page(limit=bounded, next_cursor=nxt, has_more=has_more),
+    )
+
+
+async def _query_history(
+    session: AsyncSession, athlete_id: str, *, key: str, cursor: str | None, limit: int
+) -> list[FitnessSignature]:
+    """Keyset-paged signatures, ``effective_date desc`` tie-broken on id (PAGE-R7)."""
+    clauses = [FitnessSignature.athlete_id == _uid(athlete_id)]
+    if cursor is not None:
+        c_time, c_id = decode_cursor(cursor, params={}, key=key)
+        clauses.append(
+            tuple_(FitnessSignature.effective_date, FitnessSignature.signature_id)
+            < (c_time.date(), _uid(c_id))
+        )
+    stmt = (
+        select(FitnessSignature)
+        .where(*clauses)
+        .order_by(desc(FitnessSignature.effective_date), desc(FitnessSignature.signature_id))
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+# --- §8.1 change-sport (explicit action) ----------------------------------------
+
+
+@router.post(
+    "/change-sport",
+    response_model=AthleteProfile,
+    operation_id="changeAthleteSport",
+    dependencies=[_Write],
+)
+async def change_sport(
+    body: ChangeSportRequest, session: Session, athlete_id: AthleteId
+) -> AthleteProfile:
+    """Set the owner's current sport via the explicit change-sport action (API-R40).
+
+    The ``sport`` is validated against the runtime sport registry (GBO-R16a) BEFORE any
+    write; an unregistered code is rejected ``422`` with ``errors[].code = "unknown_sport"``
+    (no partial mutation, no silent accept). Changing the current sport is a hint update —
+    it rewrites NO historical activity (each :class:`Activity` keeps its recorded sport).
+    Acts ONLY on the server-derived owner id (AUTH-R3). Returns the refreshed profile with
+    the effective signature resolved for the new sport.
+    """
+    owner = await _load_owner(session, athlete_id)
+    if not await _sport_exists(session, body.sport):
+        raise _unknown_sport(body.sport)
+    owner.current_sport = body.sport
+    await session.flush()
+    sig = await _effective_signature(session, athlete_id, owner.current_sport)
+    return _profile(owner, sig)
+
+
 __all__ = [
     "AthleteProfile",
     "AthleteProfileUpdate",
+    "ChangeSportRequest",
+    "FitnessSignatureHistory",
     "FitnessSignatureIn",
     "FitnessSignatureOut",
     "current_athlete_id",
     "current_session",
+    "cursor_signing_key",
     "require_read_scope",
     "require_write_scope",
     "router",

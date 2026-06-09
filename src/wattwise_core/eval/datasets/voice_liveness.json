@@ -1,0 +1,161 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "voice",
+  "qa_eval_suite": "R2.12/R11",
+  "requirement_ids": ["QA-EVAL-R2.12", "QA-EVAL-R11", "COACH-R8", "VOICE-R7", "VOICE-R8", "VOICE-R9", "GROUND-R7"],
+  "rationale": "Voice follow-up liveness set (QA-EVAL-R2.12 / QA-EVAL-R11): deterministic checks over the projection/voice surface (no live engine call). EXPAND climbs the verbosity ladder so the NEXT answer is strictly longer (more foregrounded numbers admitted within the per-length cap), NEVER shorter. DRILL / REVEAL_NUMBERS surface the requested ALREADY-grounded canonical number VERBATIM on the SAME durable thread WITHOUT widening scope (no new athlete_id, no new capability, no new citation record beyond the targeted observation's grounded numbers). A MONOTONE case asserts length-monotonicity: short <= standard <= detailed in the foregrounded-number budget. Each case is checked by the deterministic CODE (COACH-R8 ladder + reveal-verbatim), never the LLM (EVAL-R5). Negative cases drive the teeth.",
+  "cases": [
+    {
+      "id": "expand-climbs-ladder-longer",
+      "kind": "expand",
+      "start_length": "short",
+      "expected_length": "standard",
+      "rationale": "An EXPAND follow-up from a short answer climbs one rung up the ladder to standard (VOICE-R8 / COACH-R8) so the next answer admits more foregrounded numbers (cap 2 -> 3), i.e. is longer; it MUST NOT drop a rung."
+    },
+    {
+      "id": "expand-standard-to-detailed",
+      "kind": "expand",
+      "start_length": "standard",
+      "expected_length": "detailed",
+      "rationale": "EXPAND from standard climbs to detailed (cap 3 -> 4); strictly longer budget."
+    },
+    {
+      "id": "expand-detailed-saturates",
+      "kind": "expand",
+      "start_length": "detailed",
+      "expected_length": "detailed",
+      "rationale": "EXPAND at the top rung saturates at detailed (cap stays 4) — never wraps back down; the budget does not shrink, so it is still NOT shorter."
+    },
+    {
+      "id": "reveal-numbers-verbatim-same-thread",
+      "kind": "reveal_numbers",
+      "thread_id": "athlete-eval-0001:conv-abc",
+      "scope_before": ["pmc", "power_curve", "critical_power"],
+      "scope_after": ["pmc", "power_curve", "critical_power"],
+      "athlete_before": "athlete-eval-0001",
+      "athlete_after": "athlete-eval-0001",
+      "target_ref": "obs-ctl",
+      "observations": [
+        {
+          "observation_id": "obs-ctl",
+          "text": "Your fitness is holding steady.",
+          "citations": [
+            {"record_id": "ctl-2026-06-01", "metric": "ctl", "value": 72.4, "as_of": "2026-06-01"}
+          ]
+        },
+        {
+          "observation_id": "obs-tsb",
+          "text": "Your form is a touch negative.",
+          "citations": [
+            {"record_id": "tsb-2026-06-01", "metric": "tsb", "value": -7.7, "as_of": "2026-06-01"}
+          ]
+        }
+      ],
+      "requested_metric": "ctl",
+      "requested_value": 72.4,
+      "rationale": "A REVEAL_NUMBERS follow-up targeting obs-ctl surfaces the ALREADY-grounded canonical ctl=72.4 VERBATIM (VOICE-R9 / GROUND-R7) on the SAME durable thread; the authenticated identity and scope are UNCHANGED before/after (no scope-widen). The revealed citation is one already grounded on the thread, never a new claim."
+    },
+    {
+      "id": "drill-verbatim-same-thread",
+      "kind": "drill",
+      "thread_id": "athlete-eval-0001:conv-xyz",
+      "scope_before": ["pmc", "power_curve"],
+      "scope_after": ["pmc", "power_curve"],
+      "athlete_before": "athlete-eval-0001",
+      "athlete_after": "athlete-eval-0001",
+      "target_ref": "obs-cp",
+      "observations": [
+        {
+          "observation_id": "obs-cp",
+          "text": "Your critical power is steady.",
+          "citations": [
+            {"record_id": "cp-2026-06-02", "metric": "critical_power", "value": 268.0, "as_of": "2026-06-02"}
+          ]
+        }
+      ],
+      "requested_metric": "critical_power",
+      "requested_value": 268.0,
+      "rationale": "A DRILL follow-up reveals the verbatim grounded critical_power=268.0 on the same thread without widening scope."
+    },
+    {
+      "id": "monotone-length-ladder",
+      "kind": "monotone",
+      "rationale": "Length-monotonicity (VOICE-R7): the per-length foregrounded-number budget is monotone non-decreasing short <= standard <= detailed, so a longer response NEVER admits fewer numbers than a shorter one."
+    }
+  ],
+  "negative_cases": [
+    {
+      "id": "expand-must-not-shorten",
+      "kind": "expand",
+      "start_length": "detailed",
+      "got_length": "short",
+      "rationale": "Teeth: a planted regression that DROPPED an EXPAND to a shorter rung (detailed -> short) violates the ladder; the deterministic check MUST flag the shorter result rather than passing it."
+    },
+    {
+      "id": "reveal-widens-scope-rejected",
+      "kind": "reveal_numbers",
+      "thread_id": "athlete-eval-0001:conv-evil",
+      "scope_before": ["pmc"],
+      "scope_after": ["pmc", "export_all_athletes"],
+      "athlete_before": "athlete-eval-0001",
+      "athlete_after": "athlete-eval-0001",
+      "target_ref": "obs-ctl",
+      "observations": [
+        {
+          "observation_id": "obs-ctl",
+          "text": "Your fitness is holding steady.",
+          "citations": [
+            {"record_id": "ctl-2026-06-01", "metric": "ctl", "value": 72.4, "as_of": "2026-06-01"}
+          ]
+        }
+      ],
+      "requested_metric": "ctl",
+      "requested_value": 72.4,
+      "rationale": "Teeth: a reveal that WIDENED scope (added export_all_athletes) MUST be flagged — a follow-up never widens scope (COACH-R8 / INJECT-R3)."
+    },
+    {
+      "id": "reveal-fabricated-number-rejected",
+      "kind": "reveal_numbers",
+      "thread_id": "athlete-eval-0001:conv-fab",
+      "scope_before": ["pmc"],
+      "scope_after": ["pmc"],
+      "athlete_before": "athlete-eval-0001",
+      "athlete_after": "athlete-eval-0001",
+      "target_ref": "obs-ctl",
+      "observations": [
+        {
+          "observation_id": "obs-ctl",
+          "text": "Your fitness is holding steady.",
+          "citations": [
+            {"record_id": "ctl-2026-06-01", "metric": "ctl", "value": 72.4, "as_of": "2026-06-01"}
+          ]
+        }
+      ],
+      "requested_metric": "ctl",
+      "requested_value": 999.0,
+      "rationale": "Teeth: a reveal that surfaced a number (999.0) NOT matching the grounded citation (72.4) MUST be flagged — the reveal is verbatim off the prior grounding, never a new/fabricated value (GROUND-R7)."
+    },
+    {
+      "id": "reveal-cross-identity-thread-rejected",
+      "kind": "reveal_numbers",
+      "thread_id": "athlete-eval-9999:conv-stolen",
+      "scope_before": ["pmc"],
+      "scope_after": ["pmc"],
+      "athlete_before": "athlete-eval-0001",
+      "athlete_after": "athlete-eval-0001",
+      "target_ref": "obs-ctl",
+      "observations": [
+        {
+          "observation_id": "obs-ctl",
+          "text": "Your fitness is holding steady.",
+          "citations": [
+            {"record_id": "ctl-2026-06-01", "metric": "ctl", "value": 72.4, "as_of": "2026-06-01"}
+          ]
+        }
+      ],
+      "requested_metric": "ctl",
+      "requested_value": 72.4,
+      "rationale": "Teeth: a follow-up whose durable thread is bound to a DIFFERENT athlete (athlete-eval-9999) than the authenticated one (athlete-eval-0001) is a cross-identity thread and MUST be flagged — a follow-up resumes the SAME athlete's thread, never another's (AGT-SEC-R1 / CKPT-R3)."
+    }
+  ]
+}
