@@ -38,19 +38,20 @@ from wattwise_core.agent.engine_services import CoachBundle
 from wattwise_core.agent.memory import RecalledItem
 from wattwise_core.agent.state_db import AgentStateDatabase
 from wattwise_core.analytics.service import AnalyticsService
-from wattwise_core.persistence import Database
+from wattwise_core.seams import SessionProvider
 
 
 class _EngineSeams(Protocol):
     """The engine seams the diagnosis/readiness/memory methods read (supplied by the engine).
 
-    The mixin is structural: it depends only on the canonical ``Database`` (read-only here), the
-    injected ``ChatModel`` + loaded ``CoachBundle`` the readiness narration uses, and the
-    lazily-built dedicated agent-state database the host engine already owns — no graph / checkpoint
-    coupling.
+    The mixin is structural: it depends on the engine-owned ``SessionProvider`` seam (the ONE
+    canonical-store choke point of SEAM-R11 / ARCH-R31 — the canonical reads here flow through it,
+    never around it), the injected ``ChatModel`` + loaded ``CoachBundle`` the readiness narration
+    uses, and the lazily-built dedicated agent-state database the host engine already owns (a
+    SEPARATE store, ARCH-R13 — not the canonical store) — no graph / checkpoint coupling.
     """
 
-    _db: Database
+    _sessions: SessionProvider
     _model: ChatModel
     _coach: CoachBundle
 
@@ -79,7 +80,7 @@ class DeliverableEngineMixin:
         accepted for the API copy boundary; the deliverable carries no athlete-facing numbers
         (VOICE-R7).
         """
-        async with self._db.session() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             return await diagnose_coverage(AnalyticsService(session), athlete_id)
 
     async def readiness(
@@ -98,7 +99,7 @@ class DeliverableEngineMixin:
         Readiness does NOT route through the durable checkpointer (a single deterministic
         assessment, not a resumable conversation), so no agent-state pool is opened here.
         """
-        async with self._db.session() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             svc = AnalyticsService(session)
             form, as_of, rmssd, baseline = await gather_readiness_inputs(svc, athlete_id)
             return await readiness_assessment(

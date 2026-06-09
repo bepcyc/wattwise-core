@@ -31,6 +31,7 @@ import pytest_asyncio
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from tests.integration._session_provider import FactorySessionProvider
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import (
     AuthArchetype,
@@ -212,7 +213,7 @@ def _cred_store() -> tuple[InMemoryCredentialStore, str]:
 
 def _orch(factory: Any, asbos: list[Any], store: InMemoryCredentialStore) -> SyncOrchestrator:
     return SyncOrchestrator(
-        factory,
+        FactorySessionProvider(factory),
         registry=registry_from_adapters([FakeApiAdapter(asbos)]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -273,7 +274,7 @@ async def test_incremental_fetch_skips_watermarked_range(db: Any) -> None:
     # watermark date (2026-06-01), NOT the fixed 42-day lookback.
     adapter = FakeApiAdapter([_RideAsbo("ride-2", 260.0, day=2)])
     orch = SyncOrchestrator(
-        factory,
+        FactorySessionProvider(factory),
         registry=registry_from_adapters([adapter]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -424,7 +425,7 @@ async def test_terminal_mapping_gap_is_not_auto_closed_by_covering_sync(db: Any)
     # mapping gap (contrast test_transient_time_gap_self_heals_on_resync, which DOES heal).
     adapter = FakeApiAdapter([_RideAsbo("good-2", 260.0, day=2)])
     await SyncOrchestrator(
-        factory,
+        FactorySessionProvider(factory),
         registry=registry_from_adapters([adapter]),
         credential_store=store,
         now=lambda: _FIXED_NOW,

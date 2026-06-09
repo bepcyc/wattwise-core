@@ -21,11 +21,11 @@ from typing import Any
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import Fidelity, GboType, trust_rank
 from wattwise_core.ingestion import _canonical as _cw
-from wattwise_core.ingestion.dedup import resolve_field
 from wattwise_core.ingestion.trust import TrustPolicy
 from wattwise_core.persistence.models import Activity, SourceCandidate
 from wattwise_core.persistence.models.athlete_preference import WHOLE_SOURCE_CHANNEL
 from wattwise_core.persistence.types import utcnow
+from wattwise_core.seams import ConflictResolver
 
 # Canonical scalar fields carried on an activity candidate's payload (resolved per
 # field across candidates; streams/laps are handled separately).
@@ -51,7 +51,10 @@ def _validate_payload(cand: GboCandidate) -> None:
 
 
 def _resolve_scalars(
-    candidates: list[SourceCandidate], fields: tuple[str, ...], policy: TrustPolicy
+    candidates: list[SourceCandidate],
+    fields: tuple[str, ...],
+    policy: TrustPolicy,
+    resolver: ConflictResolver,
 ) -> tuple[dict[str, Any], dict[str, object]]:
     """Resolve each scalar field across candidates + build its coverage (CONF-R2/R5).
 
@@ -60,14 +63,18 @@ def _resolve_scalars(
     re-rank, defaulting to the adapter tier when unconfigured). A field whose >=2
     contributors materially disagree beyond the per-field dispute tolerance gets
     ``coverage.disputed=True`` — the best value is still selected, the disagreement is
-    surfaced not hidden (CONF-R5).
+    surfaced not hidden (CONF-R5). Field resolution runs through the INJECTED resolver
+    seam (CONF-R7/DEDUP-R6), not a directly-imported function — so the advanced
+    commercial resolver (DEDUP-R8) rides the same seam without editing this consumer.
     """
     resolved: dict[str, Any] = {}
     coverage: dict[str, object] = {}
     for fname in fields:
         tier_of = _channel_tier_of(policy, fname)  # effective per-channel tier (PRV-R7)
         contributors = _cw.field_candidates(candidates, fname, tier_of)
-        winner = resolve_field(contributors, dispute_tolerance=_cw.dispute_tolerance(fname))
+        winner = resolver.resolve_field(
+            contributors, dispute_tolerance=_cw.dispute_tolerance(fname)
+        )
         if winner is None:
             # No contributor supplied this field: a typed absence, NOT a silent skip
             # (GAP-R1/GAP-R3). absent_true (no source provides it) — never zero-filled.

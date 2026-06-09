@@ -68,6 +68,7 @@ from wattwise_core.ingestion.registry import AdapterRegistry, UnknownSourceError
 from wattwise_core.observability.logging import get_logger
 from wattwise_core.persistence.models import Connection, SourceDescriptor
 from wattwise_core.persistence.types import utcnow, uuid7
+from wattwise_core.seams import SessionProvider
 from wattwise_core.security.credentials import CredentialStore
 
 _log = get_logger(__name__)
@@ -118,21 +119,27 @@ class SyncOrchestrator:
     Source-blind: selects adapters through the injected :class:`AdapterRegistry` (by
     ``source_key``) and resolves credentials through the :class:`CredentialStore`,
     never importing or branching on a named source (ARCH-R2). ``now`` is injectable so
-    the built :class:`FetchContext` is deterministic in tests.
+    the built :class:`FetchContext` is deterministic in tests. Every canonical-store open
+    flows through the ONE engine-owned :class:`SessionProvider` seam (SEAM-R11 / ARCH-R31),
+    keyed on the server-derived athlete ``subject`` (ARCH-R16), never around it.
     """
 
     def __init__(
         self,
-        session_factory: SessionFactory,
+        sessions: SessionProvider,
         *,
         registry: AdapterRegistry,
         credential_store: CredentialStore | None = None,
         now: Any = None,
     ) -> None:
-        self._session_factory = session_factory
+        self._sessions = sessions
         self._registry = registry
         self._credentials = credential_store
         self._now = now or utcnow
+
+    def _factory_for(self, athlete_id: str) -> SessionFactory:
+        """A zero-arg :class:`SessionFactory` over the provider seam, subject-bound (SEAM-R11)."""
+        return lambda: self._sessions.session(subject=athlete_id)
 
     async def run(
         self,
@@ -175,7 +182,7 @@ class SyncOrchestrator:
         ``disconnected`` (ONB-R5) — gating on the PERSISTED status until re-auth.
         """
         excluded = (ConnectionStatus.REAUTH_REQUIRED, ConnectionStatus.DISCONNECTED)
-        async with self._session_factory() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             stmt = (
                 select(Connection, SourceDescriptor)
                 .join(
@@ -214,15 +221,15 @@ class SyncOrchestrator:
         # range — fetch only forward of the source's high-water cursor.
         if not explicit_window:
             floor = await incremental_floor_date(
-                self._session_factory, _uid(athlete_id), _uid(target.source_descriptor_id),
-                window.oldest,
+                self._factory_for(athlete_id), _uid(athlete_id),
+                _uid(target.source_descriptor_id), window.oldest,
             )
             window = SyncWindow(oldest=floor, newest=window.newest)
         try:
             batch = await self._fetch_and_map(adapter, target, window, fetched_at, sync_run_id)
         except AuthError as exc:  # credential revoked/expired -> reauth, stop the source (AUT-R4)
             return await handle_reauth(
-                self._session_factory, athlete_id, target, exc, seen_at=fetched_at
+                self._factory_for(athlete_id), athlete_id, target, exc, seen_at=fetched_at
             )
         except Exception as exc:  # isolate the source failure; degrade not crash (ARCH-R9)
             _log.warning(
@@ -282,7 +289,7 @@ class SyncOrchestrator:
             return SourceSyncResult.ok(target, candidates_mapped=0)
         synced = synced_range(window, self._now())
         try:
-            async with self._session_factory() as session:
+            async with self._sessions.session(subject=athlete_id) as session:
                 outcome = await IngestService(session).ingest(
                     athlete_id,
                     target.source_descriptor_id,

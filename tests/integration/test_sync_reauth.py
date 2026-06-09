@@ -32,6 +32,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
+from tests.integration._session_provider import FactorySessionProvider
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import (
     AuthArchetype,
@@ -160,7 +161,7 @@ async def test_revoked_key_sets_reauth_required_and_emits_gap(session_factory: A
     store, ref = _cred_store()
     athlete_id, connection_id = await _seed(session_factory, ref=ref)
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([RevokedKeyAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -200,7 +201,7 @@ async def test_revoked_key_persists_a_queryable_terminal_gap(session_factory: An
     store, ref = _cred_store()
     athlete_id, _ = await _seed(session_factory, ref=ref)
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([RevokedKeyAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -235,7 +236,7 @@ async def test_revoked_key_does_not_delete_prior_data(session_factory: Any) -> N
             )
         )
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([RevokedKeyAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,

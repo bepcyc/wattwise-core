@@ -24,6 +24,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from tests.integration._session_provider import FactorySessionProvider
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus, Fidelity, SourceKind
 from wattwise_core.ingestion.base import FetchContext, SourceDescriptorRef
@@ -213,7 +214,7 @@ async def test_fake_adapter_sync_writes_canonical(session_factory: Any) -> None:
     )
     adapter = FakeApiAdapter()
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([adapter]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -246,7 +247,7 @@ async def test_resync_is_idempotent(session_factory: Any) -> None:
         session_factory, source_key="fake_api", credential_ref=ref
     )
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([FakeApiAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -266,7 +267,7 @@ async def test_failing_adapter_degrades_not_crashes(session_factory: Any) -> Non
         session_factory, source_key="broken_api", credential_ref=ref
     )
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([FailingAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -313,7 +314,7 @@ async def test_one_failing_source_does_not_crash_the_other(session_factory: Any)
         await session.flush()
 
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([FakeApiAdapter(), FailingAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,

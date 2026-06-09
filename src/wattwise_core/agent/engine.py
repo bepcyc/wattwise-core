@@ -71,6 +71,7 @@ from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.entitlement import Entitlements, OssEntitlementResolver
 from wattwise_core.identity import OWNER_SUBJECT
 from wattwise_core.persistence import Database
+from wattwise_core.seams import EngineSessionProvider, SessionProvider
 
 
 class DecisionRefused(RuntimeError):
@@ -113,8 +114,12 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         state_db: AgentStateDatabase | None = None,
         coach: CoachBundle | None = None,
         entitlement: Entitlements | None = None,
+        sessions: SessionProvider | None = None,
     ) -> None:
-        self._db = database
+        # Every CANONICAL-store open flows through the ONE engine-owned provider seam (SEAM-R11
+        # / ARCH-R31), never around it; the OSS default does no tenant scoping (agent-state is
+        # the SEPARATE ARCH-R13 store, not this).
+        self._sessions: SessionProvider = sessions or EngineSessionProvider(database)
         self._model = model
         self._state_db = state_db
         self._coach = coach if coach is not None else CoachBundle()
@@ -204,9 +209,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
             cost_gate=EntitlementCostGate(ent),
         )
         compiled = build_graph(
-            model,
-            services,
-            saver,
+            model, services, saver,
             coach_system=self._coach.system_prompt,
             node_visit_ceiling=NODE_VISIT_CEILING,
             max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
@@ -236,7 +239,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         state_db = await self._agent_state_db()
         conversation_id = conversation_id_for(athlete_id, thread_id)
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
-        async with self._db.session() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             return await answer_question(
                 self._graph(AnalyticsService(session), saver, entitlement=entitlement),
                 athlete_id,
@@ -263,7 +266,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         state_db = await self._agent_state_db()
         conversation_id = f"digest:{week_end}"
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
-        async with self._db.session() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             graph = self._graph(AnalyticsService(session), saver, entitlement=entitlement)
             # The weekly digest IS the weekly load review (COACH-R1 #1); flow the athlete's ACTIVE
             # canonical goals into it so the load review is goal-aware (GBO-R38 / API-R32).
@@ -298,7 +301,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         state_db = await self._agent_state_db()
         conversation_id = conversation_id_for(athlete_id, thread_id)
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
-        async with self._db.session() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             graph = self._graph(
                 AnalyticsService(session), saver,
                 allow_names=CANONICAL_WORKOUT_NAMES, entitlement=entitlement,
@@ -346,7 +349,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         if not await saver.consume_interrupt(thread_id, interrupt_id):
             raise DecisionRefused(f"no live interrupt to consume for thread {thread_id!r}")
-        async with self._db.session() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             svc = AnalyticsService(session)
             accepted_edit: str | None = None
             edit_rejected = False

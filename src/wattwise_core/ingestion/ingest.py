@@ -50,12 +50,12 @@ from wattwise_core.ingestion._mapping import (
     _validate_payload,
     _whole_source_tier_of,
 )
-from wattwise_core.ingestion.dedup import resolve_activity_identity
 from wattwise_core.ingestion.trust import load_trust_policy
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
 from wattwise_core.persistence.models import Activity, SourceCandidate
 from wattwise_core.persistence.types import uuid7
 from wattwise_core.persistence.upsert import upsert
+from wattwise_core.seams import ConflictResolver, DefaultConflictResolver
 from wattwise_core.storage import ObjectStore, create_object_store
 
 _IDENTITY_WINDOW = _dt.timedelta(hours=2)
@@ -82,6 +82,7 @@ class IngestService:
         *,
         object_store: ObjectStore | None = None,
         batch_size: int | None = None,
+        resolver: ConflictResolver | None = None,
     ) -> None:
         self._session = session
         self._object_store = object_store
@@ -89,6 +90,10 @@ class IngestService:
         # configuration (CFG-R1a), supplied by the caller; ``None`` lands the whole list as
         # one batch (the fault-isolation savepoint per row is what bounds blast radius).
         self._batch_size = batch_size
+        # The dedup/conflict resolver is INJECTED behind the seam (CONF-R7/DEDUP-R6),
+        # never directly imported: the OSS conservative default (DEDUP-R7) unless a
+        # commercial DEDUP-R8 resolver is supplied through the seam.
+        self._resolver: ConflictResolver = resolver or DefaultConflictResolver()
 
     async def ingest(
         self,
@@ -181,7 +186,7 @@ class IngestService:
         for act in await self._windowed_activities(athlete, start):
             # SQLite returns tz-naive datetimes; coerce to UTC for the matcher (GBO-R32).
             act_start = _parse_start_time(act.start_time)
-            if resolve_activity_identity(
+            if self._resolver.resolve_activity_identity(
                 start, duration, sport, None,
                 act_start, float(act.elapsed_time_s or 0), act.sport, None,
             ):
@@ -224,7 +229,9 @@ class IngestService:
         if not candidates:
             return
         policy = await load_trust_policy(self._session, athlete, candidates)
-        scalars, coverage = _resolve_scalars(candidates, _ACTIVITY_SCALARS, policy)
+        scalars, coverage = _resolve_scalars(
+            candidates, _ACTIVITY_SCALARS, policy, self._resolver
+        )
         values, update_columns = _activity_values(activity_id, athlete, scalars, coverage)
         await upsert(
             self._session,

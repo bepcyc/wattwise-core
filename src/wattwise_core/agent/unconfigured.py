@@ -41,6 +41,7 @@ from wattwise_core.agent.state_db import (
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.entitlement import Entitlements
 from wattwise_core.persistence import Database
+from wattwise_core.seams import EngineSessionProvider, SessionProvider
 
 
 class UnconfiguredAgentEngine:
@@ -77,7 +78,13 @@ class UnconfiguredAgentEngine:
         store (a REAL pool, not ``:memory:``) and only require ``database`` when ``diagnose`` is
         actually called (else they fail closed rather than fabricate).
         """
-        self._db = database
+        # The canonical read in ``diagnose`` flows through the ONE engine-owned session provider
+        # seam (SEAM-R11 / ARCH-R31), never around it — even on the no-LLM path. Built only when a
+        # canonical ``database`` is wired (else ``diagnose`` fails closed). The agent-state store is
+        # SEPARATE (ARCH-R13) and is NOT this seam.
+        self._sessions: SessionProvider | None = (
+            EngineSessionProvider(database) if database is not None else None
+        )
         self._state_db = state_db
 
     def _message(self, locale: str) -> str:
@@ -148,9 +155,9 @@ class UnconfiguredAgentEngine:
         deliverable carries no athlete-facing numbers (VOICE-R7). With no canonical ``database``
         wired this fails closed (an unwired engine never invents coverage).
         """
-        if self._db is None:  # pragma: no cover - production always wires the canonical DB
+        if self._sessions is None:  # pragma: no cover - production always wires the canonical DB
             raise RuntimeError("diagnose requires the canonical database (RUN-R4.1)")
-        async with self._db.session() as session:
+        async with self._sessions.session(subject=athlete_id) as session:
             return await diagnose_coverage(AnalyticsService(session), athlete_id)
 
     async def digest(

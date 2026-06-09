@@ -53,6 +53,7 @@ from wattwise_core.ingestion.sync import SyncOrchestrator
 from wattwise_core.persistence import Database
 from wattwise_core.persistence.models import SourceDescriptor
 from wattwise_core.persistence.types import utcnow, uuid7
+from wattwise_core.seams import EngineSessionProvider
 from wattwise_core.security.credentials import CredentialStore, InMemoryCredentialStore
 from wattwise_core.security.crypto import EnvelopeCipher
 from wattwise_core.storage import ObjectStore, create_object_store
@@ -121,6 +122,9 @@ def _make_import_processor(
     at boot — a read-only/unprovisioned environment must not require it.
     """
     store_cache: list[ObjectStore] = []
+    # The upload's canonical write flows through the ONE engine-owned session provider seam
+    # (SEAM-R11 / ARCH-R31), keyed on the server-derived ``athlete_id``, never around it.
+    sessions = EngineSessionProvider(database)
 
     def _object_store() -> ObjectStore:
         if not store_cache:
@@ -130,7 +134,7 @@ def _make_import_processor(
     async def process(athlete_id: str, data: bytes, filename: str | None) -> ImportJob:
         adapter = _file_import_adapter(registry)
         ctx = FetchContext(ingest_run_id=str(uuid7()), fetched_at=utcnow(), connection_id=None)
-        async with database.session() as session:
+        async with sessions.session(subject=athlete_id) as session:
             descriptor = await _file_import_descriptor(session)
             ref = SourceDescriptorRef(
                 source_descriptor_id=str(descriptor.source_descriptor_id),
@@ -187,8 +191,15 @@ def _file_import_adapter(registry: AdapterRegistry) -> FileImportAdapter:
 def _make_sync_orchestrator(
     database: Database, registry: AdapterRegistry, store: CredentialStore | None
 ) -> RouterSyncOrchestrator:
-    """Adapt the real :class:`SyncOrchestrator` to the router's started-run seam (API-R46a)."""
-    orchestrator = SyncOrchestrator(database.session, registry=registry, credential_store=store)
+    """Adapt the real :class:`SyncOrchestrator` to the router's started-run seam (API-R46a).
+
+    The orchestrator's canonical opens flow through the ONE engine-owned ``SessionProvider``
+    seam (SEAM-R11 / ARCH-R31) keyed on the server-derived athlete subject — never around it
+    via a raw bound ``database.session`` method.
+    """
+    orchestrator = SyncOrchestrator(
+        EngineSessionProvider(database), registry=registry, credential_store=store
+    )
 
     async def run(target: SyncTarget) -> RouterSyncRun:
         result = await orchestrator.run(target.athlete_id, connection_id=target.connection_id)

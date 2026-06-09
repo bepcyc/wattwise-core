@@ -42,6 +42,7 @@ from wattwise_core.entitlement import (
 from wattwise_core.observability.logging import get_logger
 from wattwise_core.persistence import Database
 from wattwise_core.privacy.erasure import erase_athlete
+from wattwise_core.seams import SYSTEM_SUBJECT, EngineSessionProvider
 from wattwise_core.storage import create_object_store
 
 #: The in-version readiness path; ``/readyz`` is the conventional operational alias (OBS-R6.2).
@@ -254,7 +255,11 @@ async def _database_reachable(app: FastAPI) -> bool:
     if not isinstance(database, Database):
         return False
     try:
-        async with database.session() as session:
+        # The reachability probe is a request-less SYSTEM open, but it STILL flows through the ONE
+        # engine-owned session provider seam (SEAM-R11 / ARCH-R31) — never around it. Not bound to a
+        # request athlete, it carries the non-scoped ``SYSTEM_SUBJECT`` marker (inert in the OSS
+        # provider, which does no scoping; the operator/system context in the commercial one).
+        async with EngineSessionProvider(database).session(subject=SYSTEM_SUBJECT) as session:
             await session.execute(select(literal(1)))
         return True
     except Exception:  # an unreachable DB is not-ready, never a 500 (OBS-R6.2)
@@ -287,8 +292,11 @@ def build_deletion_requester(app: FastAPI) -> DeletionRequester:
         state_db = build_agent_state_database(settings)
         try:
             await state_db.create_all()
+            # The CANONICAL side of the erasure flows through the ONE engine-owned session provider
+            # seam (SEAM-R11 / ARCH-R31), keyed on the server-derived ``athlete_id`` (AUTH-R18),
+            # never around it. The agent-state store is SEPARATE (ARCH-R13), with its own session.
             async with (
-                database.session() as canonical_session,
+                EngineSessionProvider(database).session(subject=athlete_id) as canonical_session,
                 state_db.session() as agent_session,
             ):
                 receipt = await erase_athlete(

@@ -30,6 +30,7 @@ from wattwise_core.api.errors import ProblemError
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.config import Settings
 from wattwise_core.persistence import Database
+from wattwise_core.seams import EngineSessionProvider
 
 #: The HTTP methods that debit the mutating bucket; all others debit read (LIMIT-R2).
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -56,16 +57,36 @@ def get_database(request: Request) -> Database:
     return database
 
 
+def request_subject(
+    principal: Annotated[Principal, Depends(authenticate)],
+) -> str:
+    """The server-derived ``subject`` the request's canonical session is keyed on (ARCH-R16).
+
+    A thin seam over :func:`authenticate` (FastAPI caches it per request, so a route that also
+    declares :data:`CurrentPrincipal` shares the SAME resolved principal — auth is resolved once,
+    never doubled). It exists so :func:`get_db` is keyed on the subject WITHOUT making subject
+    resolution a side-effect of the data-access dependency: the session provider stays decoupled
+    from the authentication mechanism (SEAM-R11 keys on a server-derived subject; ARCH-R16 owns how
+    that subject is derived). The subject is the verified token identity — never client-asserted.
+    """
+    return principal.subject
+
+
 async def get_db(
     database: Annotated[Database, Depends(get_database)],
+    subject: Annotated[str, Depends(request_subject)],
 ) -> AsyncIterator[AsyncSession]:
-    """Yield one transactional :class:`AsyncSession` for the request (committed/rolled back).
+    """Yield one transactional canonical :class:`AsyncSession` for the request (SEAM-R11).
 
-    The session is scoped to a single request; the engine seam commits on success and
-    rolls back on error. Routes receive an :class:`AsyncSession` and never touch the
-    engine/factory directly, keeping the persistence lifecycle in one place.
+    Canonical-store access flows through the ONE engine-owned ``SessionProvider`` seam
+    (SEAM-R11 / ARCH-R31), obtained with the server-derived ``subject`` established at the
+    L6 edge (ARCH-R16) and threaded in via :func:`request_subject` — the provider is keyed on the
+    subject but is NOT itself coupled to the auth mechanism. The OSS default provider applies NO
+    tenant scoping (single-athlete) but IS the single attach point the commercial tenant-scoped
+    overlay mounts on. Routes receive an :class:`AsyncSession` and never open the store around it.
     """
-    async with database.session() as session:
+    provider = EngineSessionProvider(database)
+    async with provider.session(subject=subject) as session:
         yield session
 
 
@@ -134,5 +155,6 @@ __all__ = [
     "get_db",
     "get_rate_limiter",
     "get_settings",
+    "request_subject",
     "require_scope",
 ]

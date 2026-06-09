@@ -42,6 +42,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
+from tests.integration._session_provider import FactorySessionProvider
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus, Fidelity, SourceKind
 from wattwise_core.ingestion.base import (
@@ -266,7 +267,7 @@ async def test_revoked_source_isolates_from_a_healthy_source(session_factory: An
         session_factory, athlete_id=athlete_id, source_key="revoked_api", credential_ref=ref
     )
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([HealthyAdapter(), RevokedAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -301,7 +302,7 @@ async def test_reauth_required_source_is_not_resynced(session_factory: Any) -> N
     )
     revoked = RevokedAdapter()
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([revoked]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -340,7 +341,7 @@ async def test_cancellation_mid_fetch_leaves_no_partial_and_no_auth_corruption(
             )
         )
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([CancellingAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -385,7 +386,7 @@ async def test_cancellation_preserves_a_committed_source(session_factory: Any) -
         session_factory, athlete_id=athlete_id, source_key="cancel_api", credential_ref=ref
     )
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([HealthyAdapter(), CancellingAdapter()]),
         credential_store=store,
         now=lambda: _FIXED_NOW,
@@ -431,7 +432,7 @@ async def test_removed_source_degrades_in_isolation(session_factory: Any) -> Non
             )
         )
     orch = SyncOrchestrator(
-        session_factory,
+        FactorySessionProvider(session_factory),
         registry=registry_from_adapters([HealthyAdapter()]),  # gone_api NOT registered
         credential_store=store,
         now=lambda: _FIXED_NOW,
