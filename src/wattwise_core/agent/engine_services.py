@@ -41,6 +41,7 @@ from wattwise_core.agent.contracts import (
 )
 from wattwise_core.agent.seams import AgentServices
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
+from wattwise_core.agent.voice import VoicePresentation
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.persistence.types import utcnow
 
@@ -329,7 +330,14 @@ class CoachBundle:
     the construction seam that wires this config-loaded equivalence + tolerance into the graph.
     """
 
-    __slots__ = ("allowed_hosts", "equivalence", "lookback_days", "system_prompt", "tolerance")
+    __slots__ = (
+        "allowed_hosts",
+        "equivalence",
+        "lookback_days",
+        "presentation",
+        "system_prompt",
+        "tolerance",
+    )
 
     def __init__(
         self,
@@ -338,6 +346,7 @@ class CoachBundle:
         tolerance: _grounding.NumericTolerance | None = None,
         allowed_hosts: frozenset[str] = frozenset(),
         lookback_days: int | None = None,
+        presentation: VoicePresentation | None = None,
     ) -> None:
         self.system_prompt = system_prompt
         self.equivalence = equivalence if equivalence is not None else MetricEquivalence({})
@@ -346,6 +355,11 @@ class CoachBundle:
         # (CFG-R1a). The empty default bundle ships no hosts (fail-closed) and no lookback override.
         self.allowed_hosts = allowed_hosts
         self.lookback_days = lookback_days
+        # The config-loaded athlete-facing presentation policy (VOICE-R2/-R7): the reverse
+        # [agent.metric_aliases] label map + fallback lead the deliverables enforce AFTER
+        # grounding. The empty default still SCRUBS a surviving code to a neutral phrase
+        # (fail-closed VOICE-R2), never showing it; :meth:`from_settings` wires the real map.
+        self.presentation = presentation if presentation is not None else VoicePresentation()
 
     @classmethod
     def from_settings(cls, settings: Any) -> CoachBundle:
@@ -360,6 +374,9 @@ class CoachBundle:
             ),
             allowed_hosts=frozenset(settings.agent__allowed_hosts),
             lookback_days=settings.agent__coach__latest_lookback_days,
+            # Reverse the SAME loaded alias map into athlete-native labels (CFG-R1a): the
+            # presentation pass translates a surviving internal code back to a human word.
+            presentation=VoicePresentation.from_aliases(settings.agent__metric_aliases),
         )
 
     def services(

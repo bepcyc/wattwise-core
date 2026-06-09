@@ -250,6 +250,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
                 thread_id=thread_id,
                 conversation_id=conversation_id,
                 follow_up=follow_up,
+                presentation=self._coach.presentation,
             )
 
     async def digest(self, *, athlete_id: str, week_end: str) -> Digest:
@@ -264,7 +265,9 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
             graph = self._graph(AnalyticsService(session), saver)
-            return await weekly_digest(graph, athlete_id, week_end)
+            return await weekly_digest(
+                graph, athlete_id, week_end, presentation=self._coach.presentation
+            )
 
     async def plan_deliverable(
         self,

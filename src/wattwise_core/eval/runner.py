@@ -401,8 +401,6 @@ def _sync_engine_grades(name: str) -> SuiteGrades | None:
         return SuiteGrades(readiness=suites.grade_readiness())
     if name == "plan":
         return SuiteGrades(plan=grade_plan())
-    if name == "voice":
-        return SuiteGrades(voice=voice_suite.grade_voice())
     if name == "multilingual":
         # A parity check expressed via the all-or-nothing termination grade shape.
         total, failures = suites.grade_multilingual()
@@ -417,6 +415,8 @@ async def _engine_grades(name: str) -> SuiteGrades:
     sync = _sync_engine_grades(name)
     if sync is not None:
         return sync
+    if name == "voice":
+        return SuiteGrades(voice=await voice_suite.grade_voice())
     if name == "reflection_termination":
         return SuiteGrades(termination=await reflection_suite.grade_reflection_termination())
     if name == "judge":

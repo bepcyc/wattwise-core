@@ -14,6 +14,7 @@ grounded outputs are projected (OUTCOME-R2), and athlete identity is server-deri
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -32,6 +33,7 @@ from wattwise_core.agent.deliverables import (
     number_cap,
     weekly_digest,
 )
+from wattwise_core.agent.voice import VoicePresentation
 
 
 class FakeGraph:
@@ -253,10 +255,80 @@ def test_leads_with_state_rejects_bare_metric_token() -> None:
     assert leads_with_state("You're recovered and sharp today.")
 
 
+def test_leads_with_state_rejects_metric_report_frame_and_token_list() -> None:
+    """A metrics-report lead or a raw metric-token list fails the strengthened gate (VOICE-R7)."""
+    # The exact report frames the spec forbids as a LEAD (COACH-R7 / VOICE-R7):
+    assert not leads_with_state("Here is your current training-load picture from the data:")
+    assert not leads_with_state("Here are your latest metrics:")
+    assert not leads_with_state("<p>What I can tell you is your latest training-load picture:</p>")
+    # A raw metric-token list lead (>= 2 token-words) must NOT pass on word-count alone:
+    assert not leads_with_state("ctl: 6.7, atl: 30.2, tsb: -28.")
+    assert not leads_with_state("Metrics: ctl 6.7, atl 30.2.")
+    # A normal warm state read still passes — even one naming an athlete-native word + number:
+    assert leads_with_state("Your fitness is trending up after a steady block.")
+    assert leads_with_state("You're carrying more fatigue than usual right now.")
+
+
 def test_count_foregrounded_numbers_ignores_markup_digits() -> None:
     """Number-density counts prose numbers only, not digits inside stripped markup (VOICE-R7)."""
     body = '<p class="lead7">You rode 3 times and gained 2.5 points of fitness.</p>'
     assert count_foregrounded_numbers(body) == 2
+
+
+def test_count_foregrounded_numbers_counts_sentence_final_number() -> None:
+    """A number ending a sentence is counted (the cap gate must not undercount it, VOICE-R7)."""
+    # Pre-fix bug: the trailing "." made "62" uncounted, leaving the number-cap gate too lenient.
+    assert count_foregrounded_numbers("Your fitness is 62.") == 1
+    assert count_foregrounded_numbers("fitness 6.7, fatigue 30.2, form -28.") == 3
+    # A decimal / version-ish run is still not split into spurious bare integers:
+    assert count_foregrounded_numbers("It was 3.14 not 3.") == 2
+
+
+async def test_answer_question_scrubs_tokens_and_repairs_report_lead() -> None:
+    """The DELIVERED answer leads with state + carries no raw token, even from a report draft.
+
+    Drives the real :func:`answer_question` projection over a recorded terminal state that
+    replays the OLD violating output (report-frame lead + raw ctl/atl/tsb tokens); the
+    presentation enforcement (VOICE-R2/COACH-R7) must repair the lead and translate every token,
+    while the grounded citations (GROUND-R5/R7) stay verbatim canonical.
+    """
+    draft = (
+        "Here is your current training-load picture from the data: your fitness (ctl) is 6.7, "
+        "your fatigue (atl) is 30.2, and your form (tsb) is -28."
+    )
+    terminal: AgentState = {
+        "status": RunStatus.COMPLETED,
+        "idempotency_key": "thread-report",
+        "grounded_text": draft,
+        "grounded_html": f"<p>{draft}</p>",
+        "observations": [],
+        "citations": [
+            {"record_id": "ctl-1", "metric": "ctl", "value": 6.7, "as_of": "2026-06-08"},
+            {"record_id": "atl-1", "metric": "atl", "value": 30.2, "as_of": "2026-06-08"},
+            {"record_id": "tsb-1", "metric": "tsb", "value": -28.0, "as_of": "2026-06-08"},
+        ],
+    }
+    policy = VoicePresentation.from_aliases(
+        {"fitness": "ctl", "fatigue": "atl", "form": "tsb", "freshness": "tsb"}
+    )
+    answer = await answer_question(
+        FakeGraph(terminal),
+        "athlete-1",
+        "How much load over six weeks?",
+        locale="en",
+        response_length="standard",
+        presentation=policy,
+    )
+    assert leads_with_state(answer.answer_text)
+    lowered = answer.answer_text.lower()
+    for token in ("ctl", "atl", "tsb"):
+        assert not re.search(rf"(?<![a-z]){token}(?![a-z])", lowered), token
+    # Grounding untouched: the canonical citations remain verbatim (GROUND-R7).
+    assert answer.citations == (
+        Citation(record_id="ctl-1", metric="ctl", value=6.7, as_of="2026-06-08"),
+        Citation(record_id="atl-1", metric="atl", value=30.2, as_of="2026-06-08"),
+        Citation(record_id="tsb-1", metric="tsb", value=-28.0, as_of="2026-06-08"),
+    )
 
 
 def test_number_density_cap_defaults_per_length() -> None:

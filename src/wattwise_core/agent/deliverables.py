@@ -79,13 +79,20 @@ from wattwise_core.agent.voice import (
     Citation,
     Observation,
     ResponseLength,
-    _enforce_number_cap,
+    VoicePresentation,
     _project_citations,
     count_foregrounded_numbers,
+    enforce_presentation,
     first_sentence,
     leads_with_state,
     number_cap,
 )
+
+# The default presentation policy when a caller injects none (the FakeGraph test seam and the
+# weekly digest's unattended run): an empty config-loaded map — a surviving internal token is
+# still SCRUBBED to a neutral phrase, never shown as a code (fail-closed VOICE-R2). The engine
+# wires the loaded ``[agent.metric_aliases]``-derived policy in for every real answer path.
+_DEFAULT_PRESENTATION = VoicePresentation()
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +194,7 @@ async def answer_question(
     thread_id: str | None = None,
     conversation_id: str | None = None,
     follow_up: Mapping[str, Any] | None = None,
+    presentation: VoicePresentation | None = None,
 ) -> AgentAnswer:
     """Drive the graph for a grounded free-form answer to ``question`` (COACH-R1, COACH-R8).
 
@@ -202,7 +210,16 @@ async def answer_question(
     foregrounded numbers through, and the targeted observation's grounded citations are surfaced
     on the answer. ``response_length`` governs verbosity, never truth (VOICE-R8). No un-grounded
     text is ever surfaced.
+
+    AFTER grounding, the athlete-facing prose passes the deterministic PRESENTATION gate
+    (``presentation``, the config-loaded :class:`VoicePresentation`): raw internal metric tokens
+    are translated to athlete-native language (VOICE-R2), a metrics-report lead is repaired to a
+    state read (COACH-R7), and the foregrounded-number count is held to the per-length cap
+    (VOICE-R7). This is presentation ONLY — it rewrites no grounded number and changes no
+    citation; the grounded ``{metric, value, as_of}`` numbers stay available as the on-demand
+    reveal-numbers backing (GROUND-R5/-R7).
     """
+    policy = presentation if presentation is not None else _DEFAULT_PRESENTATION
     kind = _follow_up_kind(follow_up)
     if kind == "expand":
         response_length = _expanded_length(response_length)
@@ -220,14 +237,21 @@ async def answer_question(
     html, text, status, out_thread_id = _outputs(final)
     observations = _project_observations(_as_seq(final.get("observations")))
     citations = _project_citations(_as_seq(final.get("citations")))
-    # A reveal/drill follow-up foregrounds the verbatim grounded numbers it was asked to
-    # reveal; otherwise hold to the per-length cap (VOICE-R7). Either way every number shown
-    # is one the graph already grounded.
+    # A reveal/drill follow-up foregrounds the verbatim grounded numbers it was asked to reveal
+    # (so the cap is lifted to the detailed ceiling); a normal turn holds the per-length cap.
+    # EITHER WAY the prose is still scrubbed of raw internal tokens and led with a state read
+    # (VOICE-R2/COACH-R7) — a reveal surfaces grounded NUMBERS, never the internal metric CODES.
+    # Every number shown is one the graph already grounded; the pass rewrites none of them.
     if kind in ("drill", "reveal_numbers"):
         revealed = _reveal_observation(observations, _follow_up_target(follow_up))
         citations = _merge_revealed_citations(citations, revealed)
+        html, text = enforce_presentation(
+            html, text, response_length="detailed", presentation=policy
+        )
     else:
-        html, text = _enforce_number_cap(html, text, number_cap(response_length))
+        html, text = enforce_presentation(
+            html, text, response_length=response_length, presentation=policy
+        )
     return AgentAnswer(
         status=status,
         thread_id=out_thread_id,
@@ -259,7 +283,13 @@ def _merge_revealed_citations(
     return (*citations, *extra)
 
 
-async def weekly_digest(graph: CoachGraph, athlete_id: str, week_end: str) -> Digest:
+async def weekly_digest(
+    graph: CoachGraph,
+    athlete_id: str,
+    week_end: str,
+    *,
+    presentation: VoicePresentation | None = None,
+) -> Digest:
     """Drive the graph for the weekly digest (== weekly load review, COACH-R1 #1).
 
     Builds a ``scheduled_digest`` run — intent fixed by the trigger, no request text and
@@ -279,7 +309,14 @@ async def weekly_digest(graph: CoachGraph, athlete_id: str, week_end: str) -> Di
     )
     final = await graph.run(inputs)
     html, text, status, thread_id = _outputs(final)
-    html, text = _enforce_number_cap(html, text, number_cap("standard"))
+    # Same deterministic presentation gate as the free-form answer: scrub raw internal tokens
+    # to athlete-native language (VOICE-R2), repair a metrics-report lead to a state read
+    # (COACH-R7), and hold the standard-length number cap (VOICE-R7). Presentation only — the
+    # grounded citations below are untouched (GROUND-R5/-R7).
+    policy = presentation if presentation is not None else _DEFAULT_PRESENTATION
+    html, text = enforce_presentation(
+        html, text, response_length="standard", presentation=policy
+    )
     observations = _project_observations(_as_seq(final.get("observations")))
     return Digest(
         status=status,

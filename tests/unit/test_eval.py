@@ -69,10 +69,12 @@ from wattwise_core.eval.voice_suite import (
     _load as load_voice,
 )
 from wattwise_core.eval.voice_suite import (
-    case_failure as voice_case_failure,
+    answer_voice_failure,
+    answer_voice_raw_failure,
+    grade_voice,
 )
 from wattwise_core.eval.voice_suite import (
-    grade_voice,
+    case_failure as voice_case_failure,
 )
 
 pytestmark = pytest.mark.unit
@@ -504,16 +506,35 @@ async def test_reflection_termination_drives_all_three_loops() -> None:
 
 
 async def test_voice_suite_is_gated_and_passes() -> None:
-    # QA-EVAL-R2.12 / QA-EVAL-R11: the voice follow-up liveness suite is gated; every
-    # EXPAND/DRILL/REVEAL/MONOTONE case clears its deterministic property.
+    # QA-EVAL-R2.12 / QA-EVAL-R11 / EVAL-R5b: the voice suite is gated; every EXPAND/DRILL/
+    # REVEAL/MONOTONE follow-up case AND the ANSWER-voice case (driven through the real
+    # answer_question projection) clear their deterministic property.
     assert "voice" in list_suites()
-    grade = grade_voice()
+    grade = await grade_voice()
     assert grade.passed
     assert grade.failures == ()
     assert grade.rate == 1.0
     card = await run_suite("voice")
     assert card.passed
     assert card.to_jsonable()["voice"]["passed"] is True
+
+
+async def test_answer_voice_case_delivers_state_first_no_tokens() -> None:
+    # EVAL-R5b: the recorded six-week-load cited-metrics report, driven through the REAL
+    # answer_question projection (config-loaded presentation policy), now leads with a state
+    # read, leaks NO raw ctl/atl/tsb token, stays under the cap, and keeps citations canonical.
+    data = load_voice()
+    case = next(c for c in data["cases"] if c["id"] == "answer-six-week-load-state-first")
+    assert await answer_voice_failure(case, data) is None
+
+
+def test_answer_voice_raw_metric_report_is_flagged() -> None:
+    # Teeth (mutation-proof, EVAL-R5b): the RAW old metric-report draft asserted DIRECTLY
+    # (the presentation enforcement bypassed — exactly what would ship if it were removed)
+    # MUST be flagged by the deterministic answer-voice check, so the gate is non-vacuous.
+    neg = "answer-voice-metric-report-rejected"
+    case = next(c for c in load_voice()["negative_cases"] if c["id"] == neg)
+    assert answer_voice_raw_failure(case) is None  # None == "correctly flagged the raw draft"
 
 
 @pytest.mark.parametrize(

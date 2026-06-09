@@ -81,9 +81,52 @@
       "id": "monotone-length-ladder",
       "kind": "monotone",
       "rationale": "Length-monotonicity (VOICE-R7): the per-length foregrounded-number budget is monotone non-decreasing short <= standard <= detailed, so a longer response NEVER admits fewer numbers than a shorter one."
+    },
+    {
+      "id": "answer-six-week-load-state-first",
+      "kind": "answer_voice",
+      "athlete_id": "athlete-eval-0001",
+      "question": "How much training load have I done over the last six weeks?",
+      "response_length": "standard",
+      "recorded_status": "completed",
+      "grounded_text": "Hey there! Here is your current training-load picture from the latest daily metrics: your fitness (ctl) is 6.7, your fatigue (atl) is 30.2, and your form (tsb) is -28. These numbers show your fitness (ctl) is low, your fatigue (atl) is high, and your form (tsb) is deeply negative.",
+      "citations": [
+        {"record_id": "ctl-2026-06-08", "metric": "ctl", "value": 6.7, "as_of": "2026-06-08"},
+        {"record_id": "atl-2026-06-08", "metric": "atl", "value": 30.2, "as_of": "2026-06-08"},
+        {"record_id": "tsb-2026-06-08", "metric": "tsb", "value": -28.0, "as_of": "2026-06-08"}
+      ],
+      "expected_canonical_metrics": {"ctl": 6.7, "atl": 30.2, "tsb": -28.0},
+      "rationale": "EVAL-R5b deterministic ANSWER-voice gate: this is the exact cited-metrics-report the engine USED to ship (report-frame lead 'Here is your current training-load picture' + raw ctl/atl/tsb tokens + 3 foregrounded numbers). Driven through the real answer_question projection (with the config-loaded presentation policy) the DELIVERED answer MUST now lead with a state read (COACH-R7), contain NO raw internal metric token (VOICE-R2), foreground <= the standard cap of numbers (VOICE-R7), and every surfaced number MUST stay canonical (GROUND-R7) — the grounded citations are untouched."
     }
   ],
+  "presentation_aliases": {
+    "fitness": "ctl",
+    "chronic training load": "ctl",
+    "fatigue": "atl",
+    "acute training load": "atl",
+    "form": "tsb",
+    "freshness": "tsb",
+    "training stress balance": "tsb",
+    "critical power": "critical_power_w"
+  },
   "negative_cases": [
+    {
+      "id": "answer-voice-metric-report-rejected",
+      "kind": "answer_voice",
+      "athlete_id": "athlete-eval-0001",
+      "question": "How much training load have I done over the last six weeks?",
+      "response_length": "standard",
+      "recorded_status": "completed",
+      "grounded_text": "Here is your current training-load picture from the latest daily metrics:\n- ctl: 6.7\n- atl: 30.2\n- tsb: -28\nThese numbers show your fitness is low.",
+      "citations": [
+        {"record_id": "ctl-2026-06-08", "metric": "ctl", "value": 6.7, "as_of": "2026-06-08"},
+        {"record_id": "atl-2026-06-08", "metric": "atl", "value": 30.2, "as_of": "2026-06-08"},
+        {"record_id": "tsb-2026-06-08", "metric": "tsb", "value": -28.0, "as_of": "2026-06-08"}
+      ],
+      "expected_canonical_metrics": {"ctl": 6.7, "atl": 30.2, "tsb": -28.0},
+      "rationale": "Teeth (mutation-proof): the RAW old metric-report draft — a report-frame lead + a bare ctl/atl/tsb token list — asserted DIRECTLY (bypassing the presentation enforcement) MUST be flagged by the deterministic answer-voice check (report-frame lead AND raw metric tokens). If the enforcement were removed from answer_question this is exactly what would ship, so the check must FAIL it; a check that passes this raw draft is vacuous."
+    },
+
     {
       "id": "expand-must-not-shorten",
       "kind": "expand",

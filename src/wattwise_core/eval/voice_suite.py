@@ -32,12 +32,25 @@ INJECT-R3, EVAL-R5, OUTCOME-R5; EVAL-R1 / TIER-R1 (offline, deterministic, no ne
 from __future__ import annotations
 
 import json
+import re
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+from wattwise_core.agent.contracts import AgentState, RunStatus
+from wattwise_core.agent.deliverables import AgentAnswer, answer_question
 from wattwise_core.agent.projection import conversation_id_of, thread_id_for
-from wattwise_core.agent.voice import Citation, Observation, ResponseLength, number_cap
+from wattwise_core.agent.voice import (
+    INTERNAL_METRIC_TOKENS,
+    Citation,
+    Observation,
+    ResponseLength,
+    VoicePresentation,
+    count_foregrounded_numbers,
+    first_sentence,
+    leads_with_state,
+    number_cap,
+)
 from wattwise_core.eval.grading import VoiceGrade
 
 _DATASETS_DIR = Path(__file__).parent / "datasets"
@@ -218,6 +231,139 @@ def monotone_failure(_case: dict[str, Any]) -> str | None:
     return None
 
 
+# --- EVAL-R5b answer-voice gate (deterministic, over the REAL answer_question projection) ---
+
+
+class _FakeGraph:
+    """A :class:`CoachGraph` returning a recorded terminal state (no network, EVAL-R1).
+
+    Mirrors the unit-test ``FakeGraph``: it lets the answer-voice grader drive the SHIPPED
+    :func:`wattwise_core.agent.deliverables.answer_question` projection over a recorded
+    (pre-grounded) terminal state, so the gate asserts on the ACTUAL delivered answer — the
+    deliverable's presentation enforcement included — not a re-implementation (EVAL-R5b).
+    """
+
+    def __init__(self, terminal: AgentState) -> None:
+        self._terminal = terminal
+
+    async def run(self, _state: AgentState) -> AgentState:
+        return self._terminal
+
+
+def _presentation(data: dict[str, Any]) -> VoicePresentation:
+    """The config-loaded presentation policy for the answer-voice cases (CFG-R1a / VOICE-R2).
+
+    Built by REVERSING the dataset's ``presentation_aliases`` (the same shape as the loaded
+    ``[agent.metric_aliases]`` config) so the grader exercises the SAME translation the engine
+    wires from settings, never a code literal.
+    """
+    return VoicePresentation.from_aliases(data.get("presentation_aliases", {}))
+
+
+def _recorded_terminal(case: dict[str, Any]) -> AgentState:
+    """The recorded (pre-grounded) terminal state for an answer-voice case (EVAL-R1).
+
+    Carries the OLD violating draft as ``grounded_text``/``grounded_html`` plus the canonical
+    citations the grounder already produced — so driving it through ``answer_question`` exercises
+    the presentation enforcement over a faithful replay of the live output.
+    """
+    text = str(case["grounded_text"])
+    status = RunStatus(str(case.get("recorded_status", "completed")))
+    return {
+        "status": status,
+        "idempotency_key": f"{case['athlete_id']}:answer-voice",
+        "thread_id": f"{case['athlete_id']}:answer-voice",
+        "grounded_text": text,
+        "grounded_html": f"<p>{text}</p>",
+        "observations": [],
+        "citations": list(case.get("citations", [])),
+    }
+
+
+def _answer_voice_problem(case: dict[str, Any], answer: AgentAnswer) -> str | None:
+    """The deterministic EVAL-R5b assertions on a DELIVERED answer, or None if all hold.
+
+    Asserts, on the athlete-facing answer text the deliverable shipped: (a) it LEADS with a
+    state read (COACH-R7); (b) it carries NO raw internal metric token (VOICE-R2); (c) it
+    foregrounds <= the per-length number cap (VOICE-R7); (d) EVERY citation value is canonical
+    — i.e. matches the case's ``expected_canonical_metrics`` (GROUND-R7, grounding untouched).
+    """
+    cid = case["id"]
+    text = answer.answer_text
+    length: ResponseLength = case.get("response_length", "standard")
+    if not leads_with_state(text):
+        return f"{cid}: delivered answer does not lead with a state read: {first_sentence(text)!r}"
+    leaked = _raw_tokens_in(text)
+    if leaked:
+        return f"{cid}: delivered answer leaked raw internal metric tokens {sorted(leaked)}"
+    count = count_foregrounded_numbers(text)
+    if count > number_cap(length):
+        return f"{cid}: delivered answer foregrounds {count} numbers > cap {number_cap(length)}"
+    return _canonical_problem(cid, answer, case)
+
+
+def _canonical_problem(
+    cid: str, answer: AgentAnswer, case: dict[str, Any]
+) -> str | None:
+    """Flag any surfaced citation value that is not the canonical one (GROUND-R7 intact)."""
+    expected = {str(k): float(v) for k, v in case.get("expected_canonical_metrics", {}).items()}
+    for cit in answer.citations:
+        if cit.metric in expected and (
+            cit.value is None or abs(cit.value - expected[cit.metric]) > _VALUE_TOL
+        ):
+            return (
+                f"{cid}: citation {cit.metric}={cit.value} is not canonical "
+                f"(expected {expected[cit.metric]}) — grounding must stay verbatim (GROUND-R7)"
+            )
+    return None
+
+
+def _raw_tokens_in(text: str) -> set[str]:
+    """The raw internal metric tokens appearing as standalone words in ``text`` (VOICE-R2)."""
+    words = {w.lower() for w in re.findall(r"[^\W\d_]+|w'", text.lower())}
+    return words & INTERNAL_METRIC_TOKENS
+
+
+async def answer_voice_failure(case: dict[str, Any], data: dict[str, Any]) -> str | None:
+    """Drive the REAL answer projection for a POSITIVE answer-voice case and assert EVAL-R5b.
+
+    Builds a recorded terminal state from the OLD violating draft, drives the SHIPPED
+    :func:`answer_question` with the config-loaded presentation policy, and asserts the
+    DELIVERED answer leads with state, leaks no raw token, stays under the number cap, and keeps
+    every citation canonical. A defect in the deliverable's enforcement surfaces HERE.
+    """
+    answer = await answer_question(
+        _FakeGraph(_recorded_terminal(case)),
+        str(case["athlete_id"]),
+        str(case["question"]),
+        locale="en",
+        response_length=case.get("response_length", "standard"),
+        presentation=_presentation(data),
+    )
+    return _answer_voice_problem(case, answer)
+
+
+def answer_voice_raw_failure(case: dict[str, Any]) -> str | None:
+    """Teeth: assert the deterministic checks FLAG the RAW old metric-report draft (mutation-proof).
+
+    Asserts on the RAW ``grounded_text`` WITHOUT the presentation enforcement (what would ship if
+    the enforcement were removed from ``answer_question``): the report-frame lead must fail
+    leads-with-state AND raw tokens must be present. Returns a failure string when the raw draft
+    is (wrongly) clean — i.e. when the check has no teeth — and ``None`` when the raw draft is
+    correctly flagged. The suite's own test asserts this returns ``None`` for the negative case.
+    """
+    cid = case["id"]
+    text = str(case["grounded_text"])
+    flagged_lead = not leads_with_state(text)
+    leaked = _raw_tokens_in(text)
+    if flagged_lead and leaked:
+        return None
+    return (
+        f"{cid}: VACUOUS — the raw metric-report draft was NOT flagged "
+        f"(leads_with_state failed={flagged_lead}, raw tokens={sorted(leaked)})"
+    )
+
+
 _CHECKS = {
     "expand": expand_failure,
     "reveal_numbers": reveal_failure,
@@ -225,28 +371,45 @@ _CHECKS = {
     "monotone": monotone_failure,
 }
 
+# Follow-up kinds the SYNC dispatcher grades; ``answer_voice`` is graded by the ASYNC path
+# (:func:`answer_voice_failure`) because it drives the real async answer_question projection.
+_ASYNC_KINDS = frozenset({"answer_voice"})
+
 
 def case_failure(case: dict[str, Any]) -> str | None:
-    """Dispatch one case to the deterministic check for its follow-up kind (COACH-R8)."""
-    check = _CHECKS.get(str(case["kind"]))
+    """Dispatch one SYNC case to the deterministic check for its follow-up kind (COACH-R8).
+
+    ``answer_voice`` cases are graded on the ASYNC path and are skipped here (return ``None``);
+    :func:`grade_voice` routes them to :func:`answer_voice_failure`.
+    """
+    kind = str(case["kind"])
+    if kind in _ASYNC_KINDS:
+        return None
+    check = _CHECKS.get(kind)
     if check is None:
         return f"{case['id']}: unknown voice follow-up kind {case['kind']!r}"
     return check(case)
 
 
-def grade_voice() -> VoiceGrade:
-    """Grade the voice follow-up liveness fixtures deterministically (QA-EVAL-R2.12).
+async def grade_voice() -> VoiceGrade:
+    """Grade the voice liveness + answer-voice fixtures deterministically (QA-EVAL-R2.12, EVAL-R5b).
 
-    For each POSITIVE case the grader runs the deterministic check for its follow-up kind
-    (EXPAND climbs / DRILL+REVEAL verbatim-same-thread-no-widen / MONOTONE budget) and
-    records a failure for each that does not hold. The gate is 100%; the negative-case
-    teeth are exercised by the suite's own tests, not here.
+    For each POSITIVE case: a follow-up case (EXPAND climbs / DRILL+REVEAL verbatim-same-thread-
+    no-widen / MONOTONE budget) is checked synchronously; an ``answer_voice`` case drives the REAL
+    :func:`answer_question` projection and asserts the DELIVERED answer leads with state, leaks no
+    raw internal metric token, stays under the number cap, and keeps every citation canonical
+    (EVAL-R5b). A failure is recorded for each property that does not hold. The gate is 100%; the
+    negative-case teeth are exercised by the suite's own tests, not here.
     """
-    cases = _load()["cases"]
+    data = _load()
+    cases = data["cases"]
     failures: list[str] = []
     passed = 0
     for case in cases:
-        reason = case_failure(case)
+        if str(case["kind"]) in _ASYNC_KINDS:
+            reason = await answer_voice_failure(case, data)
+        else:
+            reason = case_failure(case)
         if reason is None:
             passed += 1
         else:
@@ -256,6 +419,8 @@ def grade_voice() -> VoiceGrade:
 
 __all__ = [
     "VoiceGrade",
+    "answer_voice_failure",
+    "answer_voice_raw_failure",
     "case_failure",
     "expand_failure",
     "grade_voice",
