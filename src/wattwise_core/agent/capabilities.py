@@ -140,13 +140,24 @@ async def _r_weekly_load(svc: AnalyticsService, athlete_id: str, p: BaseModel) -
 
 
 async def _r_critical_power(svc: AnalyticsService, athlete_id: str, p: BaseModel) -> Any:
+    # COACH-R6: the deliverable MUST be produced for the athlete's CURRENT sport — the
+    # sport-parameterized analytics are consumed for THAT sport, never hardwired cycling.
+    # No current sport set ⇒ a typed coverage gap (fail-closed), never a guessed sport.
+    sport = await svc.current_sport(athlete_id)
+    if sport is None:
+        return _gap("no_current_sport", "athlete has no current sport set")
     q = cast(DateRangeParams, p)
-    return await svc.critical_power(athlete_id, q.from_date, q.to_date)
+    return await svc.critical_power(athlete_id, q.from_date, q.to_date, sport=sport)
 
 
 async def _r_power_curve(svc: AnalyticsService, athlete_id: str, p: BaseModel) -> Any:
+    # COACH-R6: scope the power curve to the athlete's CURRENT sport (sport-partitioned,
+    # ANL-R13); a sport switch must change subsequent deliverables with no engine change.
+    sport = await svc.current_sport(athlete_id)
+    if sport is None:
+        return _gap("no_current_sport", "athlete has no current sport set")
     q = cast(DateRangeParams, p)
-    return await svc.power_curve(athlete_id, q.from_date, q.to_date)
+    return await svc.power_curve(athlete_id, q.from_date, q.to_date, sport=sport)
 
 
 async def _r_load_metrics(svc: AnalyticsService, athlete_id: str, p: BaseModel) -> Any:

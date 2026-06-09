@@ -69,6 +69,20 @@ POWER_CHANNEL = "power"
 LOAD_MODEL_POWER_TSS = "power_tss"
 
 
+def _not_applicable_for_sport(metric: str, sport: str) -> Unavailable:
+    """Typed sport-mismatch unavailable for a cycling-power-family metric (ANL-R12).
+
+    A power-family metric requested for an ``activity`` whose ``sport`` is not in
+    :data:`APPLICABLE_SPORTS` MUST fail closed with ``NOT_APPLICABLE_FOR_SPORT`` —
+    distinct from ``MISSING_REQUIRED_INPUT`` (a channel that COULD exist for this sport
+    is simply absent) — never a fabricated cross-sport number (ANL-R12, SPORT-T2/T3).
+    """
+    return Unavailable(
+        UnavailableReason.NOT_APPLICABLE_FOR_SPORT,
+        f"{metric} is a cycling-power-family metric, not defined for sport {sport!r}",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class NormalizedPowerValue:
     """The value payload of a Computed Normalized Power result.
@@ -105,19 +119,32 @@ def _valid_moving_seconds(power_1hz: FloatArray) -> int:
     return int(np.count_nonzero(~np.isnan(power_1hz)))
 
 
-def normalized_power(power_stream: Stream) -> MetricResult[NormalizedPowerValue]:
+def normalized_power(
+    power_stream: Stream, *, sport: str = "cycling"
+) -> MetricResult[NormalizedPowerValue]:
     """Normalized Power from a cycling-power stream (NP-R1..R5).
 
     Pipeline: resample to 1 Hz (ANL-R8) → seeded 30 s trailing mean ``R(t)``
     (NP-R1/R2, gaps never zero per NP-R3) → ``NP = (mean(R^4))^(1/4)`` over the valid
     analysis window.
 
+    ``sport`` is the canonical sport of the activity (ANL-R11): NP is a cycling-power
+    metric, so a ``sport`` outside :data:`APPLICABLE_SPORTS` fails closed with
+    ``NOT_APPLICABLE_FOR_SPORT`` BEFORE any computation — a power channel carried by a
+    non-power sport (e.g. a running power-pod) is never turned into a cycling NP number
+    (ANL-R12, SPORT-T2/T3). The gate is on the canonical ``sport`` value, never a source
+    name (ANL-R11).
+
     Fail-closed (ANL-R4, §6):
+    - sport outside the cycling-power family ⇒ ``NOT_APPLICABLE_FOR_SPORT`` (ANL-R12);
     - no power channel (empty or all-``null`` stream) ⇒ ``MISSING_REQUIRED_INPUT``;
     - ``<30`` contiguous valid power seconds (so ``R(t)`` is never seeded) ⇒
       ``INSUFFICIENT_DATA`` (NP-R5);
     - a non-finite NP value ⇒ ``OUT_OF_DOMAIN`` (ANL-R32).
     """
+    if sport not in APPLICABLE_SPORTS:
+        return _not_applicable_for_sport("normalized power", sport)
+
     power_1hz = _resampled_power(power_stream)
 
     # No power channel at all: empty stream or every sample is a gap (ANL-R7 ⇒ §6
@@ -311,160 +338,15 @@ def intensity_class(if_result: MetricResult[float]) -> MetricResult[str]:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class LoadMetricsBundle:
-    """Per-activity load-metrics bundle (LM-R1), each field an independent result.
-
-    Distinct from the daily load-metrics time-series (doc 40 §7 note 9). ``load_model``
-    is the mandatory honest label of which load model produced the load fields.
-    """
-
-    duration_valid_s: MetricResult[int]
-    np: MetricResult[NormalizedPowerValue]
-    if_: MetricResult[float]
-    tss: MetricResult[float]
-    tss_per_hour: MetricResult[float]
-    efficiency_factor: MetricResult[float]
-    variability_index: MetricResult[float]
-    intensity_class: MetricResult[str]
-    load_model: str
-
-
-def _ratio_metric(
-    base: MetricResult[NormalizedPowerValue],
-    denominator: float | None,
-    *,
-    denom_name: str,
-) -> MetricResult[float]:
-    """NP / denominator with fail-closed handling (EF and VI, LM-R1).
-
-    Computed only when NP is Computed AND ``denominator`` is present and ``> 0``;
-    otherwise the typed reason: absent denominator ⇒ ``MISSING_REQUIRED_INPUT``,
-    non-positive denominator ⇒ ``OUT_OF_DOMAIN`` (§6). Never substitutes a 0/default.
-    """
-    if isinstance(base, Unavailable):
-        return base
-    if denominator is None:
-        return Unavailable(
-            UnavailableReason.MISSING_REQUIRED_INPUT,
-            f"no {denom_name}",
-        )
-    if not math.isfinite(denominator) or denominator <= 0.0:
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN,
-            f"{denom_name} must be a positive finite value",
-        )
-    value = base.value.np_w / denominator
-    if not math.isfinite(value):  # ANL-R32
-        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, f"non-finite NP/{denom_name}")
-    return Computed(
-        value,
-        quality=QualityReport(extra={"np_w": base.value.np_w, denom_name: denominator}),
-        provenance=base.provenance,
-    )
-
-
-def _tss_per_hour(
-    tss_result: MetricResult[float], duration_valid_s: int
-) -> MetricResult[float]:
-    """``tss_per_hour = tss / (duration_valid_s / 3600)`` (LM-R1).
-
-    Computed only when TSS is Computed and ``duration_valid_s > 0``.
-    """
-    if isinstance(tss_result, Unavailable):
-        return tss_result
-    if duration_valid_s <= 0:
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN,
-            "duration_valid_s must be positive for tss_per_hour",
-        )
-    value = tss_result.value / (duration_valid_s / 3600.0)
-    if not math.isfinite(value):  # ANL-R32
-        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "non-finite tss_per_hour")
-    return Computed(
-        value,
-        quality=QualityReport(
-            extra={"tss": tss_result.value, "duration_valid_s": duration_valid_s}
-        ),
-        provenance=tss_result.provenance,
-    )
-
-
-def load_metrics_bundle(
-    power_stream: Stream,
-    hr_stream: Stream | None,
-    ftp_w: float | None,
-    avg_power_w: float | None,
-    avg_hr_bpm: float | None,
-) -> LoadMetricsBundle:
-    """Assemble the per-activity load-metrics bundle (LM-R1/R2/R3).
-
-    Every field is an independent :data:`MetricResult`. When NP is Unavailable, ``if``,
-    ``tss``, ``tss_per_hour``, ``efficiency_factor``, ``variability_index`` and
-    ``intensity_class`` all propagate that Unavailable (LM-R2) — never a 0 / default and
-    never an HR-load value relabeled as power TSS. ``duration_valid_s`` is still reported
-    when the power stream is present (it is derived from the valid-moving 1 Hz count over
-    the whole effort, distinct from the NP analysis window).
-
-    ``efficiency_factor = NP / avg_hr_bpm`` and ``variability_index = NP / avg_power``
-    use the FULL valid-moving-window means (doc 40 §7B): the caller passes those scalars;
-    they are honoured as denominators with fail-closed handling.
-
-    Internal consistency (LM-R3) holds by construction: ``if == np/FTP`` and
-    ``tss == duration_valid_s*np^2/(FTP^2*3600)*100`` because every field is derived from
-    the same NP result and FTP.
-
-    ``hr_stream`` is accepted for signature/forward-compatibility (the HR-derived load
-    path, TSS-R3, is owned elsewhere); this bundle is the power-TSS path and labels
-    ``load_model = power_tss``.
-    """
-    del hr_stream  # power-TSS path; HR-load path (TSS-R3) is a separate model/owner.
-
-    power_1hz = _resampled_power(power_stream)
-    duration_valid_value = _valid_moving_seconds(power_1hz)
-
-    # duration_valid_s is reported whenever the power stream exists (LM-R2), even if NP
-    # itself is Unavailable. Absent the whole channel it is MISSING_REQUIRED_INPUT.
-    duration_result: MetricResult[int]
-    if power_1hz.size == 0 or not np.any(~np.isnan(power_1hz)):
-        duration_result = Unavailable(
-            UnavailableReason.MISSING_REQUIRED_INPUT, "no valid power channel"
-        )
-    elif duration_valid_value <= 0:  # pragma: no cover - implied by the branch above
-        duration_result = Unavailable(
-            UnavailableReason.INSUFFICIENT_DATA, "no valid-moving seconds"
-        )
-    else:
-        duration_result = Computed(
-            duration_valid_value,
-            quality=QualityReport(
-                coverage_fraction=duration_valid_value / power_1hz.size,
-                sample_rate_hz=1.0,
-                gap_count=int(np.count_nonzero(np.isnan(power_1hz))),
-            ),
-            provenance=InputLineage(channels=(POWER_CHANNEL,)),
-        )
-
-    np_result = normalized_power(power_stream)
-    if_result = intensity_factor(np_result, ftp_w)
-    tss_result = power_tss(np_result, ftp_w, duration_valid_value)
-    tss_per_hour_result = _tss_per_hour(tss_result, duration_valid_value)
-    ef_result = _ratio_metric(np_result, avg_hr_bpm, denom_name="avg_hr_bpm")
-    vi_result = _ratio_metric(np_result, avg_power_w, denom_name="avg_power_w")
-    ic_result = intensity_class(if_result)
-
-    return LoadMetricsBundle(
-        duration_valid_s=duration_result,
-        np=np_result,
-        if_=if_result,
-        tss=tss_result,
-        tss_per_hour=tss_per_hour_result,
-        efficiency_factor=ef_result,
-        variability_index=vi_result,
-        intensity_class=ic_result,
-        load_model=LOAD_MODEL_POWER_TSS,
-    )
-
+# The per-activity load-metrics bundle assembly (LM-R1/R2/R3, LOAD-R4) lives in the focused
+# sibling module to keep BOTH modules within the QUAL-R9 size ceiling; re-exported here so the
+# canonical ``np_if_tss.load_metrics_bundle`` / ``np_if_tss.LoadMetricsBundle`` entry points are
+# unchanged for the service facade and the golden/property tests. Imported at the BOTTOM (after
+# every NP/IF/TSS definition above exists) so the one-directional dependency never forms a cycle.
+from wattwise_core.analytics.load_bundle import (  # noqa: E402
+    LoadMetricsBundle,
+    load_metrics_bundle,
+)
 
 __all__ = [
     "APPLICABLE_SPORTS",

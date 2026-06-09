@@ -44,6 +44,12 @@ from wattwise_core.analytics.result import (
 )
 from wattwise_core.analytics.series import FloatArray
 
+# Cycling-power family: the CP/W' fit is the 2-parameter model fitted to the mechanical
+# -power MMP curve (doc 40 §7), so it is only defined for sports with a true mechanical
+# power channel (cycling first). Mirrors ``mmp_cp.APPLICABLE_SPORTS`` — the MMP curve the
+# fit consumes carries the same gate (CP-R1, ANL-R11/R12).
+APPLICABLE_SPORTS: tuple[str, ...] = ("cycling",)
+
 
 @dataclass(frozen=True, slots=True)
 class CPFit:
@@ -297,7 +303,19 @@ def cp_wprime(
     duration is *strictly* greater than ``long_duration_bias_s`` the quality report
     carries a non-blocking ``long_duration_bias`` flag (CP-R6) with the offending
     durations and a downgraded confidence; the endpoint itself never trips it.
+
+    A ``sport`` outside :data:`APPLICABLE_SPORTS` fails closed with
+    ``NOT_APPLICABLE_FOR_SPORT`` (ANL-R11/R12) BEFORE the domain-points/min-points
+    gate: a sport with no mechanical-power curve has no CP/W' fit, and an empty point
+    set on such a sport MUST NOT be reported as ``INSUFFICIENT_DATA`` on a surrogate
+    channel (doc 40 §7).
     """
+    if sport not in APPLICABLE_SPORTS:
+        return Unavailable(
+            reason=UnavailableReason.NOT_APPLICABLE_FOR_SPORT,
+            detail=f"CP/W' fit is not defined for sport {sport!r}",
+        )
+
     selection = _select_cp_domain_points(
         mmp_points,
         domain_min_s=domain_min_s,
@@ -324,6 +342,7 @@ def cp_wprime(
 
 
 __all__ = [
+    "APPLICABLE_SPORTS",
     "CPFit",
     "_ols_standard_errors",
     "cp_wprime",

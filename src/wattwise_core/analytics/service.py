@@ -16,22 +16,32 @@ provenance.
 from __future__ import annotations
 
 import datetime as _dt
-import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 
-import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import decoupling as _dec
 from wattwise_core.analytics import hrv as _hrv
+from wattwise_core.analytics import load_resolution as _load_res
 from wattwise_core.analytics import load_substitution as _ls
 from wattwise_core.analytics import mmp_cp as _mmp
 from wattwise_core.analytics import np_if_tss as _np
 from wattwise_core.analytics import pmc as _pmc
 from wattwise_core.analytics import trimp as _trimp
 from wattwise_core.analytics import wbal as _wbal
+from wattwise_core.analytics._service_loaders import (
+    _better_mmp,
+    _channel_to_stream,
+    _day_bounds,
+    _f,
+    _load_athlete_sex,
+    _load_wellness_hrv_baseline,
+    _load_wellness_hrv_summary,
+    _load_wellness_rr,
+    _uid,
+)
 from wattwise_core.analytics.result import (
     Computed,
     MetricResult,
@@ -46,10 +56,8 @@ from wattwise_core.persistence.models import (
     Activity,
     ActivityStreamSet,
     Athlete,
-    DailyWellness,
     FitnessSignature,
     StreamChannel,
-    WellnessStreamSet,
 )
 
 ENGINE_VERSION = "analytics-1"
@@ -66,108 +74,6 @@ class SignatureParams:
     w_prime_j: float | None = None
     max_hr_bpm: float | None = None
     resting_hr_bpm: float | None = None
-
-
-# --- module-level helpers (stateless loaders + coercions) ---
-
-
-def _uid(value: str | uuid.UUID) -> uuid.UUID:
-    """Coerce a string id to a UUID at the query boundary (portable Uuid binds UUIDs)."""
-    return value if isinstance(value, uuid.UUID) else uuid.UUID(value)
-
-
-def _f(value: object) -> float | None:
-    """Coerce a nullable numeric column to ``float | None`` for the pure functions."""
-    return None if value is None else float(value)  # type: ignore[arg-type]
-
-
-def _num_or_nan(value: object) -> float:
-    """Coerce a JSON sample to ``float``; non-numeric (incl. ``None``) becomes a gap."""
-    return float(value) if isinstance(value, int | float) else float("nan")
-
-
-def _channel_to_stream(channel: StreamChannel, sample_rate_hz: float | None) -> Stream:
-    """Build an analytic :class:`Stream` from a canonical channel (ANL-R7).
-
-    ``None``/non-numeric samples become ``NaN`` gaps; the time axis is derived from
-    the channel's nominal sample rate (default 1 Hz). Metric functions resample.
-    """
-    rate = sample_rate_hz if sample_rate_hz and sample_rate_hz > 0 else 1.0
-    vals = np.array([_num_or_nan(v) for v in channel.values], dtype=np.float64)
-    t = np.arange(vals.size, dtype=np.float64) / rate
-    return Stream(t_seconds=t, values=vals)
-
-
-def _day_bounds(from_date: _dt.date, to_date: _dt.date) -> tuple[_dt.datetime, _dt.datetime]:
-    """The half-open UTC instant range [from 00:00, to+1 00:00) for a local-date span."""
-    lo = _dt.datetime.combine(from_date, _dt.time.min, _dt.UTC)
-    hi = _dt.datetime.combine(to_date + _dt.timedelta(days=1), _dt.time.min, _dt.UTC)
-    return lo, hi
-
-
-async def _load_athlete_sex(session: AsyncSession, athlete_id: str) -> str | None:
-    athlete = await session.get(Athlete, _uid(athlete_id))
-    return None if athlete is None else str(athlete.sex)
-
-
-async def _load_wellness_rr(
-    session: AsyncSession, athlete_id: str, local_date: _dt.date
-) -> list[float] | None:
-    stmt = select(WellnessStreamSet).where(
-        WellnessStreamSet.athlete_id == _uid(athlete_id),
-        WellnessStreamSet.local_date == local_date,
-    )
-    for s in (await session.execute(stmt)).scalars().all():
-        cstmt = select(StreamChannel).where(
-            StreamChannel.stream_set_id == s.wellness_stream_set_id,
-            StreamChannel.channel == StreamChannelName.RR_INTERVALS_MS,
-        )
-        ch = (await session.execute(cstmt)).scalar_one_or_none()
-        if ch is not None:
-            return [_num_or_nan(v) for v in ch.values if v is not None]
-    return None
-
-
-async def _load_wellness_hrv_summary(
-    session: AsyncSession, athlete_id: str, local_date: _dt.date
-) -> float | None:
-    stmt = select(DailyWellness).where(
-        DailyWellness.athlete_id == _uid(athlete_id),
-        DailyWellness.local_date == local_date,
-    )
-    dw = (await session.execute(stmt)).scalar_one_or_none()
-    return None if dw is None else _f(dw.hrv_rmssd_ms)
-
-
-async def _load_wellness_hrv_baseline(
-    session: AsyncSession, athlete_id: str, local_date: _dt.date
-) -> float | None:
-    """The athlete's HRV baseline (RMSSD ms) for a day, or ``None`` (fail-closed).
-
-    Reads the source-reported ``hrv_baseline_low_ms`` / ``hrv_baseline_high_ms`` band on the
-    day's :class:`DailyWellness` row and returns the MIDPOINT when both bounds are present
-    (else whichever single bound is present, else ``None``). No row, both bounds absent, or a
-    non-finite value all fail closed to ``None`` (GBO-R24c band → one comparable baseline).
-    """
-    stmt = select(DailyWellness).where(
-        DailyWellness.athlete_id == _uid(athlete_id),
-        DailyWellness.local_date == local_date,
-    )
-    dw = (await session.execute(stmt)).scalar_one_or_none()
-    if dw is None:
-        return None
-    return _hrv_baseline_midpoint(_f(dw.hrv_baseline_low_ms), _f(dw.hrv_baseline_high_ms))
-
-
-def _hrv_baseline_midpoint(low: float | None, high: float | None) -> float | None:
-    """Midpoint of a low/high HRV-baseline band, a single present bound, or ``None``.
-
-    Non-finite bounds are dropped before combining so no NaN/Inf escapes (fail-closed).
-    """
-    bounds = [b for b in (low, high) if b is not None and np.isfinite(b)]
-    if not bounds:
-        return None
-    return sum(bounds) / len(bounds)
 
 
 class AnalyticsService:  # noqa: size-limits
@@ -216,6 +122,31 @@ class AnalyticsService:  # noqa: size-limits
         athlete = await self._session.get(Athlete, _uid(athlete_id))
         return None if athlete is None else athlete.current_sport
 
+    async def _hr_load_for_activity(
+        self, athlete_id: str, sport: str, as_of: _dt.date, hr: Stream | None
+    ) -> MetricResult[float] | None:
+        """Resolve the HR-path load honouring the stored athlete default (LOAD-R4).
+
+        Loads the canonical inputs — HR_max/HR_rest (signature keyed by the activity's
+        sport), athlete sex, and the stored ``default_training_load_model`` preference —
+        then delegates the LOAD-R4 selection to the pure
+        :func:`~wattwise_core.analytics.load_resolution.resolve_hr_load`. Reading the
+        preference here is what CONSUMES it (it was previously orphaned).
+        """
+        if hr is None:
+            return None
+        sex = await _load_athlete_sex(self._session, athlete_id)
+        sig = await self.resolve_signature(athlete_id, sport, as_of)
+        athlete = await self._session.get(Athlete, _uid(athlete_id))
+        preferred = None if athlete is None else athlete.default_training_load_model
+        return _load_res.resolve_hr_load(
+            hr,
+            sig.max_hr_bpm,
+            sig.resting_hr_bpm,
+            sex,
+            preferred_load_model=preferred,
+        )
+
     async def resolve_signature(
         self, athlete_id: str, signature_type: str, as_of: _dt.date
     ) -> SignatureParams:
@@ -244,32 +175,56 @@ class AnalyticsService:  # noqa: size-limits
     # --- per-activity metrics ---
 
     async def coggan(self, activity_id: str) -> MetricResult[_np.LoadMetricsBundle]:
-        """Compute the NP/IF/TSS load-metrics bundle for an activity (LM-R1)."""
+        """Compute the per-activity load-metrics bundle for an activity (LM-R1/R2, LOAD-R4).
+
+        The bundle's power family (NP/IF/TSS/EF/VI/intensity_class) is gated on the
+        activity's canonical ``sport`` (ANL-R12): a non-cycling-power sport yields a
+        bundle whose power fields are ``NOT_APPLICABLE_FOR_SPORT``, never a fabricated
+        cycling number. The load field is ``tss`` on the power path OR the labeled
+        HR-load on the HR path (LM-R1); when neither power nor usable HR load is
+        computable the load field is ``Unavailable`` while ``duration_valid_s`` is still
+        reported when a power channel exists (LM-R2). The HR-load value (and its
+        ``hr_load`` vs ``hr_load_zonal`` label) is resolved per the athlete default
+        (LOAD-R4) and passed into the assembler.
+        """
         act = await self._activity(activity_id)
         if act is None:
             return Unavailable(_MISSING, "unknown activity")
         channels = await self._activity_channels(activity_id)
-        power = channels.get(StreamChannelName.POWER_W)
-        if power is None:
-            return Unavailable(_MISSING, "no power channel")
+        # A power-less activity still yields a bundle (LM-R2): the load field carries the
+        # HR-load (when computable) and duration_valid_s where known — not a bare absence.
+        power = channels.get(StreamChannelName.POWER_W) or Stream.from_values([])
         hr = channels.get(StreamChannelName.HR_BPM)
         sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
+        hr_load = await self._hr_load_for_activity(
+            str(act.athlete_id), act.sport, act.start_time.date(), hr
+        )
         bundle = _np.load_metrics_bundle(
-            power, hr, sig.ftp_w, _f(act.avg_power_w), _f(act.avg_hr_bpm)
+            power,
+            hr,
+            sig.ftp_w,
+            _f(act.avg_power_w),
+            _f(act.avg_hr_bpm),
+            sport=act.sport,
+            hr_load_result=hr_load,
         )
         return Computed(value=bundle)
 
     async def w_balance(self, activity_id: str) -> MetricResult[_wbal.WBalResult]:
-        """Compute the W' balance series for an activity (WBAL-R1)."""
+        """Compute the W' balance series for an activity (WBAL-R1, ANL-R12)."""
         act = await self._activity(activity_id)
         if act is None:
             return Unavailable(_MISSING, "unknown activity")
         channels = await self._activity_channels(activity_id)
         power = channels.get(StreamChannelName.POWER_W)
         if power is None:
-            return Unavailable(_MISSING, "no power channel")
+            # Absent channel on a power-applicable sport is MISSING_REQUIRED_INPUT; an
+            # inapplicable sport is gated as NOT_APPLICABLE_FOR_SPORT inside wbal().
+            return _wbal.wbal(None, None, None, sport=act.sport)
         sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
-        return _wbal.wbal(resample_to_1hz(power), sig.cp_w, sig.w_prime_j)
+        return _wbal.wbal(
+            resample_to_1hz(power), sig.cp_w, sig.w_prime_j, sport=act.sport
+        )
 
     async def aerobic_decoupling(self, activity_id: str) -> MetricResult[float]:
         """Compute aerobic decoupling for an activity (DEC-R1)."""
@@ -360,15 +315,23 @@ class AnalyticsService:  # noqa: size-limits
     async def _activity_load(self, activity_id: str) -> _ls.LoadContribution | None:
         """Per-activity training load by the LOAD-R3 priority: power_tss -> hr_load -> None.
 
-        Resolves the ``training_load`` equivalence class (DM-SUB-R1): power-TSS (the
-        ``raw_stream`` top member) else the Banister HR load (the ``modeled`` member) carried as
-        a SUBSTITUTED contribution (DEGR-R2) — so a withdrawn power source never presents an HR
-        load as power-TSS — else ``None`` (empty class: a surfaced unknown-load day, DEGR-R3).
+        Resolves the ``training_load`` equivalence class (DM-SUB-R1) from the SINGLE
+        per-activity bundle so the daily-load path and the activity-detail surface agree on
+        the same load model (LOAD-R4): power-TSS (the ``raw_stream`` top member) else the
+        labeled HR load (``hr_load`` / ``hr_load_zonal``, honouring the athlete default,
+        resolved into the bundle per LOAD-R4) carried as a SUBSTITUTED contribution
+        (DEGR-R2) — so a withdrawn power source never presents an HR load as power-TSS —
+        else ``None`` (empty class: a surfaced unknown-load day, DEGR-R3). The bundle's
+        ``load_model`` records which family produced it, so the two load families are never
+        silently mixed (TSS-R3 / LOAD-R4).
         """
         bundle = await self.coggan(activity_id)
-        if is_computed(bundle) and is_computed(bundle.value.tss):
-            return _ls.LoadContribution(float(bundle.value.tss.value), _ls.LOAD_TOP_COVERAGE)
-        hr_load = await self.trimp(activity_id)
+        if not is_computed(bundle):
+            return None
+        tss = bundle.value.tss
+        if is_computed(tss):
+            return _ls.LoadContribution(float(tss.value), _ls.LOAD_TOP_COVERAGE)
+        hr_load = bundle.value.hr_load
         if is_computed(hr_load):
             return _ls.LoadContribution(float(hr_load.value), _ls.LOAD_SUBSTITUTED_COVERAGE)
         return None
@@ -462,15 +425,6 @@ class AnalyticsService:  # noqa: size-limits
         one the verdict is read from form alone — never against a fabricated baseline.
         """
         return await _load_wellness_hrv_baseline(self._session, athlete_id, local_date)
-
-
-def _better_mmp(
-    candidate: Computed[_mmp.MMPWindow], current: MetricResult[_mmp.MMPWindow]
-) -> bool:
-    """True if ``candidate`` is a higher mean power than the current best (MMP-R4)."""
-    if not is_computed(current):
-        return True
-    return candidate.value.mean_power_w > current.value.mean_power_w
 
 
 __all__ = ["ENGINE_VERSION", "AnalyticsService", "SignatureParams"]

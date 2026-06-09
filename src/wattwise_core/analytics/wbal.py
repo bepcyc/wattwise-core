@@ -206,6 +206,7 @@ def _build_wbal_result(
     gap_count: int,
     valid_seconds: int,
     floor: bool,
+    sport: str,
 ) -> Computed[WBalResult]:
     """Apply the optional 0-floor policy and assemble the ``Computed`` envelope.
 
@@ -231,7 +232,7 @@ def _build_wbal_result(
         },
     )
     provenance = InputLineage(
-        sport="cycling",
+        sport=sport,
         channels=("power",),
         reference_params={
             "cp_w": cp,
@@ -254,6 +255,8 @@ def wbal(
     cp_w: float | None,
     w_prime_j: float | None,
     floor: bool = False,
+    *,
+    sport: str = "cycling",
 ) -> MetricResult[WBalResult]:
     """Compute the Skiba (2012) differential W' balance series (WBAL-R1..R6).
 
@@ -271,6 +274,13 @@ def wbal(
         When ``False`` (default) the raw series is reported and may go negative
         (WBAL-R2). When ``True`` the separate named 0-floor clamping policy is
         applied (``max(0, raw)``) and recorded in provenance (WBAL-R5).
+    sport:
+        The canonical sport of the activity (ANL-R11). W'balance is cycling-power-
+        specific: a ``sport`` outside :data:`APPLICABLE_SPORTS` fails closed with
+        ``NOT_APPLICABLE_FOR_SPORT`` BEFORE any computation — a power channel carried
+        by a non-power sport is never turned into a cycling W'bal trace (ANL-R12,
+        SPORT-T2/T3). This is distinct from the ``MISSING_REQUIRED_INPUT`` returned
+        when the sport CAN have power but the channel/CP/W' is absent (WBAL-R4).
 
     Returns
     -------
@@ -286,6 +296,12 @@ def wbal(
     forward unchanged (the gap contributes no work and no recovery), preserving
     ``W'bal <= W'`` and finiteness.
     """
+    if sport not in APPLICABLE_SPORTS:
+        return Unavailable(
+            UnavailableReason.NOT_APPLICABLE_FOR_SPORT,
+            f"W'balance is a cycling-power-family metric, not defined for sport {sport!r}",
+        )
+
     validated = _validate_wbal_inputs(power_1hz, cp_w, w_prime_j)
     if isinstance(validated, Unavailable):
         return validated
@@ -304,4 +320,5 @@ def wbal(
         gap_count=gap_count,
         valid_seconds=valid_seconds,
         floor=floor,
+        sport=sport,
     )
