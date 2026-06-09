@@ -191,6 +191,13 @@ class Settings(BaseSettings):
     object_store__s3_endpoint: str | None = None
     object_store__s3_bucket: str | None = None
 
+    # --- ingestion (bulk-upsert batching, PERF-R1 / ING-UPS-R1/R3) ---
+    # Candidates are landed in batches of this size: each batch is one bounded multi-row
+    # round-trip (PERF-R1) committed atomically, so a committed batch survives even if a
+    # later batch fails (ING-UPS-R3). Strictly positive; the value lives here (CFG-R1a),
+    # never a code literal.
+    ingestion__batch_size: int = Field(ge=1)
+
     # --- analytics (doc 40 constants) ---
     analytics__ctl_time_constant_days: float = Field(gt=0)
     analytics__atl_time_constant_days: float = Field(gt=0)

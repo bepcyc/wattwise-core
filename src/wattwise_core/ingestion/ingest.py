@@ -29,18 +29,23 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import Fidelity, GboType, trust_rank
 from wattwise_core.ingestion import _canonical as _cw
+from wattwise_core.ingestion._candidate_store import (
+    persist_candidates_bulk,
+    prepare_batch,
+)
 from wattwise_core.ingestion._canonical import OriginalFile
 from wattwise_core.ingestion.dedup import resolve_activity_identity, resolve_field
 from wattwise_core.ingestion.trust import TrustPolicy, load_trust_policy
 from wattwise_core.persistence.models import Activity, SourceCandidate
 from wattwise_core.persistence.models.athlete_preference import WHOLE_SOURCE_CHANNEL
 from wattwise_core.persistence.types import utcnow, uuid7
+from wattwise_core.persistence.upsert import upsert
 from wattwise_core.storage import ObjectStore, create_object_store
 
 # Canonical scalar fields carried on an activity candidate's payload (resolved per
@@ -64,14 +69,25 @@ class IngestResult:
     activities_written: set[str] = field(default_factory=set)
     wellness_written: int = 0
     candidates_persisted: int = 0
+    candidates_failed: int = 0
 
 
 class IngestService:
     """Persists adapter candidates and resolves them into canonical records."""
 
-    def __init__(self, session: AsyncSession, *, object_store: ObjectStore | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        object_store: ObjectStore | None = None,
+        batch_size: int | None = None,
+    ) -> None:
         self._session = session
         self._object_store = object_store
+        # PERF-R1 / ING-UPS-R1/R3: candidates are landed in bounded batches. The size is
+        # configuration (CFG-R1a), supplied by the caller; ``None`` lands the whole list as
+        # one batch (the fault-isolation savepoint per row is what bounds blast radius).
+        self._batch_size = batch_size
 
     async def ingest(
         self,
@@ -83,13 +99,17 @@ class IngestService:
         ingest_run_id: uuid.UUID | None = None,
         original_files: list[OriginalFile] | None = None,
     ) -> IngestResult:
-        """Land a batch of candidates into the canonical store (one transaction).
+        """Land candidates into the canonical store in DURABLE, fault-isolated batches.
 
-        ``original_files`` carries the verbatim tier-1 recording artifacts (a
-        ``file_import`` upload supplies them; a direct-API source supplies none); each
-        is stored verbatim and linked to its resolved activity via ``activity_file``
-        (ING-R8/FIL-R1). Wellness candidates are batched per ``local_date`` so the row
-        is resolved across ALL same-day candidates (CONF-R2), never last-write-wins.
+        Candidates are processed in batches of ``batch_size`` (PERF-R1 / ING-UPS-R1); each
+        batch's candidate rows land in ONE multi-row ``VALUES`` upsert round-trip and each
+        record is resolved in its OWN ``SAVEPOINT`` so one bad record rolls back only itself
+        (a whole-run rollback is prohibited, ING-UPS-R3). Every successful batch is
+        **committed before the next begins**, so a later batch's failure leaves all earlier
+        batches durably persisted (ING-UPS-R3 / ACC-4) — SAVEPOINTs alone would be lost on an
+        outer rollback. ``original_files`` are stored verbatim and linked via ``activity_file``
+        (ING-R8/FIL-R1). Wellness candidates resolve across ALL same-day candidates (CONF-R2),
+        written and committed with the final batch.
         """
         athlete = _uid(athlete_id)
         descriptor = _uid(source_descriptor_id)
@@ -97,23 +117,18 @@ class IngestService:
         files_by_native = {f.source_native_id: f for f in (original_files or [])}
         result = IngestResult()
         wellness_dates: set[_dt.date] = set()
-        for cand in candidates:
-            row = await _persist_candidate(
-                self._session, athlete, descriptor, cand, connection_id, run_id
+        for batch in _batched(candidates, self._batch_size):
+            await _land_batch(
+                self, athlete, descriptor, batch, connection_id, run_id,
+                files_by_native, wellness_dates, result,
             )
-            result.candidates_persisted += 1
-            if cand.gbo_type == GboType.ACTIVITY.value:
-                activity_id = await self._resolve_and_write_activity(athlete, row, cand)
-                await self._capture_original(
-                    athlete, descriptor, activity_id, files_by_native.get(cand.source_native_id),
-                    cand.fetched_at,
-                )
-                result.activities_written.add(str(activity_id))
-            elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
-                wellness_dates.add(_parse_date(cand.payload["local_date"]))
+            # ING-UPS-R3 / ACC-4: commit each batch as its own durable unit so a later
+            # batch's failure cannot lose an already-completed batch.
+            await self._session.commit()
         for local_date in wellness_dates:
             await self._write_wellness(athlete, local_date)
             result.wellness_written += 1
+        await self._session.commit()
         return result
 
     async def _resolve_and_write_activity(
@@ -180,18 +195,27 @@ class IngestService:
     async def _write_activity_canonical(
         self, athlete: uuid.UUID, activity_id: uuid.UUID
     ) -> None:
-        """Resolve every field across candidates and write the canonical activity."""
-        candidates = await self._activity_candidates(athlete, activity_id)
+        """Resolve every field across candidates and write the canonical activity (UPS-R2).
+
+        The canonical row is persisted through the atomic upsert seam keyed on the
+        resolved canonical key ``activity_id`` — a single insert-or-update, never a
+        ``session.get`` then add/setattr check-then-write, so two sync runs landing the
+        same resolved activity cannot race (UPS-R2). Only the resolved columns are
+        supplied, so unresolved fields keep their prior canonical value when the key exists.
+        """
+        candidates = await _activity_candidates(self._session, athlete, activity_id)
         if not candidates:
             return
         policy = await load_trust_policy(self._session, athlete, candidates)
         scalars, coverage = _resolve_scalars(candidates, _ACTIVITY_SCALARS, policy)
-        act = await self._session.get(Activity, activity_id)
-        if act is None:
-            act = Activity(activity_id=activity_id, athlete_id=athlete, sport="other")
-            self._session.add(act)
-        _apply_activity_scalars(act, scalars)
-        act.coverage = coverage
+        values, update_columns = _activity_values(activity_id, athlete, scalars, coverage)
+        await upsert(
+            self._session,
+            cast("Table", Activity.__table__),
+            values,
+            conflict_keys=["activity_id"],
+            update_columns=update_columns,
+        )
         await self._session.flush()
         # Streams resolve PER CHANNEL under each channel's effective tier (CONF-R3/SF-3);
         # an empty policy makes this the candidate's adapter tier (the prior behaviour).
@@ -204,7 +228,7 @@ class IngestService:
 
     async def _write_wellness(self, athlete: uuid.UUID, local_date: _dt.date) -> None:
         """Resolve daily wellness across ALL candidates for the date (CONF-R2/ING-UPS-R5)."""
-        candidates = await self._wellness_candidates(athlete, local_date)
+        candidates = await _wellness_candidates(self._session, athlete, local_date)
         policy = await load_trust_policy(self._session, athlete, candidates)
         # Wellness fields resolve under the whole-source effective tier; an empty policy
         # makes this the candidate's adapter tier (byte-identical to the prior behaviour).
@@ -229,112 +253,113 @@ class IngestService:
             source_descriptor_id=descriptor, original=original, fetched_at=fetched_at,
         )
 
-    async def _activity_candidates(
-        self, athlete: uuid.UUID, activity_id: uuid.UUID
-    ) -> list[SourceCandidate]:
-        stmt = select(SourceCandidate).where(
-            SourceCandidate.athlete_id == athlete,
-            SourceCandidate.gbo_type == GboType.ACTIVITY,
-            SourceCandidate.resolved_activity_id == activity_id,
-            SourceCandidate.is_superseded.is_(False),
+
+def _batched(candidates: list[GboCandidate], size: int | None) -> list[list[GboCandidate]]:
+    """Split candidates into bounded batches (PERF-R1 / ING-UPS-R1); ``None`` = one batch."""
+    if size is None or size >= len(candidates):
+        return [candidates] if candidates else []
+    return [candidates[i : i + size] for i in range(0, len(candidates), size)]
+
+
+def _validate_payload(cand: GboCandidate) -> None:
+    """Parse the resolution-critical payload fields, raising on a malformed candidate."""
+    if cand.gbo_type == GboType.ACTIVITY.value:
+        _parse_start_time(cand.payload["start_time"])
+    elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
+        _parse_date(cand.payload["local_date"])
+
+
+async def _land_batch(
+    svc: IngestService,
+    athlete: uuid.UUID,
+    descriptor: uuid.UUID,
+    batch: list[GboCandidate],
+    connection_id: str | uuid.UUID | None,
+    run_id: uuid.UUID,
+    files_by_native: dict[str, OriginalFile],
+    wellness_dates: set[_dt.date],
+    result: IngestResult,
+) -> None:
+    """Land ONE batch: validate+prepare per record, bulk-insert, then resolve per record.
+
+    Each candidate is validated+prepared in its own ``SAVEPOINT`` so a malformed record
+    rolls back only itself (ING-UPS-R3 record isolation); the surviving rows land in a
+    SINGLE multi-row upsert round-trip (ING-UPS-R1 / PERF-R1), then each is resolved +
+    canonical-written in its own ``SAVEPOINT`` so a resolution failure likewise isolates.
+    """
+    prepared, failed = await prepare_batch(
+        svc._session, athlete, descriptor, batch, connection_id, run_id,
+        validate=_validate_payload,
+    )
+    result.candidates_failed += failed
+    if not prepared:
+        return
+    rows = await persist_candidates_bulk(svc._session, athlete, descriptor, prepared)
+    for prep in prepared:
+        await _resolve_candidate(
+            svc, athlete, descriptor, prep.cand, rows[prep.cand.source_native_id],
+            files_by_native, wellness_dates, result,
         )
-        return list((await self._session.execute(stmt)).scalars().all())
-
-    async def _wellness_candidates(
-        self, athlete: uuid.UUID, local_date: _dt.date
-    ) -> list[SourceCandidate]:
-        stmt = select(SourceCandidate).where(
-            SourceCandidate.athlete_id == athlete,
-            SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
-            SourceCandidate.is_superseded.is_(False),
-        )
-        rows = (await self._session.execute(stmt)).scalars().all()
-        return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
 
 
-# --- module-level write/resolution helpers (stateless; take the session) ---
-
-
-async def _persist_candidate(
-    session: AsyncSession,
+async def _resolve_candidate(
+    svc: IngestService,
     athlete: uuid.UUID,
     descriptor: uuid.UUID,
     cand: GboCandidate,
-    connection_id: str | uuid.UUID | None,
-    run_id: uuid.UUID,
-) -> SourceCandidate:
-    """Upsert the source candidate; supersede-and-version on a CHANGED re-ingest.
+    row: SourceCandidate,
+    files_by_native: dict[str, OriginalFile],
+    wellness_dates: set[_dt.date],
+    result: IngestResult,
+) -> None:
+    """Resolve + canonical-write ONE already-persisted candidate inside its own SAVEPOINT.
 
-    Unchanged content is a value-level no-op (UPS-R3). A CHANGED re-ingest (same
-    candidate key, new ``content_hash``) marks the prior row ``is_superseded=True`` and
-    INSERTS a NEW candidate version, carrying its ``resolved_activity_id`` forward
-    (ING-R6), preserving the prior for audit (PRV-R2 / UPS-R5) rather than mutating it.
+    The candidate row is already durable from the batch's bulk insert; a resolution failure
+    rolls back only this savepoint and is counted, never aborting the batch (ING-UPS-R3
+    record isolation). ING-UPS-R3's range-precise gap (ING-GAP-R5) for the failed record is
+    DEFERRED to the watermark/gap model (ING-UPS-R2).
     """
+    try:
+        async with svc._session.begin_nested():
+            if cand.gbo_type == GboType.ACTIVITY.value:
+                activity_id = await svc._resolve_and_write_activity(athlete, row, cand)
+                await svc._capture_original(
+                    athlete, descriptor, activity_id,
+                    files_by_native.get(cand.source_native_id), cand.fetched_at,
+                )
+                result.activities_written.add(str(activity_id))
+            elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
+                wellness_dates.add(_parse_date(cand.payload["local_date"]))
+    except Exception:
+        result.candidates_failed += 1  # ING-UPS-R3 record isolation; keep the run
+        return
+    result.candidates_persisted += 1
+
+
+async def _activity_candidates(
+    session: AsyncSession, athlete: uuid.UUID, activity_id: uuid.UUID
+) -> list[SourceCandidate]:
+    """All non-superseded activity candidates resolved to ``activity_id`` (the resolution set)."""
     stmt = select(SourceCandidate).where(
         SourceCandidate.athlete_id == athlete,
-        SourceCandidate.source_descriptor_id == descriptor,
-        SourceCandidate.source_native_id == cand.source_native_id,
-        SourceCandidate.gbo_type == GboType(cand.gbo_type),
+        SourceCandidate.gbo_type == GboType.ACTIVITY,
+        SourceCandidate.resolved_activity_id == activity_id,
         SourceCandidate.is_superseded.is_(False),
     )
-    existing = (await session.execute(stmt)).scalar_one_or_none()
-    if existing is not None and existing.content_hash == cand.content_hash:
-        existing.fetched_at = cand.fetched_at  # UPS-R3 no-op: refresh fetch metadata only
-        existing.ingest_run_id = run_id
-        return existing
-    prior_activity_id = None
-    if existing is not None:
-        # PRV-R2: preserve the prior version for audit. The candidate-key unique
-        # constraint admits only ONE row per key, so the superseded row's
-        # source_native_id is version-tagged (its observed identity is retained in the
-        # untouched payload/content_hash) and the NEW row reclaims the canonical key.
-        existing.is_superseded = True
-        existing.source_native_id = _superseded_native_id(existing)
-        prior_activity_id = existing.resolved_activity_id
-        await session.flush()
-    row = _new_candidate(athlete, descriptor, cand, connection_id, run_id)
-    row.resolved_activity_id = prior_activity_id  # carry the resolved identity forward (ING-R6)
-    session.add(row)
-    await session.flush()
-    return row
+    return list((await session.execute(stmt)).scalars().all())
 
 
-def _superseded_native_id(prior: SourceCandidate) -> str:
-    """A version-tagged native id freeing the canonical key for the new version (PRV-R2).
-
-    The prior row stays fully readable for audit (its payload/content_hash are
-    untouched); only its candidate-key slot is vacated so the new version can hold the
-    canonical key under the single-row unique constraint.
-    """
-    tag = f"#superseded:{prior.content_hash[:16]}"
-    base = prior.source_native_id.split("#superseded:", 1)[0]
-    return f"{base}{tag}"
-
-
-def _new_candidate(
-    athlete: uuid.UUID,
-    descriptor: uuid.UUID,
-    cand: GboCandidate,
-    connection_id: str | uuid.UUID | None,
-    run_id: uuid.UUID,
-) -> SourceCandidate:
-    return SourceCandidate(
-        athlete_id=athlete,
-        source_descriptor_id=descriptor,
-        connection_id=_uid(connection_id) if connection_id else None,
-        source_native_id=cand.source_native_id,
-        gbo_type=GboType(cand.gbo_type),
-        observed_at=cand.observed_at,
-        fetched_at=cand.fetched_at,
-        content_hash=cand.content_hash,
-        adapter_version=cand.adapter_version,
-        mapping_version=cand.mapping_version,
-        trust_profile={"tier": cand.trust_tier.value},
-        payload=_jsonsafe(cand.payload),
-        confidence=cand.confidence,
-        ingest_run_id=run_id,
-        untrusted_content=cand.untrusted_content,
+async def _wellness_candidates(
+    session: AsyncSession, athlete: uuid.UUID, local_date: _dt.date
+) -> list[SourceCandidate]:
+    """All non-superseded daily-wellness candidates for ``local_date`` (the resolution set)."""
+    stmt = select(SourceCandidate).where(
+        SourceCandidate.athlete_id == athlete,
+        SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
+        SourceCandidate.is_superseded.is_(False),
     )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
 
 
 def _resolve_scalars(
@@ -365,16 +390,36 @@ def _resolve_scalars(
     return resolved, coverage
 
 
-def _apply_activity_scalars(act: Activity, scalars: dict[str, Any]) -> None:
-    """Write resolved scalars onto the activity, parsing start_time, never zero-filling."""
+_ACTIVITY_COLUMNS = frozenset(Activity.__table__.columns.keys())
+
+
+def _activity_values(
+    activity_id: uuid.UUID, athlete: uuid.UUID, scalars: dict[str, Any], coverage: dict[str, object]
+) -> tuple[dict[str, Any], list[str]]:
+    """The activity row value-dict + the update-on-collision set for the atomic upsert (UPS-R2).
+
+    Carries the resolved scalars (``start_time`` parsed to tz-aware UTC), the derived
+    ``has_power``/``has_hr``/``coverage`` flags, and a fresh ``updated_at``. ``sport`` is
+    NOT NULL, so a new row defaults to ``"other"`` when unresolved. The returned update set
+    is exactly the resolved/derived columns — ``sport`` is included ONLY when resolved, so a
+    conflicting (existing) row never has a previously-resolved value regressed to a default,
+    matching the prior setattr-only behaviour (no zero-filling, PRV-R6).
+    """
+    values: dict[str, Any] = {"activity_id": activity_id, "athlete_id": athlete}
+    update_columns: list[str] = []
     for key, value in scalars.items():
-        if key == "start_time":
-            act.start_time = _parse_start_time(value)
-        elif hasattr(act, key):
-            setattr(act, key, value)
-    act.has_power = scalars.get("avg_power_w") is not None
-    act.has_hr = scalars.get("avg_hr_bpm") is not None
-    act.updated_at = utcnow()
+        col = "start_time" if key == "start_time" else key
+        if col not in _ACTIVITY_COLUMNS:
+            continue
+        values[col] = _parse_start_time(value) if key == "start_time" else value
+        update_columns.append(col)
+    values.setdefault("sport", "other")  # NOT NULL on a fresh insert; refreshed only if resolved
+    values["has_power"] = scalars.get("avg_power_w") is not None
+    values["has_hr"] = scalars.get("avg_hr_bpm") is not None
+    values["coverage"] = coverage
+    values["updated_at"] = utcnow()
+    update_columns += ["has_power", "has_hr", "coverage", "updated_at"]
+    return values, update_columns
 
 
 def _channel_tier_of(
@@ -413,17 +458,6 @@ def _tier_of(candidate: SourceCandidate) -> Fidelity:
 
 def _highest_trust(candidates: list[SourceCandidate]) -> SourceCandidate:
     return min(candidates, key=lambda c: (trust_rank(_tier_of(c)), str(c.source_descriptor_id)))
-
-
-def _jsonsafe(value: Any) -> Any:
-    """Coerce a mapped payload to JSON-storable form (datetimes/dates -> ISO strings)."""
-    if isinstance(value, _dt.datetime | _dt.date):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {k: _jsonsafe(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_jsonsafe(v) for v in value]
-    return value
 
 
 def _parse_start_time(value: Any) -> _dt.datetime:

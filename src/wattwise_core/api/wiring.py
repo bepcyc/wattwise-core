@@ -154,7 +154,11 @@ def _make_import_processor(
                 file_format=decoded.file_format,
                 source_native_id=decoded.candidates[0].source_native_id,
             )
-            result = await IngestService(session, object_store=_object_store()).ingest(
+            result = await IngestService(
+                session,
+                object_store=_object_store(),
+                batch_size=settings.ingestion__batch_size,
+            ).ingest(
                 athlete_id,
                 descriptor.source_descriptor_id,
                 decoded.candidates,

@@ -34,20 +34,34 @@ def _dialect_name(session: AsyncSession) -> str:
     return bind.dialect.name
 
 
+def _as_rows(values: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Normalise ``values`` to a non-empty list of row mappings (fail-closed on empty)."""
+    rows = [values] if isinstance(values, Mapping) else list(values)
+    if not rows:
+        raise ValueError("upsert requires at least one row (empty batch has no column set)")
+    return rows
+
+
 def build_upsert(
     dialect: str,
     table: Table,
-    values: Mapping[str, Any],
+    values: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     conflict_keys: Sequence[str],
     update_columns: Sequence[str] | None,
 ) -> Insert:
     """Build a dialect-specific atomic upsert statement.
 
+    ``values`` is either ONE row mapping or a non-empty SEQUENCE of row mappings; a
+    sequence compiles to a single multi-row ``VALUES`` clause — one round-trip per
+    batch (PERF-R1), not a per-row insert loop. Every row in a batch carries the SAME
+    column set, taken from the first row.
+
     ``update_columns`` are the columns refreshed on conflict; when ``None`` every
     inserted column except the conflict keys is updated. Pass an empty sequence for
     insert-or-ignore semantics (used for byte-identical re-ingest no-ops, UPS-R3).
     """
-    cols = list(values.keys())
+    rows = _as_rows(values)
+    cols = list(rows[0].keys())
     if update_columns is None:
         # On conflict, refresh every supplied value column EXCEPT the conflict keys, the
         # surrogate primary key, and created_at — clobbering the PK would rewrite the
@@ -57,23 +71,26 @@ def build_upsert(
         update_columns = [c for c in cols if c not in protected]
 
     # --- the ONE sanctioned dialect branch (UPS-R2) ---
+    # Reference the conflict-row columns by SUBSCRIPT (``excluded[c]`` / ``inserted[c]``),
+    # never ``getattr`` — a column literally named ``values`` would otherwise resolve to the
+    # ColumnCollection ``.values()`` METHOD instead of the column (a silent corruption).
     if dialect in ("postgresql", "sqlite"):
         insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
-        stmt = insert_fn(table).values(**values)
+        stmt = insert_fn(table).values(rows)
         if update_columns:
-            set_ = {c: getattr(stmt.excluded, c) for c in update_columns}
+            set_ = {c: stmt.excluded[c] for c in update_columns}
             stmt = stmt.on_conflict_do_update(index_elements=list(conflict_keys), set_=set_)
         else:
             stmt = stmt.on_conflict_do_nothing(index_elements=list(conflict_keys))
         return stmt
     if dialect in ("mysql", "mariadb"):
-        mstmt = mysql_insert(table).values(**values)
+        mstmt = mysql_insert(table).values(rows)
         if update_columns:
-            set_ = {c: getattr(mstmt.inserted, c) for c in update_columns}
+            set_ = {c: mstmt.inserted[c] for c in update_columns}
             return mstmt.on_duplicate_key_update(**set_)
         # MariaDB insert-or-ignore: update a conflict key to itself (a no-op).
         first_key = conflict_keys[0]
-        return mstmt.on_duplicate_key_update(**{first_key: getattr(mstmt.inserted, first_key)})
+        return mstmt.on_duplicate_key_update(**{first_key: mstmt.inserted[first_key]})
     raise UnsupportedDialectError(
         f"unsupported dialect {dialect!r}; wattwise-core supports sqlite, postgresql, mariadb"
     )
@@ -97,4 +114,26 @@ async def upsert(
     await session.execute(stmt)
 
 
-__all__ = ["UnsupportedDialectError", "build_upsert", "upsert"]
+async def upsert_many(
+    session: AsyncSession,
+    table: Table,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    conflict_keys: Sequence[str],
+    update_columns: Sequence[str] | None = None,
+) -> None:
+    """Execute a BATCHED atomic insert-or-update in a single round-trip (PERF-R1).
+
+    ``rows`` is upserted with ONE multi-row ``VALUES`` statement — never a per-row
+    insert loop (PERF-R1). An empty ``rows`` is a no-op (no statement issued). Each row
+    carries the same column set; conflicts on ``conflict_keys`` update in place, so
+    re-ingest is idempotent (UPS-R3) and concurrent runs cannot race (UPS-R2).
+    """
+    if not rows:
+        return
+    dialect = _dialect_name(session)
+    stmt = build_upsert(dialect, table, list(rows), conflict_keys, update_columns)
+    await session.execute(stmt)
+
+
+__all__ = ["UnsupportedDialectError", "build_upsert", "upsert", "upsert_many"]

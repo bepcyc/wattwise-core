@@ -83,6 +83,17 @@ mutating_per_minute = 30
 kind = "local"
 local_root = "/var/lib/wattwise/objects"
 
+[ingestion]
+# Bulk-upsert batch size (PERF-R1 / ING-UPS-R1/R3): candidates are landed in batches of
+# this many, each batch's candidate rows written in ONE multi-row upsert round-trip
+# (ING-UPS-R1) and the batch COMMITTED before the next begins, so a committed batch
+# survives even if a later batch in the same run fails (ING-UPS-R3 / ACC-4). The import
+# issues O(activities / batch_size) write round-trips (PERF-R1-AC). NOTE: turning a failed
+# range into a range-precise typed gap (ING-UPS-R3's ING-GAP-R5 clause) is deferred to the
+# watermark/gap model (ING-UPS-R2). Strictly positive; loaded here (CFG-R1a), never a code
+# literal — operator-tunable.
+batch_size = 500
+
 [analytics]
 # PMC time constants (doc 40 PMC-R*): CTL=42d, ATL=7d exponential decay.
 ctl_time_constant_days = 42
