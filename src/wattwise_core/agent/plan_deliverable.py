@@ -87,6 +87,7 @@ async def plan(
     thread_id: str | None = None,
     conversation_id: str | None = None,
     requires_approval: bool = True,
+    active_goals: Sequence[Mapping[str, Any]] | None = None,
 ) -> Plan:
     """Drive the graph for a multi-day grounded training PLAN (COACH-R2 / CKPT-R5).
 
@@ -97,8 +98,9 @@ async def plan(
     multi-day body is projected into :class:`Plan`. When ``requires_approval`` and a DURABLE
     checkpointer is wired, the run pauses at the gate and finalizes ``awaiting_approval`` with the
     ``interrupt_id`` the decision endpoint consumes (CKPT-R9); otherwise it projects the grounded
-    plan straight through. Identity is server-derived (AGT-SEC-R1); no un-grounded text is
-    surfaced (OUTCOME-R2).
+    plan straight through. ``active_goals`` are the athlete's ACTIVE canonical goals the engine read
+    server-side; they flow into the run inputs so the plan is goal-aware (GBO-R38 / API-R32 /
+    API-R35). Identity is server-derived (AGT-SEC-R1); no un-grounded text is surfaced (OUTCOME-R2).
     """
     inputs = _build_inputs(
         athlete_id=athlete_id,
@@ -108,6 +110,7 @@ async def plan(
         response_length=response_length,
         thread_id=thread_id,
         conversation_id=conversation_id,
+        active_goals=active_goals,
     )
     marker = {"role": "system", "kind": "plan_deliverable", "requires_approval": requires_approval}
     inputs["messages"] = [*list(inputs.get("messages") or []), marker]

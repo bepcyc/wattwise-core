@@ -96,6 +96,7 @@ def build_inputs(
     conversation_id: str | None = None,
     thread_id: str | None = None,
     follow_up: Mapping[str, Any] | None = None,
+    active_goals: Sequence[Mapping[str, Any]] | None = None,
 ) -> AgentState:
     """Assemble the write-once immutable graph inputs for a run (STATE-R2/-R4, CKPT-R5).
 
@@ -116,6 +117,12 @@ def build_inputs(
     run-scoped channels (counters/retrieved/coverage_gaps) so turn-N never leaks into turn-N+1.
     ``follow_up`` is carried so the projection can shape an expand/drill/reveal-numbers turn
     (COACH-R8). ``response_length`` governs verbosity (VOICE-R8), never truth.
+
+    ``active_goals`` are the athlete's ACTIVE canonical goals, read SERVER-side by the caller (the
+    engine) from the GBO store and projected into the immutable inputs so the agent plans TOWARD
+    them (GBO-R38 / API-R32 / API-R35): goal-aware planning/load-review is owned by the agent, which
+    reads the canonical Goal entity. They are user-authored INTENT, never an analytic number
+    (MEM-R1) — they steer the compose prompt context, not grounding. Carried only when present.
     """
     if thread_id is None:
         convo = conversation_id or new_conversation_id()
@@ -132,6 +139,8 @@ def build_inputs(
     }
     if follow_up is not None:
         state["messages"] = [{"role": "user", "kind": "follow_up", **dict(follow_up)}]
+    if active_goals:
+        state["active_goals"] = [dict(goal) for goal in active_goals]
     return state
 
 

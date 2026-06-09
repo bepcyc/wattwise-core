@@ -309,6 +309,13 @@ class AgentState(TypedDict, total=False):
     idempotency_key: Annotated[str, _write_once]
     thread_id: str | None
     response_length: str | None
+    # The athlete's ACTIVE canonical goals, read SERVER-side from the GBO store and projected into
+    # the run inputs so the agent plans TOWARD them (GBO-R38 / API-R32 / API-R35): goal-aware
+    # planning/load-review is owned by the agent, which reads the canonical Goal entity. Each item
+    # is a plain serializable projection (title/goal_type/sport/target_*/status) — user-authored
+    # INTENT, never a canonical analytic NUMBER (MEM-R1), so it steers the compose prompt context
+    # but is NOT a grounding fact. An immutable input (set once by ingest, never by a model/tool).
+    active_goals: list[dict[str, Any]]
     # (b) per-turn identity for the run-scoped reset (CKPT-R5)
     #   turn_id: fresh per normal /ask; never minted/changed on Command(resume).
     #   run_epoch: the turn the run-scoped channels belong to; head node sets it on reset.

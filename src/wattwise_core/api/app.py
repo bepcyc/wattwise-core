@@ -55,6 +55,7 @@ from wattwise_core.api.routers import agent_breadth as agent_breadth_router
 from wattwise_core.api.routers import agent_routes as agent_router
 from wattwise_core.api.routers import athlete as athlete_router
 from wattwise_core.api.routers import connections as connections_router
+from wattwise_core.api.routers import goals as goals_router
 from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import performance as performance_router
 from wattwise_core.api.routers import planning as planning_router
@@ -186,6 +187,15 @@ def _wire_router_seams(app: FastAPI) -> None:
     overrides[user_settings_router.require_write_scope] = require_scopes(Scope.WRITE)
     overrides[user_settings_router.current_athlete_id] = _athlete_id_seam
     overrides[user_settings_router.current_session] = get_db
+    # The Goals CRUD surface (/v1/goals, API-R35) binds the SAME server-derived identity + read/
+    # write scope gates over the shared session, the engine-keyed signed cursor (PAGE-R5), and the
+    # process limiter so the owner can author the training goals the agent plans toward (GBO-R38).
+    overrides[goals_router.require_read_scope] = require_scopes(Scope.READ)
+    overrides[goals_router.require_write_scope] = require_scopes(Scope.WRITE)
+    overrides[goals_router.current_athlete_id] = _athlete_id_seam
+    overrides[goals_router.current_session] = get_db
+    overrides[goals_router.rate_limiter] = get_rate_limiter
+    overrides[goals_router.cursor_signing_key] = _cursor_signing_key_seam
     # The agent gate is the CHECK half of the entitlement seam: it runs the bearer+agent-scope
     # gate AND reads the resolved entitlement, failing closed when ``can_use_agent`` is ungranted
     # (AGT-ENT-R3). Under the OSS all-permissive plan it permits; a commercial plan that ungrants

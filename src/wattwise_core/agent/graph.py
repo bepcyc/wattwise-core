@@ -236,7 +236,9 @@ def _make_compose(svc: AgentServices, model: ChatModel, coach_system: str) -> Gr
         """
         gs.athlete_id(state)
         retrieved = gs.read_retrieved(state)
-        context, trimmed = gs.render_context(state.get("request_text"), retrieved)
+        context, trimmed = gs.render_context(
+            state.get("request_text"), retrieved, active_goals=state.get("active_goals")
+        )
         draft = await model.compose(system=coach_system, context=context)
         update: dict[str, Any] = {
             "draft": draft,

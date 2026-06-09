@@ -12,7 +12,7 @@ terminal-status + coverage-caveat logic. It depends only on
 from __future__ import annotations
 
 import html as _html
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from wattwise_core.agent.contracts import (
@@ -270,25 +270,33 @@ def context_relevance(record: Any) -> float:
 
 
 def render_context(
-    request_text: str | None, retrieved: Mapping[str, Any]
+    request_text: str | None,
+    retrieved: Mapping[str, Any],
+    *,
+    active_goals: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[str, bool]:
     """Serialise canonical evidence within a measured token budget (MODEL-R3, INJECT-R1).
 
-    Untrusted content (the user request and every retrieved record body) is wrapped in an
-    explicit delimited ``<untrusted-data>`` envelope so injected instructions in
-    titles/notes/tool bodies cannot read as instructions (INJECT-R1). The assembled input
-    is measured with the token estimator; on overflow the lowest-relevance records are
-    dropped FIRST and a flag is returned so the caller records the trim in coverage_gaps.
-    Returns ``(context, trimmed)``.
+    Untrusted content (the user request, every retrieved record body, AND the athlete's
+    active-goal labels/notes) is wrapped in an explicit delimited ``<untrusted-data>`` envelope so
+    injected instructions in titles/notes/tool bodies cannot read as instructions (INJECT-R1). The
+    ``active_goals`` block carries the athlete's ACTIVE canonical goals (GBO-R38 / API-R32) so the
+    agent plans TOWARD them; they are user-authored INTENT, never an analytic number (MEM-R1), so
+    they steer the draft but are not grounding facts. The assembled input is measured with the token
+    estimator; on overflow the lowest-relevance records are dropped FIRST and a flag is returned so
+    the caller records the trim in coverage_gaps. Returns ``(context, trimmed)``.
     """
     header = f"request:\n<untrusted-data>\n{request_text or ''}\n</untrusted-data>"
+    rendered: list[str] = [header]
+    trimmed = False
+    goals_block = _render_active_goals(active_goals)
+    if goals_block is not None:
+        rendered.append(goals_block)
     items = sorted(
         ((k, v) for k, v in retrieved.items() if k != RETRIEVED_TRUNCATION_KEY),
         key=lambda kv: context_relevance(kv[1]),
         reverse=True,
     )
-    rendered: list[str] = [header]
-    trimmed = False
     for key, value in items:
         candidate = f"{key}:\n<untrusted-data>\n{value}\n</untrusted-data>"
         if estimate_tokens("\n".join([*rendered, candidate])) > _CONTEXT_TOKEN_BUDGET:
@@ -296,6 +304,39 @@ def render_context(
             continue
         rendered.append(candidate)
     return "\n".join(rendered), trimmed
+
+
+def _render_active_goals(active_goals: Sequence[Mapping[str, Any]] | None) -> str | None:
+    """Render the active-goal context block, or ``None`` when there are none (GBO-R38 / INJECT-R1).
+
+    Each goal is summarised from its canonical typed fields (title, goal type, sport, target event/
+    date/metric/value) so the planner reasons over what the athlete is working toward. The whole
+    block is wrapped in ``<untrusted-data>`` because ``title``/``target_event`` are user-authored
+    free text (MAP-R7): they are DATA the agent plans toward, never instructions it obeys.
+    """
+    if not active_goals:
+        return None
+    lines = [_goal_line(goal) for goal in active_goals]
+    body = "\n".join(line for line in lines if line)
+    if not body:
+        return None
+    return f"active_goals:\n<untrusted-data>\n{body}\n</untrusted-data>"
+
+
+def _goal_line(goal: Mapping[str, Any]) -> str:
+    """One athlete goal summarised from its typed canonical fields (GBO-R36)."""
+    parts: list[str] = []
+    title = goal.get("title")
+    if title:
+        parts.append(f"goal: {title}")
+    for key in ("goal_type", "sport", "target_event", "target_date", "target_metric"):
+        value = goal.get(key)
+        if value:
+            parts.append(f"{key}={value}")
+    target_value = goal.get("target_value")
+    if target_value is not None:
+        parts.append(f"target_value={target_value}")
+    return "; ".join(parts)
 
 
 def safe_html(text: str) -> str:

@@ -52,6 +52,7 @@ from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (hi
     _PlanSchema,
     build_services,
 )
+from wattwise_core.agent.goals import active_goals_for
 from wattwise_core.agent.graph import DEFAULT_MAX_TOOL_ITERATIONS, build_graph
 from wattwise_core.agent.model import OpenAICompatibleModel
 from wattwise_core.agent.plan_deliverable import _project_plan, safe_plan_html
@@ -264,8 +265,11 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
             graph = self._graph(AnalyticsService(session), saver, entitlement=entitlement)
+            # The weekly digest IS the weekly load review (COACH-R1 #1); flow the athlete's ACTIVE
+            # canonical goals into it so the load review is goal-aware (GBO-R38 / API-R32).
             return await weekly_digest(
-                graph, athlete_id, week_end, presentation=self._coach.presentation
+                graph, athlete_id, week_end, presentation=self._coach.presentation,
+                active_goals=await active_goals_for(session, athlete_id),
             )
 
     async def plan_deliverable(
@@ -296,11 +300,11 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._db.session() as session:
             graph = self._graph(
-                AnalyticsService(session),
-                saver,
-                allow_names=CANONICAL_WORKOUT_NAMES,
-                entitlement=entitlement,
+                AnalyticsService(session), saver,
+                allow_names=CANONICAL_WORKOUT_NAMES, entitlement=entitlement,
             )
+            # Read the athlete's ACTIVE canonical goals server-side and FLOW them into the run so
+            # the plan is goal-aware (GBO-R38 / API-R32 / API-R35) — the agent owns goal planning.
             return await _plan(
                 graph,
                 athlete_id,
@@ -310,6 +314,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
                 thread_id=thread_id,
                 conversation_id=conversation_id,
                 requires_approval=requires_approval,
+                active_goals=await active_goals_for(session, athlete_id),
             )
 
     async def decision(

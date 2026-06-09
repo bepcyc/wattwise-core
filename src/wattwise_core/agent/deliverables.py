@@ -289,6 +289,7 @@ async def weekly_digest(
     week_end: str,
     *,
     presentation: VoicePresentation | None = None,
+    active_goals: Sequence[Mapping[str, Any]] | None = None,
 ) -> Digest:
     """Drive the graph for the weekly digest (== weekly load review, COACH-R1 #1).
 
@@ -296,8 +297,10 @@ async def weekly_digest(
     no intent model call (GRAPH-R2.1) — runs the graph, and projects its grounded
     trailing-week review into :class:`Digest`. The digest LEADS with a state phrase
     (COACH-R7) and, when the week's canonical inputs are missing, ships ``degraded`` with
-    a truthful caveat rather than guessing (OUTCOME-R3/-R4, GROUND-R7). Locale resolves
-    to the configured default for an unattended run (``en``, LANG-R4); the graph applies
+    a truthful caveat rather than guessing (OUTCOME-R3/-R4, GROUND-R7). ``active_goals`` are the
+    athlete's ACTIVE canonical goals the engine read server-side; they flow into the run inputs so
+    the weekly load review (== this digest, COACH-R1 #1) is goal-aware (GBO-R38 / API-R32). Locale
+    resolves to the configured default for an unattended run (``en``, LANG-R4); the graph applies
     the athlete's persisted preference where present (LANG-R2).
     """
     inputs = _build_inputs(
@@ -306,6 +309,7 @@ async def weekly_digest(
         locale="en",
         request_text=None,
         conversation_id=f"digest:{week_end}",
+        active_goals=active_goals,
     )
     final = await graph.run(inputs)
     html, text, status, thread_id = _outputs(final)
