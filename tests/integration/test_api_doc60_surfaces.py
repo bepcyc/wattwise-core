@@ -23,6 +23,7 @@ read the seeded schema; the agent-state store is the factory's own (ARCH-R13).
 
 from __future__ import annotations
 
+import datetime as _dt
 import uuid
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine as _create_sync_engine
 from starlette.testclient import TestClient
 
+from wattwise_core.agent.ops_jobs import ExportJobRecord, ImportJobRecord
+from wattwise_core.agent.state_store import AgentStateBase
 from wattwise_core.api.app import create_app
 from wattwise_core.config import Settings, load_settings
 from wattwise_core.identity import OWNER_ATHLETE_ID
@@ -399,5 +402,126 @@ def test_public_auth_endpoints_are_rate_limited(tmp_path: Path) -> None:
         statuses = [client.post("/v1/auth/link/start").status_code for _ in range(35)]
         assert 429 in statuses, "the public pre-token bucket never tripped (LIMIT-R1)"
         assert statuses[0] == 200  # the first call was served normally
+    finally:
+        client.__exit__(None, None, None)
+
+
+# -------------------------------------------- rotation keeps the client claim (AUTH-R8a)
+
+
+def test_delegated_client_claim_survives_refresh_rotation(tmp_path: Path) -> None:
+    """A ROTATED delegated access token still carries ``client: delegated`` (AUTH-R8a).
+
+    The X-Service-Auth factor enforcement keys on the access token's ``client`` claim —
+    if ``/v1/auth/refresh`` re-minted the access token without it, the mandatory second
+    factor would silently lapse after the first rotation.
+    """
+    secret = "service-factor-secret-0123456789abcdef"
+    client, _ = _app(tmp_path, security__service_auth_secret=secret)
+    try:
+        owner = _owner_auth(client)
+        # Mint the delegated tokens via the full link flow, keeping the refresh token.
+        code = client.post("/v1/auth/link/start").json()["link_code"]
+        approved = client.post("/v1/auth/link/approve", json={"link_code": code}, headers=owner)
+        assert approved.status_code == 200, approved.text
+        completed = client.post("/v1/auth/link/complete", json={"link_code": code})
+        assert completed.status_code == 200, completed.text
+        # Rotate: the presented refresh token is the credential (API-R23).
+        rotated = client.post(
+            "/v1/auth/refresh", json={"refresh_token": completed.json()["refresh_token"]}
+        )
+        assert rotated.status_code == 200, rotated.text
+        bearer = {"Authorization": f"Bearer {rotated.json()['access_token']}"}
+        # The rotated token is still DELEGATED: bare use (no factor) fails closed 401.
+        assert client.get("/v1/athlete", headers=bearer).status_code == 401
+        # With the factor both layers verify — the rotation lost no capability.
+        with_factor = client.get("/v1/athlete", headers={**bearer, "X-Service-Auth": secret})
+        assert with_factor.status_code in {200, 404}
+    finally:
+        client.__exit__(None, None, None)
+
+
+# --------------------------------------- keyset tiebreaker on equal timestamps (PAGE-R1)
+
+
+def _agent_state_engine(tmp_path: Path):  # type: ignore[no-untyped-def]
+    """A sync engine on the app's agent-state store (falls back to the canonical file)."""
+    engine = _create_sync_engine(f"sqlite:///{tmp_path / 'doc60.db'}")
+    AgentStateBase.metadata.create_all(engine)
+    return engine
+
+
+def _walk_pages(client: TestClient, path: str, auth: dict[str, str], id_key: str) -> list[str]:
+    """Follow ``limit=1`` cursors to exhaustion; returns every listed id in order."""
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(10):  # bounded walk — 3 rows must never loop
+        params = {"limit": 1} | ({"cursor": cursor} if cursor else {})
+        resp = client.get(path, params=params, headers=auth)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        seen.extend(item[id_key] for item in body["data"])
+        if not body["page"]["has_more"]:
+            return seen
+        cursor = body["page"]["next_cursor"]
+        assert cursor is not None
+    raise AssertionError("cursor walk did not terminate")
+
+
+def test_export_list_keyset_paginates_equal_timestamps_exactly_once(tmp_path: Path) -> None:
+    """3 export jobs sharing one ``created_at``, page size 1 → ALL 3, exactly once."""
+    client, _ = _app(tmp_path)
+    try:
+        auth = _owner_auth(client)
+        ts = _dt.datetime(2026, 6, 1, 12, 0, 0, tzinfo=_dt.UTC)
+        ids = [uuid.uuid4() for _ in range(3)]
+        engine = _agent_state_engine(tmp_path)
+        try:
+            with engine.begin() as conn:
+                for job_id in ids:
+                    conn.execute(
+                        ExportJobRecord.__table__.insert().values(
+                            export_job_id=job_id,
+                            athlete_id=OWNER_ATHLETE_ID,
+                            scope="activities",
+                            format="json",
+                            status="ready",
+                            nonce=uuid.uuid4().hex,
+                            created_at=ts,
+                        )
+                    )
+        finally:
+            engine.dispose()
+        seen = _walk_pages(client, "/v1/exports", auth, "export_job_id")
+        assert sorted(seen) == sorted(str(i) for i in ids)  # all rows, exactly once
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_import_list_keyset_paginates_equal_timestamps_exactly_once(tmp_path: Path) -> None:
+    """3 upload jobs sharing one ``received_at``, page size 1 → ALL 3, exactly once."""
+    client, _ = _app(tmp_path)
+    try:
+        auth = _owner_auth(client)
+        ts = _dt.datetime(2026, 6, 1, 12, 0, 0, tzinfo=_dt.UTC)
+        ids = [f"job-{n}" for n in ("alpha", "beta", "gamma")]
+        engine = _agent_state_engine(tmp_path)
+        try:
+            with engine.begin() as conn:
+                for job_id in ids:
+                    conn.execute(
+                        ImportJobRecord.__table__.insert().values(
+                            import_job_id=job_id,
+                            athlete_id=OWNER_ATHLETE_ID,
+                            status="done",
+                            filename="ride.gpx",
+                            status_text="Imported.",
+                            received_at=ts,
+                        )
+                    )
+        finally:
+            engine.dispose()
+        seen = _walk_pages(client, "/v1/imports", auth, "import_job_id")
+        assert sorted(seen) == sorted(ids)  # all rows, exactly once
     finally:
         client.__exit__(None, None, None)

@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, update
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -220,8 +220,13 @@ async def list_exports(
         .limit(bounded + 1)
     )
     if cursor is not None:
-        anchor, _item = decode_cursor(cursor, params={}, key=_signing_key(settings))
-        stmt = stmt.where(ExportJobRecord.created_at < anchor)
+        anchor, item = decode_cursor(cursor, params={}, key=_signing_key(settings))
+        # Tuple keyset matching the (created_at DESC, export_job_id DESC) order: the
+        # id tiebreaker keeps equal-timestamp rows from being skipped (PAGE-R1/R5).
+        stmt = stmt.where(
+            tuple_(ExportJobRecord.created_at, ExportJobRecord.export_job_id)
+            < (anchor, uuid.UUID(item))
+        )
     rows = (await session.execute(stmt)).scalars().all()
     has_more = len(rows) > bounded
     page_rows = rows[:bounded]

@@ -34,7 +34,7 @@ from typing import Annotated, Final, Literal
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.agent.ops_jobs import ImportJobRecord
@@ -185,7 +185,7 @@ async def list_imports(
     principal: CurrentPrincipal,
     session: StateSession,
     settings: AppSettings,
-    limit: Annotated[int, Query(json_schema_extra={"maximum": 200})] = 50,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ) -> ImportJobList:
     """List the owner's upload jobs, newest first, cursor-paginated (API-R33, PAGE-R1).
@@ -201,8 +201,12 @@ async def list_imports(
         .limit(bounded + 1)
     )
     if cursor is not None:
-        anchor, _item = decode_cursor(cursor, params={}, key=_cursor_key(settings))
-        stmt = stmt.where(ImportJobRecord.received_at < anchor)
+        anchor, item = decode_cursor(cursor, params={}, key=_cursor_key(settings))
+        # Tuple keyset matching the (received_at DESC, import_job_id DESC) order: the
+        # id tiebreaker keeps equal-timestamp rows from being skipped (PAGE-R1/R5).
+        stmt = stmt.where(
+            tuple_(ImportJobRecord.received_at, ImportJobRecord.import_job_id) < (anchor, item)
+        )
     rows = (await session.execute(stmt)).scalars().all()
     has_more = len(rows) > bounded
     page_rows = rows[:bounded]

@@ -53,6 +53,11 @@ class AuthRefreshToken(AgentStateBase):
     family_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     subject: Mapped[str] = mapped_column(String(64), nullable=False)
     scopes: Mapped[str] = mapped_column(String(256), nullable=False)
+    #: The access-token ``client`` claim this family re-mints on rotation (AUTH-R8a):
+    #: ``"delegated"`` for a bot-link family, NULL for the first-party owner. Without
+    #: it a rotation would silently DROP the delegated marking — and with it the
+    #: X-Service-Auth enforcement keyed on ``claims.client``.
+    client: Mapped[str | None] = mapped_column(String(32), nullable=True)
     expires_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), nullable=False)
     used_at: Mapped[_dt.datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     revoked_at: Mapped[_dt.datetime | None] = mapped_column(UtcDateTime(), nullable=True)
@@ -103,6 +108,10 @@ class RefreshOutcome:
     subject: str | None = None
     scopes: tuple[str, ...] = ()
     new_secret: str | None = None
+    #: The family's access-token ``client`` claim (``"delegated"`` for a bot-link
+    #: family, ``None`` for first-party) — the rotated access token MUST re-carry it
+    #: or X-Service-Auth enforcement lapses after the first rotation (AUTH-R8a).
+    client: str | None = None
 
 
 async def issue_refresh_token(
@@ -112,10 +121,13 @@ async def issue_refresh_token(
     scopes: tuple[str, ...],
     ttl_seconds: int,
     family_id: str | None = None,
+    client: str | None = None,
 ) -> str:
     """Mint + persist a refresh-token row; returns the OPAQUE secret (stored hash-only).
 
     A fresh sign-in starts a NEW family; a rotation passes the existing ``family_id``.
+    ``client`` pins the family's access-token client claim (``"delegated"`` for the
+    bot-link flow) so every rotation re-mints it (AUTH-R8a).
     """
     secret = mint_refresh_secret()
     session.add(
@@ -124,6 +136,7 @@ async def issue_refresh_token(
             family_id=family_id or str(uuid.uuid4()),
             subject=subject,
             scopes=" ".join(scopes),
+            client=client,
             expires_at=utcnow() + _dt.timedelta(seconds=ttl_seconds),
         )
     )
@@ -140,7 +153,9 @@ async def consume_refresh_token(
     return ``ok`` with the new secret. A CONSUMED/REVOKED token -> revoke the ENTIRE
     family and return ``reuse`` (replay detection). Unknown/expired -> ``invalid``.
     The used-marking is an atomic guarded UPDATE so two concurrent presentations of the
-    same token can never both rotate (the loser reads as reuse).
+    same token can never both rotate (the loser reads as reuse). The guard re-asserts
+    expiry too, so a token that expires between the read and the claim can never mint a
+    successor (fail-closed — the lapsed claim reads as reuse, never ``ok``).
     """
     row = (
         await session.execute(
@@ -156,7 +171,13 @@ async def consume_refresh_token(
         "CursorResult[Any]",
         await session.execute(
             update(AuthRefreshToken)
-            .where(AuthRefreshToken.id == row.id, AuthRefreshToken.used_at.is_(None))
+            .where(
+                AuthRefreshToken.id == row.id,
+                AuthRefreshToken.used_at.is_(None),
+                # Re-assert the FULL mint invariant under the guard: the row must
+                # still be unexpired at claim time, not merely at the earlier read.
+                AuthRefreshToken.expires_at >= utcnow(),
+            )
             .values(used_at=utcnow())
         ),
     )
@@ -170,8 +191,15 @@ async def consume_refresh_token(
         scopes=scopes,
         ttl_seconds=ttl_seconds,
         family_id=row.family_id,
+        client=row.client,
     )
-    return RefreshOutcome(status="ok", subject=row.subject, scopes=scopes, new_secret=successor)
+    return RefreshOutcome(
+        status="ok",
+        subject=row.subject,
+        scopes=scopes,
+        new_secret=successor,
+        client=row.client,
+    )
 
 
 async def revoke_family(session: AsyncSession, *, family_id: str) -> None:

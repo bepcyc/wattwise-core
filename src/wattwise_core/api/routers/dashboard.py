@@ -145,7 +145,7 @@ async def dashboard_metrics(
 async def dashboard_alerts(
     svc: Annotated[AnalyticsService, Depends(analytics_service)],
     athlete_id: Annotated[str, Depends(current_athlete_id)],
-    limit: Annotated[int, Query(json_schema_extra={"maximum": 200})] = 50,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
 ) -> AlertList:
     """Typed readiness/data-health alerts for the home view (§8.2).
 

@@ -190,7 +190,7 @@ async def coverage_matrix(
 async def data_health_issues(
     svc: Service,
     athlete_id: AthleteId,
-    limit: Annotated[int, Query(json_schema_extra={"maximum": 200})] = 50,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
 ) -> DataHealthIssueList:
     """Typed data-health issues from the deterministic coverage checks (§8.3).
 

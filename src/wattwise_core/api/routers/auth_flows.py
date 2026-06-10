@@ -198,7 +198,13 @@ async def refresh_token(
     if outcome.status != "ok" or outcome.subject is None or outcome.new_secret is None:
         raise ProblemError("unauthenticated", headers=_BEARER_CHALLENGE)
     scopes = tuple(Scope(value) for value in outcome.scopes)
-    tokens = issue_access_token(settings, subject=outcome.subject, scopes=scopes)
+    # Re-mint the family's client claim (AUTH-R8a): a delegated (bot-link) family
+    # stays ``client: delegated`` across EVERY rotation, or the X-Service-Auth
+    # factor enforcement keyed on that claim would silently lapse after the first
+    # refresh.
+    tokens = issue_access_token(
+        settings, subject=outcome.subject, scopes=scopes, client=outcome.client
+    )
     payload = tokens.to_dict()
     payload["refresh_token"] = outcome.new_secret
     return payload
@@ -275,6 +281,7 @@ async def link_complete(
         subject=redemption.subject,
         scopes=tuple(s.value for s in DELEGATED_SCOPES),
         ttl_seconds=settings.auth__refresh_ttl_seconds,
+        client=DELEGATED_CLIENT,
     )
     payload = tokens.to_dict()
     payload["refresh_token"] = refresh

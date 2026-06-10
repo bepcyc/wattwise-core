@@ -71,7 +71,7 @@ TOPICS: Final[tuple[HelpTopic, ...]] = _load_topics()
 
 @router.get("/topics", response_model=HelpTopicList, operation_id="listHelpTopics")
 async def list_topics(
-    limit: Annotated[int, Query(json_schema_extra={"maximum": 200})] = 50,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
 ) -> HelpTopicList:
     """The public help-topic list (AUTH-R10): static content, server-bounded page.
 

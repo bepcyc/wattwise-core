@@ -46,6 +46,7 @@ def upgrade() -> None:
         sa.Column("family_id", sa.String(length=36), nullable=False),
         sa.Column("subject", sa.String(length=64), nullable=False),
         sa.Column("scopes", sa.String(length=256), nullable=False),
+        sa.Column("client", sa.String(length=32), nullable=True),
         sa.Column("expires_at", UtcDateTime(), nullable=False),
         sa.Column("used_at", UtcDateTime(), nullable=True),
         sa.Column("revoked_at", UtcDateTime(), nullable=True),
