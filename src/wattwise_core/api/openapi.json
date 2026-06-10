@@ -4938,8 +4938,19 @@
         "type": "object"
       },
       "WorkoutStepOut": {
-        "description": "One prescribed workout step: its target zones/durations (GBO-R29).\n\nProjected source-agnostically from the canonical typed step (the ``Workout.steps`` JSON array);\nevery field is optional because a step may prescribe by duration OR by target zone/power, and a\nrest step carries neither. Unknown extra keys on a step are dropped so no source-shaped field\nleaks (AUTH-R15).",
+        "description": "One prescribed workout step: its target zones/durations (GBO-R29).\n\nProjected source-agnostically from the canonical typed step (the ``Workout.steps`` JSON array);\nevery field is optional because a step may prescribe by duration OR by distance, and a rest\nstep carries neither target bound. ``target_type`` is the GBO-R29 enum token (including the\nsignature-relative ``power_pct_cp`` / ``hr_pct_threshold``). Unknown extra keys on a step are\ndropped so no source-shaped field leaks (AUTH-R15).",
         "properties": {
+          "distance_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distance M"
+          },
           "duration_s": {
             "anyOf": [
               {
@@ -4984,7 +4995,7 @@
             ],
             "title": "Target Low"
           },
-          "target_unit": {
+          "target_type": {
             "anyOf": [
               {
                 "type": "string"
@@ -4993,7 +5004,7 @@
                 "type": "null"
               }
             ],
-            "title": "Target Unit"
+            "title": "Target Type"
           }
         },
         "title": "WorkoutStepOut",
