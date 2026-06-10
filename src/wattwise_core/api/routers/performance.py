@@ -42,6 +42,9 @@ from wattwise_core.api.perf_helpers import (
     absent_coverage as _absent_coverage,
 )
 from wattwise_core.api.perf_helpers import (
+    activities_in_local_range as _activities_in_range,
+)
+from wattwise_core.api.perf_helpers import (
     coverage_for as _coverage_for,
 )
 from wattwise_core.api.perf_helpers import (
@@ -483,15 +486,6 @@ def _trimp_point(activity_id: str, day: _dt.date, res: MetricResult[float]) -> S
 
 
 # --- shared activity enumeration ------------------------------------------------
-
-
-async def _activities_in_range(
-    svc: AnalyticsService, athlete_id: str, frm: _dt.date, to: _dt.date
-) -> list[tuple[str, _dt.date]]:
-    """The athlete's resolved activities in range as ``(activity_id, local_date)``, time-ordered."""
-    activities = await svc._activities_in_range(athlete_id, frm, to)
-    activities.sort(key=lambda a: a.start_time)
-    return [(str(a.activity_id), a.start_time.date()) for a in activities]
 
 
 __all__ = [

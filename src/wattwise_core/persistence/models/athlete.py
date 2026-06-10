@@ -79,7 +79,10 @@ class Athlete(Base, TimestampMixin):
     current_sport: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("sport.sport_code"), nullable=True, index=True
     )
-    reference_timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
+    # IANA reference timezone deriving local_date (§3.8); athlete DATA, never a code-baked
+    # literal/default (CFG-R1a) — an absent value fails closed at the bucketing seam
+    # (localdate.MissingReferenceTimezone), never a silent UTC fallback.
+    reference_timezone: Mapped[str] = mapped_column(String(64), nullable=False)
     reference_timezone_effective_from: Mapped[_dt.datetime | None] = timestamptz_column(
         nullable=True
     )

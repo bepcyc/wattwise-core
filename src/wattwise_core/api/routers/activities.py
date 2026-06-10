@@ -37,12 +37,12 @@ from sqlalchemy import asc, desc, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics.result import is_computed
+from wattwise_core.api import activity_helpers as _ah
 from wattwise_core.api.activity_schemas import (
     ActivityDetail,
     ActivityLaps,
     ActivityList,
     ActivityStreams,
-    ActivitySummary,
     ActivityTrack,
     Lap,
     Page,
@@ -131,20 +131,6 @@ def _now() -> _dt.datetime:
     return _dt.datetime.now(tz=_dt.UTC)
 
 
-def _summary(act: Activity) -> ActivitySummary:
-    return ActivitySummary(
-        activity_id=str(act.activity_id), local_date=act.start_time.date(),
-        sport=act.sport, start_time=act.start_time, elapsed_time_s=act.elapsed_time_s,
-        moving_time_s=act.moving_time_s, distance_m=_f(act.distance_m),
-        avg_power_w=_f(act.avg_power_w), has_power=act.has_power, has_hr=act.has_hr,
-        has_gps=act.has_gps, has_cadence=act.has_cadence,
-    )
-
-
-def _f(value: object) -> float | None:
-    return None if value is None else float(value)  # type: ignore[arg-type]
-
-
 # --- §13 list + detail ----------------------------------------------------------
 
 
@@ -196,8 +182,9 @@ async def list_activities(
         if last is not None
         else None
     )
+    owner = await _ah.owner_or_not_found(session, athlete_id)  # reference tz for local_date
     return ActivityList(
-        data=[_summary(a) for a in page_rows],
+        data=[_ah.summary(a, _ah.local_date_of(a, owner)) for a in page_rows],
         page=Page(limit=bounded, next_cursor=nxt, has_more=has_more),
     )
 
@@ -248,14 +235,15 @@ async def get_activity(
 ) -> ActivityDetail:
     """Canonical activity detail with the per-activity load bundle (doc 60 §13)."""
     act = await _load_owned_activity(session, athlete_id, activity_id)
+    owner = await _ah.owner_or_not_found(session, athlete_id)
     result = await svc.coggan(activity_id)
     b = result.value if is_computed(result) else None
     return ActivityDetail(
-        **_summary(act).model_dump(),
-        max_power_w=_f(act.max_power_w), avg_hr_bpm=_f(act.avg_hr_bpm),
-        max_hr_bpm=_f(act.max_hr_bpm), avg_cadence_rpm=_f(act.avg_cadence_rpm),
-        avg_speed_mps=_f(act.avg_speed_mps), elevation_gain_m=_f(act.elevation_gain_m),
-        total_work_j=_f(act.total_work_j),
+        **_ah.summary(act, _ah.local_date_of(act, owner)).model_dump(),
+        max_power_w=_ah.f(act.max_power_w), avg_hr_bpm=_ah.f(act.avg_hr_bpm),
+        max_hr_bpm=_ah.f(act.max_hr_bpm), avg_cadence_rpm=_ah.f(act.avg_cadence_rpm),
+        avg_speed_mps=_ah.f(act.avg_speed_mps), elevation_gain_m=_ah.f(act.elevation_gain_m),
+        total_work_j=_ah.f(act.total_work_j),
         tss=_metric(b.tss) if b else None, intensity_factor=_metric(b.if_) if b else None,
         variability_index=_metric(b.variability_index) if b else None,
         efficiency_factor=_metric(b.efficiency_factor) if b else None,
@@ -482,10 +470,10 @@ async def get_laps(activity_id: str, session: Session, athlete_id: AthleteId) ->
 def _lap(row: ActivityLap) -> Lap:
     return Lap(
         lap_index=row.lap_index, start_offset_s=row.start_offset_s, duration_s=row.duration_s,
-        distance_m=_f(row.distance_m), avg_power_w=_f(row.avg_power_w),
-        max_power_w=_f(row.max_power_w), avg_hr_bpm=_f(row.avg_hr_bpm),
-        max_hr_bpm=_f(row.max_hr_bpm), avg_cadence_rpm=_f(row.avg_cadence_rpm),
-        avg_speed_mps=_f(row.avg_speed_mps), elevation_gain_m=_f(row.elevation_gain_m),
+        distance_m=_ah.f(row.distance_m), avg_power_w=_ah.f(row.avg_power_w),
+        max_power_w=_ah.f(row.max_power_w), avg_hr_bpm=_ah.f(row.avg_hr_bpm),
+        max_hr_bpm=_ah.f(row.max_hr_bpm), avg_cadence_rpm=_ah.f(row.avg_cadence_rpm),
+        avg_speed_mps=_ah.f(row.avg_speed_mps), elevation_gain_m=_ah.f(row.elevation_gain_m),
         total_work_j=None, coverage=_full_cov(),  # no canonical lap total_work_j (doc 20 §3.3)
     )
 

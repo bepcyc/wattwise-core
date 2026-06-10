@@ -19,7 +19,7 @@ import datetime as _dt
 from collections import defaultdict
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import decoupling as _dec
@@ -32,10 +32,13 @@ from wattwise_core.analytics import pmc as _pmc
 from wattwise_core.analytics import trimp as _trimp
 from wattwise_core.analytics import wbal as _wbal
 from wattwise_core.analytics._service_loaders import (
+    _activities_in_local_range,
+    _activity_local_date,
     _better_mmp,
     _channel_to_stream,
-    _day_bounds,
     _f,
+    _load_athlete,
+    _load_athlete_or_fail,
     _load_athlete_sex,
     _load_wellness_hrv_baseline,
     _load_wellness_hrv_summary,
@@ -253,16 +256,27 @@ class AnalyticsService:  # noqa: size-limits
 
     # --- athlete-level metrics ---
 
+    async def _athlete_or_fail(self, athlete_id: str) -> Athlete:
+        """The athlete whose reference tz drives every local-date bucket; fail closed (CFG-R6)."""
+        return await _load_athlete_or_fail(self._session, athlete_id)
+
     async def _activities_in_range(
         self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
     ) -> list[Activity]:
-        lo, hi = _day_bounds(from_date, to_date)
-        stmt = select(Activity).where(
-            Activity.athlete_id == _uid(athlete_id),
-            Activity.start_time >= lo,
-            Activity.start_time < hi,
-        )
-        return list((await self._session.execute(stmt)).scalars().all())
+        """Resolved activities whose LOCAL day (§3.8) falls in ``[from_date, to_date]`` (GBO-R35).
+
+        The query window is the UTC instants spanning LOCAL midnight on ``from_date`` through
+        LOCAL midnight on ``to_date + 1`` in the athlete's reference timezone — NOT a UTC-date
+        window, which would drop an activity whose UTC date sits just outside the local span.
+        A final precise re-bucket on ``local_date`` (in the loaders) drops any boundary
+        activity that the instant window over-includes. An athlete with no row owns no
+        activities, so the empty series needs no tz (the fail-closed CFG-R6 path applies only
+        when a real athlete has activities but no resolvable reference tz, raised by the bucket).
+        """
+        athlete = await _load_athlete(self._session, athlete_id)
+        if athlete is None:
+            return []  # an athlete with no row owns no activities; the empty series needs no tz
+        return await _activities_in_local_range(self._session, athlete, from_date, to_date)
 
     async def daily_load_series(
         self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
@@ -290,15 +304,22 @@ class AnalyticsService:  # noqa: size-limits
         substituted_day: set[_dt.date] = set()
         loaded_day: set[_dt.date] = set()
         seen: set[_dt.date] = set()
-        for act in activities:
-            day = act.start_time.date()
-            seen.add(day)
-            contribution = await self._activity_load(str(act.activity_id))
-            if contribution is not None:
-                by_day[day] += contribution.value
-                loaded_day.add(day)
-                if contribution.coverage.fidelity is Fidelity.SUBSTITUTED:
-                    substituted_day.add(day)
+        if activities:
+            # Any activity in range implies a real athlete row; load it for bucketing only then,
+            # so an athlete with no data yields an all-rest series without needing a reference tz.
+            athlete = await self._athlete_or_fail(athlete_id)
+            for act in activities:
+                # GBO-R35: attribute the activity to its athlete-LOCAL calendar day (the
+                # persisted local_date, recomputed from start_time + as-of tz when absent),
+                # NOT the UTC date.
+                day = _activity_local_date(act, athlete)
+                seen.add(day)
+                contribution = await self._activity_load(str(act.activity_id))
+                if contribution is not None:
+                    by_day[day] += contribution.value
+                    loaded_day.add(day)
+                    if contribution.coverage.fidelity is Fidelity.SUBSTITUTED:
+                        substituted_day.add(day)
         loads: dict[_dt.date, float | None] = {}
         coverage: dict[_dt.date, Coverage | None] = {}
         cur = from_date
@@ -337,12 +358,22 @@ class AnalyticsService:  # noqa: size-limits
         return None
 
     async def _earliest_activity_date(self, athlete_id: str) -> _dt.date | None:
-        """The local-date of the athlete's first-ever activity, or None if none."""
-        stmt = select(func.min(Activity.start_time)).where(
-            Activity.athlete_id == _uid(athlete_id)
+        """The athlete-LOCAL date of the first-ever activity, or ``None`` if none (GBO-R35).
+
+        The earliest activity by UTC ``start_time`` is also the earliest local instant, but its
+        LOCAL calendar day (the PMC origin) is the projection of that instant — not its UTC
+        date — so the EWMA grid starts on the correct local day (PMC-R3/R5).
+        """
+        stmt = (
+            select(Activity)
+            .where(Activity.athlete_id == _uid(athlete_id))
+            .order_by(Activity.start_time.asc())
+            .limit(1)
         )
         first = (await self._session.execute(stmt)).scalar_one_or_none()
-        return None if first is None else first.date()
+        if first is None:
+            return None  # no activity ⇒ no origin; an empty athlete needs no reference tz
+        return _activity_local_date(first, await self._athlete_or_fail(athlete_id))
 
     async def pmc(
         self,

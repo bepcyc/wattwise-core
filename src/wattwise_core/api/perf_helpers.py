@@ -12,12 +12,14 @@ import datetime as _dt
 import math
 from typing import Any, Final
 
+from wattwise_core.analytics._service_loaders import _activity_local_date
 from wattwise_core.analytics.result import (
     MetricResult,
     Unavailable,
     UnavailableReason,
     is_computed,
 )
+from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.api.chart_schemas import CoverageDescriptor
 
 #: Reasons whose absence is a FAILED computation (vs. a true no-data absence, ANL-R4).
@@ -96,8 +98,27 @@ def now() -> _dt.datetime:
     return _dt.datetime.now(tz=_dt.UTC)
 
 
+async def activities_in_local_range(
+    svc: AnalyticsService, athlete_id: str, frm: _dt.date, to: _dt.date
+) -> list[tuple[str, _dt.date]]:
+    """The athlete's resolved activities in range as ``(activity_id, local_date)``, time-ordered.
+
+    ``local_date`` is the athlete-LOCAL day (§3.8, GBO-R35) — the persisted ingest projection
+    (recomputed from the UTC instant + the as-of reference tz when absent), NOT the UTC
+    ``start_time.date()`` that would mislabel an across-midnight activity. An athlete with no
+    activities yields an empty list without needing a reference tz (empty is not an error).
+    """
+    activities = await svc._activities_in_range(athlete_id, frm, to)
+    if not activities:
+        return []
+    activities.sort(key=lambda a: a.start_time)
+    athlete = await svc._athlete_or_fail(athlete_id)  # real activities ⇒ a real athlete row
+    return [(str(a.activity_id), _activity_local_date(a, athlete)) for a in activities]
+
+
 __all__ = [
     "absent_coverage",
+    "activities_in_local_range",
     "coverage_for",
     "day_label",
     "duration_label",

@@ -273,8 +273,12 @@ async def update_profile(
         raise _unknown_sport(body.current_sport)
     if body.sex is not None:
         owner.sex = body.sex
-    if body.reference_timezone is not None:
+    if body.reference_timezone is not None and body.reference_timezone != owner.reference_timezone:
+        # GBO-R34: a reference-timezone CHANGE stamps the as-of effective_from so prior days
+        # keep the local_date they were projected under and are not retroactively re-bucketed
+        # under the new zone. Re-setting the SAME zone is a no-op (effective_from unchanged).
         owner.reference_timezone = body.reference_timezone
+        owner.reference_timezone_effective_from = _dt.datetime.now(tz=_dt.UTC)
     if body.current_sport is not None:
         owner.current_sport = body.current_sport
     await session.flush()

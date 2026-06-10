@@ -52,7 +52,12 @@ from wattwise_core.ingestion._mapping import (
 )
 from wattwise_core.ingestion.trust import load_trust_policy
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
-from wattwise_core.persistence.models import Activity, SourceCandidate
+from wattwise_core.persistence.localdate import (
+    MissingReferenceTimezone,
+    project_local_date,
+    project_local_wall_clock,
+)
+from wattwise_core.persistence.models import Activity, Athlete, SourceCandidate
 from wattwise_core.persistence.types import uuid7
 from wattwise_core.persistence.upsert import upsert
 from wattwise_core.seams import ConflictResolver, DefaultConflictResolver
@@ -232,7 +237,10 @@ class IngestService:
         scalars, coverage = _resolve_scalars(
             candidates, _ACTIVITY_SCALARS, policy, self._resolver
         )
-        values, update_columns = _activity_values(activity_id, athlete, scalars, coverage)
+        local_projection = await self._project_local(athlete, activity_id, scalars)
+        values, update_columns = _activity_values(
+            activity_id, athlete, scalars, coverage, local_projection
+        )
         await upsert(
             self._session,
             cast("Table", Activity.__table__),
@@ -249,6 +257,32 @@ class IngestService:
         if streams:
             await _cw.upsert_stream_set(self._session, activity_id, streams)
         await _cw.upsert_laps(self._session, activity_id, laps, _LAP_SCALARS)
+
+    async def _project_local(
+        self, athlete: uuid.UUID, activity_id: uuid.UUID, scalars: dict[str, Any]
+    ) -> tuple[_dt.datetime, _dt.date] | None:
+        """Project the resolved UTC ``start_time`` into the athlete's local day (GBO-R33/R35).
+
+        Returns ``(start_time_local, local_date)`` — the display wall-clock and the reproducible
+        day-attribution bucket — or ``None`` when ``start_time`` did not resolve (nothing to
+        project). The athlete's reference timezone is effective-dated (GBO-R34): a re-ingest of
+        an instant predating a later relocation keeps the ``local_date`` it already carries
+        (passed as ``prior_local_date``), so a relocation never retroactively re-buckets prior
+        days. A missing/unresolvable reference timezone raises
+        :class:`~wattwise_core.persistence.localdate.MissingReferenceTimezone`, isolating the
+        record (fail-closed, CFG-R1a/R6) — never a silent UTC default.
+        """
+        raw_start = scalars.get("start_time")
+        if raw_start is None:
+            return None  # no instant resolved → nothing to bucket
+        start = _parse_start_time(raw_start)
+        owner = await self._session.get(Athlete, athlete)
+        if owner is None:
+            raise MissingReferenceTimezone("athlete row missing for local-date projection")
+        existing = await self._session.get(Activity, activity_id)
+        prior = existing.local_date if existing is not None else None
+        local_date = project_local_date(start, owner, prior_local_date=prior)
+        return project_local_wall_clock(start, owner), local_date
 
     async def _write_wellness(self, athlete: uuid.UUID, local_date: _dt.date) -> None:
         """Resolve daily wellness across ALL candidates for the date (CONF-R2/ING-UPS-R5)."""

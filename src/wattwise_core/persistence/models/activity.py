@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime as _dt
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from wattwise_core.domain.enums import (
@@ -56,12 +56,20 @@ class Activity(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_activity_athlete_start_time", "athlete_id", "start_time"),
         Index("ix_activity_athlete_sport_start_time", "athlete_id", "sport", "start_time"),
+        # The day-bucket query path filters by the athlete-LOCAL calendar day (GBO-R35).
+        Index("ix_activity_athlete_local_date", "athlete_id", "local_date"),
     )
 
     activity_id: Mapped[uuid.UUID] = pk_column()
     athlete_id: Mapped[uuid.UUID] = fk_uuid_column("athlete.athlete_id", nullable=False)
     start_time: Mapped[_dt.datetime] = timestamptz_column(nullable=False)
+    # derived display only — the athlete-LOCAL wall-clock of start_time (GBO-R13, §3.8).
     start_time_local: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
+    # the athlete-LOCAL calendar date of start_time (§3.8); the reproducible GBO-R35
+    # day-attribution bucket, recomputable from start_time + the as-of reference tz
+    # (GBO-R34). Mirrors daily_wellness.local_date; NOT a UTC date. Nullable so a row
+    # ingested before a tz was configured surfaces a typed absence rather than a fake date.
+    local_date: Mapped[_dt.date | None] = mapped_column(Date, nullable=True)
     elapsed_time_s: Mapped[int | None] = integer_column(nullable=True)
     moving_time_s: Mapped[int | None] = integer_column(nullable=True)
     # registry code (GBO-R16a); NOT NULL. Soft reference into the sport registry.

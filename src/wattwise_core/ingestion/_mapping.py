@@ -91,7 +91,11 @@ def _resolve_scalars(
 
 
 def _activity_values(
-    activity_id: uuid.UUID, athlete: uuid.UUID, scalars: dict[str, Any], coverage: dict[str, object]
+    activity_id: uuid.UUID,
+    athlete: uuid.UUID,
+    scalars: dict[str, Any],
+    coverage: dict[str, object],
+    local_projection: tuple[_dt.datetime, _dt.date] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """The activity row value-dict + the update-on-collision set for the atomic upsert (UPS-R2).
 
@@ -101,6 +105,12 @@ def _activity_values(
     is exactly the resolved/derived columns — ``sport`` is included ONLY when resolved, so a
     conflicting (existing) row never has a previously-resolved value regressed to a default,
     matching the prior setattr-only behaviour (no zero-filling, PRV-R6).
+
+    ``local_projection`` is the ``(start_time_local, local_date)`` derived by projecting the
+    resolved UTC ``start_time`` into the athlete's effective-dated reference timezone
+    (GBO-R33/R34/R35). It is supplied by the write path only when ``start_time`` resolved (the
+    only instant to project from); both columns are written together so the display wall-clock
+    and the reproducible day-bucket always agree.
     """
     values: dict[str, Any] = {"activity_id": activity_id, "athlete_id": athlete}
     update_columns: list[str] = []
@@ -111,6 +121,12 @@ def _activity_values(
         values[col] = _parse_start_time(value) if key == "start_time" else value
         update_columns.append(col)
     values.setdefault("sport", "other")  # NOT NULL on a fresh insert; refreshed only if resolved
+    if local_projection is not None:
+        # GBO-R35 day-attribution + GBO-R13 display: project the resolved UTC start_time into
+        # the athlete's effective reference tz (start_time_local = local wall-clock display;
+        # local_date = the reproducible local-calendar-day bucket the analytics layer reads).
+        values["start_time_local"], values["local_date"] = local_projection
+        update_columns += ["start_time_local", "local_date"]
     values["has_power"] = scalars.get("avg_power_w") is not None
     values["has_hr"] = scalars.get("avg_hr_bpm") is not None
     values["coverage"] = coverage

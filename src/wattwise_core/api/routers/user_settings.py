@@ -200,13 +200,19 @@ async def put_zones(
 
     Backs a real canonical entity (API-R32): a new effective interval for ``(athlete_id,
     zone_kind, today)`` — re-setting the SAME kind today UPDATES that row rather than
-    violating its uniqueness key. Acts ONLY on the server-derived owner id (AUTH-R3).
+    violating its uniqueness key. Opening a NEW interval CLOSES the prior open one for the
+    same ``(athlete_id, zone_kind, sport)`` by stamping its ``effective_to`` (GBO-R13d):
+    effective-dated intervals MUST NOT overlap and at most one row may stay open, so a past
+    date reproduces the zones then in effect. Acts ONLY on the server-derived owner id (AUTH-R3).
     """
     await _load_owner(session, athlete_id)
     today = _dt.datetime.now(tz=_dt.UTC).date()
     existing = await _exact_zone_set(session, athlete_id, body.kind, today)
     boundaries = [b.model_dump() for b in body.boundaries]
     if existing is None:
+        # GBO-R13d: close the prior open interval before opening today's so the
+        # (athlete_id, zone_kind, sport) history has at most ONE open row, no overlap.
+        await _close_open_zone_intervals(session, athlete_id, body.kind, today)
         session.add(
             TrainingZoneSet(
                 athlete_id=_uid(athlete_id), zone_kind=body.kind, effective_date=today,
@@ -218,6 +224,28 @@ async def put_zones(
         existing.boundaries = boundaries
     await session.flush()
     return ZonesSettings(kind=body.kind, basis=body.basis, boundaries=body.boundaries)
+
+
+async def _close_open_zone_intervals(
+    session: AsyncSession, athlete_id: str, kind: ZoneKind, as_of: _dt.date
+) -> None:
+    """Close any open zone interval for ``(athlete_id, kind, sport=all)`` at ``as_of`` (GBO-R13d).
+
+    Sets ``effective_to`` (exclusive) on every still-open (``effective_to IS NULL``) row whose
+    ``effective_date`` precedes ``as_of``, so opening a new interval never leaves two open rows
+    overlapping. The settings surface authors all-sport (``sport IS NULL``) zone sets, so the
+    closure is scoped to that same key (GBO-R13d non-overlap is per ``(athlete, kind, sport)``).
+    """
+    boundary = _dt.datetime.combine(as_of, _dt.time.min, _dt.UTC)
+    stmt = select(TrainingZoneSet).where(
+        TrainingZoneSet.athlete_id == _uid(athlete_id),
+        TrainingZoneSet.zone_kind == kind,
+        TrainingZoneSet.sport.is_(None),
+        TrainingZoneSet.effective_to.is_(None),
+        TrainingZoneSet.effective_date < as_of,
+    )
+    for row in (await session.execute(stmt)).scalars().all():
+        row.effective_to = boundary
 
 
 async def _latest_zone_set(
