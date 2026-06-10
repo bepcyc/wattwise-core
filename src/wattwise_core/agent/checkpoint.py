@@ -36,6 +36,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from wattwise_core.agent import checkpoint_interrupts as ledger
+from wattwise_core.agent.redaction import (
+    IDENTITY_CHANNELS,
+    redact_checkpoint,
+    redact_state_payload,
+)
 from wattwise_core.agent.state_store import (
     AgentCheckpoint,
     AgentThread,
@@ -318,11 +323,20 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Persist one checkpoint after a node transition (CKPT-R1); identity-scoped."""
+        """Persist one checkpoint after a node transition (CKPT-R1); identity-scoped.
+
+        PII in the checkpointed state (the athlete's ``messages``/``request_text`` and the
+        composed ``draft``/``grounded_text`` — special-category content, MEM-R3) is masked
+        through the central redactor BEFORE the blob is serialized, so the persisted bytes
+        carry no unmasked PII (AGT-SEC-R4 "redacted ... before persistence", CKPT-R8 §10).
+        Redaction is unconditional on the persistence path (fail-closed) — durable state is
+        never written raw — and only masks high-confidence PII/secret spans, so the blob
+        still deserializes and resume stays identical (CKPT-R2).
+        """
         thread_id = _config_str(config, "thread_id")
         ns = _config_str(config, "checkpoint_ns")
         parent_id = get_checkpoint_id(config) or None
-        cp_type, cp_blob = self.serde.dumps_typed(checkpoint)
+        cp_type, cp_blob = self.serde.dumps_typed(redact_checkpoint(checkpoint))
         async with self._sessions() as session:
             await self._ensure_thread(session, thread_id)
             row = AgentCheckpoint(
@@ -365,7 +379,15 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
             await self._ensure_thread(session, thread_id)
             for idx, (channel, value) in enumerate(writes):
                 write_idx = WRITES_IDX_MAP.get(channel, idx)
-                value_type, value_blob = self.serde.dumps_typed(value)
+                # Mask PII in the pending intermediate write before it is serialized, so a
+                # node's not-yet-checkpointed output (which may carry the athlete's words or
+                # composed prose) is never persisted raw (AGT-SEC-R4 / CKPT-R8). An IDENTITY
+                # channel (athlete_id/thread_id/turn_id/...) is left verbatim — it is an opaque
+                # internal identifier, not PII, and masking it would corrupt durable scoping
+                # (CKPT-R3). Redaction only masks high-confidence PII spans, so the replayed
+                # write (CKPT-R2) keeps its shape and type.
+                masked = value if channel in IDENTITY_CHANNELS else redact_state_payload(value)
+                value_type, value_blob = self.serde.dumps_typed(masked)
                 await upsert(
                     session,
                     cast(Table, AgentWrite.__table__),  # ORM table is a Table at runtime

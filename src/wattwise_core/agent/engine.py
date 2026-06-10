@@ -1,13 +1,12 @@
 """The deployable :class:`GraphAgentEngine` the API drives (doc 50).
 
-Assembles the compiled coaching graph over a DURABLE :class:`SqlAlchemyCheckpointSaver` (on a
-dedicated agent-state pool, ARCH-R13/DEPLOY-R4) + the concrete production services (in the focused
-:mod:`engine_services` sibling, re-exported here) and runs the deliverable projection: grounded
-Q&A + COACH-R8 follow-ups, the weekly digest, the multi-day PLAN, and the HITL decision resume.
-``build_agent_engine`` constructs it from settings + the database; with no LLM key the OSS engine
-boots without a model and the agent surface degrades gracefully (RUN-R4.1). Identity is server-
-derived (AGT-SEC-R1); the model never self-certifies (OUTCOME-R5); the durable saver makes
-follow-ups and approval pauses resumable (CKPT-R5/-R9).
+Assembles the compiled coaching graph over a DURABLE :class:`SqlAlchemyCheckpointSaver` (dedicated
+agent-state pool, ARCH-R13/DEPLOY-R4) + the concrete production services (in the focused
+:mod:`engine_services` sibling, re-exported here) and runs the deliverable projection (grounded
+Q&A + COACH-R8 follow-ups, the weekly digest, the multi-day PLAN, the HITL decision resume).
+``build_agent_engine`` constructs it from settings; with no LLM key the OSS engine degrades
+gracefully (RUN-R4.1). Identity is server-derived (AGT-SEC-R1); the durable saver makes follow-ups
+and approval pauses resumable (CKPT-R5/-R9).
 """
 
 from __future__ import annotations
@@ -39,6 +38,8 @@ from wattwise_core.agent.engine_graph import (
     RECURSION_LIMIT,
     CompiledCoachGraph,
     conversation_id_for,
+    conversation_id_for_turn,
+    resolve_existing_answer,
 )
 from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (historical paths)
     CANONICAL_WORKOUT_NAMES,
@@ -113,6 +114,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         coach: CoachBundle | None = None,
         entitlement: Entitlements | None = None,
         sessions: SessionProvider | None = None,
+        dedup_window_seconds: int | None = None,
     ) -> None:
         # Every CANONICAL-store open flows through the ONE engine-owned provider seam (SEAM-R11
         # / ARCH-R31), never around it; the OSS default does no tenant scoping (agent-state is
@@ -121,6 +123,12 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         self._model = model
         self._state_db = state_db
         self._coach = coach if coach is not None else CoachBundle()
+        # CKPT-R4 dedup window (seconds) for the idempotent run path: ``build_agent_engine`` passes
+        # the config-loaded ``agent__idempotency_dedup_window_seconds`` (CFG-R1a). ``None`` (a
+        # direct caller with no window) means NO time-bucketing — a re-submitted identical turn
+        # still dedups by content (bucket 0), never spawning a duplicate; absence disables only the
+        # time axis (not a baked value), keeping the dedup fail-closed.
+        self._dedup_window_seconds = dedup_window_seconds or 0
         # The DEFAULT (config-resolved) entitlement the engine reads its non-monetary local guards
         # FROM (AGT-ENT-R1): the node-visit ceiling + tool-iteration bound the graph reads, the
         # token bound the model output budget is sized to, and the wall-clock deadline the run is
@@ -230,21 +238,32 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         locale: str,
         entitlement: Entitlements | None = None,
     ) -> AgentAnswer:
-        """Answer a question, resuming the SAME durable thread on a follow-up (COACH-R8, MEM-R4).
+        """Answer a question, deduping a re-submitted turn and resuming a follow-up thread.
 
-        ``response_length`` of ``None`` applies the PERSISTED per-athlete verbosity default
-        (MEM-R1 / VOICE-R8, §382) WITHOUT mutating it; a value overrides for this call only. The
-        engine RECALLS durable memory before the run and records an episode after a completed first
-        turn, both through the ONE MemoryStore seam (MEM-R4). A per-request ``entitlement`` (MED-2)
-        governs this run's bounds when supplied, else the config-resolved default (CKPT-R3/-R5).
+        A FRESH turn is keyed deterministically (athlete + question + dedup-window bucket): the SAME
+        turn twice within the window RETURNS the existing run, never a duplicate (CKPT-R4); a
+        follow-up resumes the SAME durable thread (COACH-R8, CKPT-R3/MED-2). ``response_length`` of
+        ``None`` applies the PERSISTED per-athlete verbosity default (MEM-R1 / VOICE-R8, §382)
+        WITHOUT mutating it; a value overrides for this call only. The engine RECALLS durable memory
+        before the run and records an episode after a completed first turn, both through the ONE
+        MemoryStore seam (MEM-R4). A per-request ``entitlement`` (MED-2) governs this run's bounds
+        when supplied, else the config-resolved default (CKPT-R3/-R5).
         """
         length = await self.resolve_default_response_length(
             athlete_id=athlete_id, requested=response_length
         )
         recalled = await self.recall_memory_for_run(athlete_id=athlete_id, query=question or "")
         state_db = await self._agent_state_db()
-        conversation_id = conversation_id_for(athlete_id, thread_id)
+        conversation_id = conversation_id_for_turn(
+            athlete_id, thread_id, question, self._dedup_window_seconds
+        )
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
+        existing = await resolve_existing_answer(
+            saver, athlete_id=athlete_id, conversation_id=conversation_id,
+            follow_up_thread_id=thread_id,
+        )
+        if existing is not None:
+            return existing
         async with self._sessions.session(subject=athlete_id) as session:
             answer = await answer_question(
                 self._graph(AnalyticsService(session), saver, entitlement=entitlement),

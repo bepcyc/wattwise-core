@@ -137,6 +137,13 @@ max_output_tokens = 8192
 # grounded in retrieved canonical data at/above this coverage.
 grounding_min_coverage = 1.0
 request_timeout_seconds = 60
+# AGT-SEC-R4 provider-send PII policy ("where policy requires"): mask the outbound system +
+# untrusted-data regions through the central redactor before they reach the third-party
+# provider. ON by default so durable agent PII never leaves the process unmasked.
+redact_provider_payloads = true
+# CKPT-R4 idempotency dedup window (seconds): a re-submitted SAME turn within this window
+# resolves to the SAME run instead of starting a duplicate.
+idempotency_dedup_window_seconds = 60
 # First-party hosts whose links the deliverable may keep (GROUND-R4 allow-list). A URL whose
 # host is not on this exact-host set is scrubbed by the grounder ("when in doubt, scrub"). This
 # is LOADED policy content (CFG-R1a), never a code-baked host literal; the operator/private
@@ -326,3 +333,7 @@ prompt_fragments = ["shared_preamble", "readiness_system", "claim_system"]
 [retention]
 # 0 = retain indefinitely; >0 = per-athlete retention window in days (PRIV-R*).
 raw_file_days = 0
+# CKPT-R8 / PRIV-R7 agent-state retention window (days): durable run checkpoints/threads/
+# writes/interrupts older than this are expired by the retention sweeper. 0 = retain
+# indefinitely (no sweep), mirroring raw_file_days.
+agent_state_days = 0

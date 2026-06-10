@@ -42,6 +42,7 @@ def build_agent_engine(database: Database, settings: Any) -> GraphAgentEngine | 
     authority: the model's per-call output budget is sized to its token bound (AGT-ENT-R1,
     MODEL-R5a) and the engine reads its ceiling / tool-iteration / wall-clock guards from it. The
     API may still thread a per-REQUEST entitlement into a deliverable call to override it (MED-2).
+    The config-loaded CKPT-R4 dedup window (CFG-R1a, never baked) wires the idempotent run path.
     """
     if settings.llm_api_key is None:
         return None
@@ -53,6 +54,7 @@ def build_agent_engine(database: Database, settings: Any) -> GraphAgentEngine | 
         state_db=state_db,
         coach=CoachBundle.from_settings(settings),
         entitlement=entitlement,
+        dedup_window_seconds=settings.agent__idempotency_dedup_window_seconds,
     )
 
 

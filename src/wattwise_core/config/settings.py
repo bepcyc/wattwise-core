@@ -245,6 +245,15 @@ class Settings(BaseSettings):
     agent__max_output_tokens: int = Field(ge=1)
     agent__grounding_min_coverage: float = Field(ge=0.0, le=1.0)
     agent__request_timeout_seconds: float = Field(gt=0)
+    # AGT-SEC-R4 provider-send PII policy ("where policy requires"): when true the model seam
+    # masks the outbound system + untrusted-data regions through the central redactor before
+    # they reach the third-party provider. Loaded policy (CFG-R1a) — no code-baked default;
+    # absence from every layer fails closed at load.
+    agent__redact_provider_payloads: bool
+    # CKPT-R4 idempotency dedup window (seconds): a re-submitted SAME turn within this window
+    # resolves to the SAME thread/run instead of starting a duplicate. Loaded config (CFG-R1a),
+    # never a code literal; ``0`` disables time-bucketing (every turn is its own bucket).
+    agent__idempotency_dedup_window_seconds: int = Field(ge=0)
     # First-party URL allow-list (GROUND-R4): the exact hosts whose links the grounder may keep.
     # Loaded policy content (CFG-R1a), never a host literal baked into code.
     agent__allowed_hosts: list[str]
@@ -274,6 +283,11 @@ class Settings(BaseSettings):
 
     # --- retention ---
     retention__raw_file_days: int = Field(ge=0)
+    # CKPT-R8 / PRIV-R7 agent-state retention window (days): durable run checkpoints (threads,
+    # writes, interrupts) older than this are expired by the retention sweeper. Loaded config
+    # (CFG-R1a), never a code literal; ``0`` = retain indefinitely (no sweep), mirroring
+    # ``retention__raw_file_days``.
+    retention__agent_state_days: int = Field(ge=0)
 
     # --- SECRETS (env / secret-manager only; BOOT-R4) ---
     database_dsn: SecretStr | None = None

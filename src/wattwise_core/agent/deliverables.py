@@ -38,7 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from wattwise_core.agent.contracts import RunStatus
+from wattwise_core.agent.contracts import AgentState, RunStatus
 
 # The shared graph-driving + terminal-state projection primitives live in the LEAF
 # :mod:`projection` module so BOTH this module and :mod:`plan_deliverable` depend DOWNWARD on
@@ -271,6 +271,29 @@ async def answer_question(
     )
 
 
+def answer_from_state(final: AgentState) -> AgentAnswer:
+    """Project an ALREADY-FINAL terminal state into :class:`AgentAnswer` without re-shaping.
+
+    Used by the idempotency dedup path (CKPT-R4): when a re-submitted same turn resolves to an
+    EXISTING run, its persisted terminal state is projected and RETURNED verbatim rather than
+    starting a duplicate run. The stored body was already grounded + presentation-enforced when
+    the original run finalized, so this only projects it (OUTCOME-R2) — it drives no graph,
+    re-grounds nothing, and applies no follow-up shaping (a dedup-resume is the same turn).
+    """
+    html, text, status, out_thread_id = _outputs(final)
+    observations = _project_observations(_as_seq(final.get("observations")))
+    return AgentAnswer(
+        status=status,
+        thread_id=out_thread_id,
+        answer_html=html,
+        answer_text=text,
+        observations=observations,
+        citations=_project_citations(_as_seq(final.get("citations"))),
+        suggested_followups=_generate_followups(status, observations),
+        coverage_caveat=_coverage_caveat(final),
+    )
+
+
 def _merge_revealed_citations(
     citations: tuple[Citation, ...], revealed: Sequence[Observation]
 ) -> tuple[Citation, ...]:
@@ -400,6 +423,7 @@ __all__ = [
     "ResponseLength",
     "StructuredNarrationError",
     "StructuredNarrator",
+    "answer_from_state",
     "answer_question",
     "conversation_id_of",
     "count_foregrounded_numbers",

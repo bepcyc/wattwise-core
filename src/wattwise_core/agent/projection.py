@@ -20,6 +20,8 @@ GROUND-R5, AGT-SEC-R1.
 
 from __future__ import annotations
 
+import hashlib
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
@@ -73,6 +75,41 @@ def new_conversation_id() -> str:
 def thread_id_for(athlete_id: str, conversation_id: str) -> str:
     """The reversible durable thread id for ``(athlete_id, conversation_id)`` (CKPT-R3)."""
     return f"{athlete_id}{_THREAD_SEP}{conversation_id}"
+
+
+# Prefix marking a conversation id derived deterministically from a turn for dedup (CKPT-R4),
+# distinguishing it from a random :func:`new_conversation_id` (which round-trips a follow-up).
+_DEDUP_CONVERSATION_PREFIX = "turn-"
+
+
+def idempotent_conversation_id(
+    *,
+    athlete_id: str,
+    trigger: Trigger,
+    request_text: str | None,
+    dedup_window_seconds: int,
+    now: float | None = None,
+) -> str:
+    """A DETERMINISTIC conversation id for a fresh turn, stable within the dedup window (CKPT-R4).
+
+    Submitting the SAME request turn twice MUST resolve to the SAME run rather than starting a
+    duplicate, within a configurable dedup window (CKPT-R4). A fresh ``/ask`` turn carries no
+    ``thread_id``; rather than minting a RANDOM conversation id (which spawned a duplicate thread
+    on every re-submission), this derives the conversation id from the turn's identity —
+    ``athlete_id`` + ``trigger`` + ``request_text`` + the current dedup-window BUCKET — so two
+    identical turns within the same window collapse onto ONE durable thread, where
+    :meth:`SqlAlchemyCheckpointSaver.resolve_idempotent` then finds the existing run.
+
+    The window bucket is ``floor(now / dedup_window_seconds)``: a turn re-submitted inside the
+    same bucket maps to the same id; once the window elapses the bucket advances and a genuinely
+    later turn opens a new thread. A non-positive window disables time-bucketing (bucket ``0``),
+    so the key is purely content-derived (every identical turn dedups regardless of time).
+    """
+    reference = now if now is not None else time.time()
+    bucket = int(reference // dedup_window_seconds) if dedup_window_seconds > 0 else 0
+    material = f"{athlete_id}\x1f{trigger}\x1f{request_text or ''}\x1f{bucket}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return f"{_DEDUP_CONVERSATION_PREFIX}{digest}"
 
 
 def conversation_id_of(thread_id: str) -> str:
@@ -233,6 +270,7 @@ __all__ = [
     "conversation_id_of",
     "coverage_caveat",
     "generate_followups",
+    "idempotent_conversation_id",
     "new_conversation_id",
     "outputs",
     "project_observations",

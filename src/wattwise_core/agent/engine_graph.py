@@ -21,10 +21,17 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
+from wattwise_core.agent.checkpoint import SqlAlchemyCheckpointSaver
 from wattwise_core.agent.contracts import AgentState, CoverageCaveat, RunStatus
+from wattwise_core.agent.deliverables import AgentAnswer, answer_from_state
 from wattwise_core.agent.graph import DEFAULT_NODE_VISIT_CEILING
 from wattwise_core.agent.graph_state import limitation_text, plan_requires_approval
-from wattwise_core.agent.projection import conversation_id_of, new_conversation_id
+from wattwise_core.agent.projection import (
+    conversation_id_of,
+    idempotent_conversation_id,
+    new_conversation_id,
+    thread_id_for,
+)
 
 # The compiled-graph type the deliverables drive through the ``CoachGraph`` seam.
 _CompiledGraph = CompiledStateGraph[AgentState, Any, AgentState, AgentState]
@@ -51,6 +58,55 @@ def conversation_id_for(athlete_id: str, thread_id: str | None) -> str:
     if thread_id is not None:
         return conversation_id_of(thread_id)
     return new_conversation_id()
+
+
+def conversation_id_for_turn(
+    athlete_id: str, thread_id: str | None, request_text: str | None, dedup_window_seconds: int
+) -> str:
+    """The conversation id for a ``/ask`` turn — DETERMINISTIC for a fresh turn (CKPT-R4).
+
+    A follow-up passes its ``thread_id`` back, so the conversation id is recovered from it (the
+    run lands on the SAME durable thread). A FRESH turn (no ``thread_id``) derives the id
+    deterministically from the turn (athlete + question + dedup-window bucket) so a re-submitted
+    SAME turn within the window collapses onto ONE thread where ``resolve_existing_answer`` finds
+    the existing run — never a random id that would spawn a duplicate run (the deviated bug).
+    """
+    if thread_id is not None:
+        return conversation_id_of(thread_id)
+    return idempotent_conversation_id(
+        athlete_id=athlete_id,
+        trigger="user_turn",
+        request_text=request_text or "",
+        dedup_window_seconds=dedup_window_seconds,
+    )
+
+
+async def resolve_existing_answer(
+    saver: SqlAlchemyCheckpointSaver,
+    *,
+    athlete_id: str,
+    conversation_id: str,
+    follow_up_thread_id: str | None,
+) -> AgentAnswer | None:
+    """Return the EXISTING run's projected answer for a deduped FRESH turn, else ``None`` (CKPT-R4).
+
+    A FOLLOW-UP (``follow_up_thread_id`` set) is a NEW turn on an existing thread and is NEVER
+    deduped — it returns ``None`` so the caller runs the graph. A FRESH turn is keyed
+    deterministically to a durable thread (``idempotent_conversation_id``), so a re-submitted SAME
+    turn within the window lands on the SAME ``(athlete_id, conversation_id)``; this resolves that
+    thread and, if a checkpoint exists, projects its terminal state (``answer_from_state``) so the
+    re-submission RETURNS the existing run rather than a duplicate. Cross-identity ownership is
+    refused in ``resolve_idempotent`` (CKPT-R3).
+    """
+    if follow_up_thread_id is not None:
+        return None
+    thread_id = thread_id_for(athlete_id, conversation_id)
+    if await saver.resolve_idempotent(thread_id) is None:
+        return None
+    tuple_ = await saver.aget_tuple({"configurable": {"thread_id": thread_id}})
+    if tuple_ is None:
+        return None
+    return answer_from_state(cast(AgentState, tuple_.checkpoint.get("channel_values", {})))
 
 
 def wall_clock_degraded(state: AgentState) -> AgentState:
@@ -177,5 +233,7 @@ __all__ = [
     "RECURSION_LIMIT",
     "CompiledCoachGraph",
     "conversation_id_for",
+    "conversation_id_for_turn",
+    "resolve_existing_answer",
     "wall_clock_degraded",
 ]

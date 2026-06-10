@@ -24,6 +24,7 @@ from __future__ import annotations
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from wattwise_core.api.redaction import redact_text
 from wattwise_core.config import Settings, get_settings
 from wattwise_core.observability.logging import get_logger
 
@@ -82,8 +83,24 @@ class OpenAICompatibleModel:
         self._max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else cfg.agent__max_output_tokens
         )
+        # AGT-SEC-R4 "before being sent to any third-party model provider WHERE POLICY
+        # REQUIRES": a loaded policy flag (``agent__redact_provider_payloads``, CFG-R1a — no
+        # code-baked default) decides whether the outbound system + untrusted-data regions are
+        # masked through the central redactor before they reach the provider. When set, every
+        # provider call (``structured``/``compose``) masks its payload first; the flag carries
+        # through ``with_output_budget`` because that view shares the same ``settings``.
+        self._redact_send = cfg.agent__redact_provider_payloads
         self._settings = cfg
         self._client = client if client is not None else _build_client(cfg)
+
+    def _outbound(self, text: str) -> str:
+        """Mask the outbound provider payload when policy requires it (AGT-SEC-R4).
+
+        Returns ``text`` unchanged when the redaction policy is off; otherwise masks PII /
+        secret spans through the central redactor so no unmasked PII leaves the process for
+        the third-party provider. Idempotent (the central redactor re-masks to a fixed token).
+        """
+        return redact_text(text) if self._redact_send else text
 
     def with_output_budget(self, max_output_tokens: int) -> OpenAICompatibleModel:
         """A view of this model whose per-call output budget is ``max_output_tokens`` (AGT-ENT-R1).
@@ -122,8 +139,8 @@ class OpenAICompatibleModel:
             max_completion_tokens=self._max_output_tokens,
             response_format=schema,
             messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": data},
+                {"role": "system", "content": self._outbound(system)},
+                {"role": "user", "content": self._outbound(data)},
             ],
         )
         message = completion.choices[0].message
@@ -153,8 +170,8 @@ class OpenAICompatibleModel:
             temperature=self._compose_temperature,
             max_completion_tokens=bound,
             messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": context},
+                {"role": "system", "content": self._outbound(system)},
+                {"role": "user", "content": self._outbound(context)},
             ],
         )
         return completion.choices[0].message.content or ""
