@@ -36,15 +36,25 @@ ww_run_secret_scan() {
   local scan_path="$1" report="$2" rc
   case "${scanner}" in
     gitleaks)
-      # `detect` over the tree (no-git so untracked files are also covered). Exit 1 = leaks found.
+      # `detect --no-git` over a COMMIT-SHAPED view of the tree: tracked + unignored-new files
+      # only (`git ls-files -co --exclude-standard`), mirrored into a temp dir. This matches what
+      # CI scans (a clean checkout) and what SEC-R12 protects (content that can reach a commit) —
+      # gitignored operator files (.env.local etc.) hold local-only credentials BY DESIGN and are
+      # not committable, so they are out of scope here. The self-test temp dir is scanned as-is.
       # Apply the committed allowlist config only when scanning the real tree, NOT the self-test
       # temp dir — the self-test MUST see the canary unfiltered to prove the scanner fires.
       local cfg_args=()
-      if [ "${scan_path}" = "${WW_REPO_ROOT}" ] && [ -f "${WW_GITLEAKS_CONFIG}" ]; then
-        cfg_args=(--config "${WW_GITLEAKS_CONFIG}")
+      local effective_path="${scan_path}"
+      if [ "${scan_path}" = "${WW_REPO_ROOT}" ]; then
+        [ -f "${WW_GITLEAKS_CONFIG}" ] && cfg_args=(--config "${WW_GITLEAKS_CONFIG}")
+        local mirror
+        mirror="$(mktemp -d "${TMPDIR:-/tmp}/ww-secret-mirror.XXXXXX")"
+        (cd "${WW_REPO_ROOT}" && git ls-files -coz --exclude-standard \
+          | xargs -0 -I{} --no-run-if-empty install -D -m 0600 "{}" "${mirror}/{}")
+        effective_path="${mirror}"
       fi
       gitleaks detect \
-        --source "${scan_path}" \
+        --source "${effective_path}" \
         "${cfg_args[@]}" \
         --no-git \
         --redact \
@@ -52,6 +62,7 @@ ww_run_secret_scan() {
         --report-path "${report}" \
         --exit-code 1 >/dev/null 2>&1
       rc=$?
+      [ "${scan_path}" = "${WW_REPO_ROOT}" ] && rm -rf "${effective_path}"
       ;;
     trufflehog)
       # filesystem mode; --fail makes a verified/likely finding exit non-zero.
