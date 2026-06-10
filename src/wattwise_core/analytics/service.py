@@ -30,12 +30,12 @@ from wattwise_core.analytics import np_if_tss as _np
 from wattwise_core.analytics import pmc as _pmc
 from wattwise_core.analytics import trimp as _trimp
 from wattwise_core.analytics import wbal as _wbal
+from wattwise_core.analytics._service_es import _gather_endurance_score
 from wattwise_core.analytics._service_loaders import (
     _activities_in_local_range,
     _activity_local_date,
     _f,
     _fold_curve_point,
-    _gather_endurance_score,
     _load_activity_channels,
     _load_athlete,
     _load_athlete_or_fail,
