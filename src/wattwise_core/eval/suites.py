@@ -119,7 +119,14 @@ class _ScriptedGrounder:
     def __init__(self, decision: GroundDecision) -> None:
         self._decision = decision
 
-    async def ground(self, *, athlete_id: str, draft: str, retrieved: Any) -> GroundingResult:
+    async def ground(
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Any,
+        request_text: str | None = None,
+    ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="1", value=1.0, metric="ctl")
         survivor = GroundedClaim(claim=claim, verdict=GroundVerdict.GROUNDED, citation={"m": "ctl"})
         return GroundingResult(decision=self._decision, claims=(survivor,), scrubbed_text=draft)

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from wattwise_core.agent.contracts import Claim, GroundingEvidence
+from wattwise_core.agent.grounding_sweep import numeric_phrase_span
 
 # Default numeric tolerance for matching a claimed metric value against the canonical
 # analytic (GROUND-R7). A claimed number within this band of the canonical value is treated
@@ -252,8 +253,15 @@ def _apply_number_scrub(
         return text, list(covered)
     start, end = span
     if replacement == "":
+        # Removal takes the WHOLE containing numeric phrase (the full "5-7" range plus any
+        # orphan leading dash / trailing empty unit), so a claim-level scrub never leaves a
+        # dangling range dash or a bare unit in the prose (VOICE-R2 clean copy). A covered
+        # range the widened span swallows is dropped (its characters are gone), keeping the
+        # positional coverage consistent — losing coverage only ever sweeps MORE (fail-closed).
+        start, end = numeric_phrase_span(text, start, end)
+        kept = [r for r in covered if not (r[0] < end and start < r[1])]
         edited, delta = remove_span_clean(text, start, end)
-        return edited, shift_ranges_after(covered, end, delta)
+        return edited, shift_ranges_after(kept, end, delta)
     edited = text[:start] + replacement + text[end:]
     updated = shift_ranges_after(covered, end, len(replacement) - (end - start))
     updated.append((start, start + len(replacement)))

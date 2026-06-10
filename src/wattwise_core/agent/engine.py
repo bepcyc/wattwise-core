@@ -12,7 +12,7 @@ and approval pauses resumable (CKPT-R5/-R9).
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
@@ -37,6 +37,7 @@ from wattwise_core.agent.deliverables import (
     conversation_id_of,
     weekly_digest,
 )
+from wattwise_core.agent.engine_entitlement import effective_entitlement, sized_model
 from wattwise_core.agent.engine_extras import DeliverableEngineMixin
 from wattwise_core.agent.engine_graph import (
     NODE_VISIT_CEILING,
@@ -54,16 +55,15 @@ from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (hi
     DeterministicCoverage,
     ModelPlanner,
     RegistryGateway,
-    _ClaimSchema,
-    _ExtractedClaim,
     _PlanSchema,
     build_services,
 )
 from wattwise_core.agent.goals import active_goals_for
 from wattwise_core.agent.graph import DEFAULT_MAX_TOOL_ITERATIONS, build_graph
+from wattwise_core.agent.grounding_evidence import _ClaimSchema, _ExtractedClaim  # noqa: F401
 from wattwise_core.agent.plan_deliverable import _project_plan, safe_plan_html
 from wattwise_core.agent.plan_deliverable import plan as _plan
-from wattwise_core.agent.plan_regrounding import accept_edit
+from wattwise_core.agent.plan_regrounding import accept_edit, run_request_text
 from wattwise_core.agent.seams import EntitlementCostGate
 from wattwise_core.agent.state_db import (
     AgentStateDatabase,
@@ -173,31 +173,12 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         )
 
     def _effective_entitlement(self, entitlement: Entitlements | None) -> Entitlements:
-        """The entitlement that governs THIS run: the per-request one if supplied, else the default.
-
-        MED-2 resolve -> attach -> check: the API attaches the per-request resolved entitlement
-        (``request.state.entitlement``) and threads it into the deliverable methods; when present it
-        is the authority for this run (bounds + flags). When ``None`` (a direct OSS/test caller) the
-        engine's config-resolved default (``self._entitlement``) governs — identical in OSS (single
-        owner, all-permissive), but the seam is now REAL end to end so the commercial layer can vary
-        the plan per request WITHOUT touching the engine or the graph.
-        """
-        return entitlement if entitlement is not None else self._entitlement
+        """The entitlement governing THIS run (MED-2); see :mod:`engine_entitlement`."""
+        return effective_entitlement(self._entitlement, entitlement)
 
     def _sized_model(self, entitlement: Entitlements) -> ChatModel:
-        """The model whose per-call output budget is the entitlement's token bound (AGT-ENT-R1).
-
-        When the model supports re-sizing (``with_output_budget``, the OSS
-        :class:`OpenAICompatibleModel`) and the carried entitlement names a positive
-        ``max_output_tokens``, return a view sized to that bound so the model reads its output
-        budget FROM the resolved entitlement for this run; otherwise the model is used as-is (a
-        FakeModel / a bare grant with no token bound keeps its construction-time budget).
-        """
-        budget = entitlement.max_output_tokens
-        resize = getattr(self._model, "with_output_budget", None)
-        if resize is not None and isinstance(budget, int) and budget > 0:
-            return cast(ChatModel, resize(budget))
-        return self._model
+        """The model sized to the entitlement's bound (AGT-ENT-R1; :mod:`engine_entitlement`)."""
+        return sized_model(self._model, entitlement)
 
     def _graph(
         self,
@@ -237,6 +218,10 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             # is in the prompt the model actually receives (INJECT-R2), not merely loaded.
             coach_system=self._coach.compose_system,
             reflect_system=self._coach.reflect_system,
+            # VOICE-R7/-R8: the loaded detailed-length steering fragment, layered only when
+            # the run asked for a detailed answer (a detailed deep-dive should surface up to
+            # the cap of grounded numbers, never zero).
+            detailed_compose_directive=self._coach.detailed_compose_directive,
             node_visit_ceiling=NODE_VISIT_CEILING,
             max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
         )
@@ -409,7 +394,12 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             edit_rejected = False
             if decision == "edit":
                 accepted_edit = await accept_edit(
-                    self._coach, self._model, svc, athlete_id, edited_plan or ""
+                    self._coach,
+                    self._model,
+                    svc,
+                    athlete_id,
+                    edited_plan or "",
+                    request_text=await run_request_text(saver, thread_id),
                 )
                 edit_rejected = accepted_edit is None
             resume: dict[str, Any] = {

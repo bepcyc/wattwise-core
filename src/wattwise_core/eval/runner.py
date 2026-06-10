@@ -38,8 +38,8 @@ from wattwise_core.agent.contracts import (
     GroundDecision,
     GroundVerdict,
 )
-from wattwise_core.agent.engine_services import _ClaimSchema
 from wattwise_core.agent.grounding import ground
+from wattwise_core.agent.grounding_evidence import _ClaimSchema
 from wattwise_core.agent.model import FakeModel
 from wattwise_core.eval import budget as budget_mod
 from wattwise_core.eval import engine_suites, injection

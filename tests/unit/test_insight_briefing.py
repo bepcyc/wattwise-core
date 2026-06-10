@@ -131,7 +131,14 @@ async def test_insight_carries_thread_id_and_stable_observations() -> None:
 class _ScriptedReadinessGrounder:
     """A readiness grounder double replaying one grounded form survivor (GROUND-R5/R7)."""
 
-    async def ground(self, *, athlete_id: str, draft: str, retrieved: Any) -> GroundingResult:
+    async def ground(
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Any,
+        request_text: str | None = None,
+    ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="form 4.0", metric="form", value=4.0)
         survivor = GroundedClaim(
             claim=claim,

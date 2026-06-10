@@ -42,19 +42,22 @@ from wattwise_core.agent.contracts import (
 )
 
 # The numeric-match primitives (the tolerance band, the fail-closed canonical-value read, the
-# GROUND-R5 citation and the GROUND-R7 canonical-display rewrite) live in the focused
-# :mod:`grounding_match` sibling (QUAL-R9 size split); ``NumericTolerance`` is re-exported here
+# GROUND-R5 citation, the POSITIONAL GROUND-R7 canonical-display rewrite) live in the focused
+# :mod:`grounding_match` sibling and the per-claim NUMBER verifier (canonical match + user-request
+# echo) in :mod:`grounding_numeric` (QUAL-R9 size split); ``NumericTolerance`` is re-exported here
 # so every historical ``from wattwise_core.agent.grounding import NumericTolerance`` path stays.
 from wattwise_core.agent.grounding_match import (
     _DEFAULT_TOLERANCE,
     NumericTolerance,
     _apply_number_scrub,
-    _canonical_metric,
-    _metric_citation,
-    _render_value,
-    _within_tolerance,
     remove_span_clean,
     shift_ranges_after,
+)
+from wattwise_core.agent.grounding_numeric import (
+    _Outcome,
+    _parse_request_values,
+    _scrubbed,
+    _verify_number,
 )
 from wattwise_core.agent.grounding_sweep import (
     NUMBER_RE,
@@ -95,6 +98,7 @@ def ground(
     allow_urls: Iterable[str],
     *,
     tolerance: NumericTolerance = _DEFAULT_TOLERANCE,
+    request_numbers: frozenset[str] = frozenset(),
 ) -> GroundingResult:
     """Verify every claim against canonical evidence and scrub the draft (GROUND-R1/R3/R9).
 
@@ -112,14 +116,25 @@ def ground(
     values from the metric snapshot the caller resolved (see :func:`_verify_number`); it
     does not itself call a model or a live service, so the same inputs always yield the
     same result (GRAPH-R4).
+
+    ``request_numbers`` are the numeric tokens the ATHLETE supplied in their own request text. A
+    number the user supplied is not a canonical-data claim — it is the user's own constraint (e.g.
+    "5-7 hours a week" on a plan request) — so an ECHO of it is sayable: it verifies as a
+    user-request echo (cited ``user_request``) instead of failing closed against canonical
+    analytics, and the numeric sweep treats it as covered. Canonical verification still wins
+    whenever the claim's metric resolves to an available canonical value (a real metric claim is
+    never excused by a coincidental request echo).
     """
     allow_list = normalize_urls(allow_urls)
     name_library = evidence if isinstance(evidence, NameLibrary) else None
+    request_values = _parse_request_values(request_numbers)
     grounded: list[GroundedClaim] = []
     text = draft_text
     covered: list[tuple[int, int]] = []
     for claim in claims:
-        outcome = _verify_claim(claim, evidence, name_library, allow_list, tolerance)
+        outcome = _verify_claim(
+            claim, evidence, name_library, allow_list, tolerance, request_values
+        )
         grounded.append(outcome.grounded)
         if outcome.scrub_text is None:
             continue
@@ -169,68 +184,22 @@ def _downgrade_for_sweep(
     return GroundDecision.REPLAN
 
 
-class _Outcome:
-    """Internal per-claim result: the typed verdict + how to edit the draft.
-
-    ``scrub_text`` is ``None`` to leave the span untouched (a grounded survivor), an
-    empty string to remove the span (fail-closed scrub, GROUND-R3), or a replacement
-    string to substitute a canonical value/library item (GROUND-R7/R3).
-    """
-
-    __slots__ = ("grounded", "scrub_text")
-
-    def __init__(self, grounded: GroundedClaim, scrub_text: str | None) -> None:
-        self.grounded = grounded
-        self.scrub_text = scrub_text
-
-
 def _verify_claim(
     claim: Claim,
     evidence: GroundingEvidence,
     name_library: NameLibrary | None,
     allow_list: frozenset[str],
     tolerance: NumericTolerance,
+    request_values: frozenset[float] = frozenset(),
 ) -> _Outcome:
     """Dispatch one claim to its kind-specific verifier (GROUND-R2)."""
     if claim.kind is ClaimKind.NUMBER:
-        return _verify_number(claim, evidence, tolerance)
+        return _verify_number(claim, evidence, tolerance, request_values)
     if claim.kind is ClaimKind.NAME:
         return _verify_name(claim, name_library)
     if claim.kind is ClaimKind.URL:
         return _verify_url(claim, evidence, allow_list)
     return _verify_statement(claim)
-
-
-def _verify_number(
-    claim: Claim, evidence: GroundingEvidence, tolerance: NumericTolerance
-) -> _Outcome:
-    """Match a claimed number against the canonical analytic within tolerance (GROUND-R7).
-
-    A claim with no metric/value cannot be checked, so it fails closed (scrubbed). When
-    the canonical computation is unavailable the number is scrubbed entirely — never a
-    placeholder or zero (GROUND-R7).
-
-    Tolerance only decides whether a claim is RECOGNIZED as a (rounded/restated) reference to
-    the canonical number — it NEVER lets the model's own figure ship. A claimed value within
-    tolerance is ``grounded``, but the published span is ALWAYS rewritten to the canonical value
-    rounded to display precision (so canonical ctl=100 with a within-band claim of "102" ships
-    "100", never "102" — GROUND-R7 verbatim). A value outside tolerance is ``contradicted`` and
-    likewise replaced by the canonical value, and NEVER published as stated. Either way the
-    number the athlete sees is the canonical analytic, not the model's approximation.
-    """
-    if claim.metric is None or claim.value is None:
-        return _scrubbed(claim, GroundVerdict.UNGROUNDED)
-    canonical = _canonical_metric(evidence, claim.metric, claim.ref)
-    if canonical is None:
-        return _scrubbed(claim, GroundVerdict.UNGROUNDED)
-    # The PUBLISHED figure is ALWAYS the canonical value rounded to display precision — never the
-    # model's own number (GROUND-R7). ``scrub_text`` carries that bare canonical display token; the
-    # caller (:func:`_apply_number_scrub`) writes it over the model's numeric token in the draft.
-    canonical_display = _render_value(canonical, tolerance.display_decimals)
-    if _within_tolerance(claim.value, canonical, tolerance):
-        citation = _metric_citation(claim, canonical)
-        return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), canonical_display)
-    return _Outcome(GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), canonical_display)
 
 
 def _verify_name(claim: Claim, name_library: NameLibrary | None) -> _Outcome:
@@ -290,11 +259,6 @@ def _carries_checkable_token(text: str) -> bool:
     verified by its kind-specific verifier, never published on a statement's free pass.
     """
     return bool(NUMBER_RE.search(text) or URL_RE.search(text))
-
-
-def _scrubbed(claim: Claim, verdict: GroundVerdict) -> _Outcome:
-    """Build a scrub outcome: the span is removed and no citation is attached (GROUND-R3)."""
-    return _Outcome(GroundedClaim(claim, verdict, None), "")
 
 
 def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
@@ -368,7 +332,7 @@ def _is_publishable(claim: GroundedClaim) -> bool:
 
 
 # --- span helpers (the URL/number sweep primitives live in ``grounding_sweep``;
-# --- the numeric-match primitives in ``grounding_match``) ---
+# --- the numeric primitives in ``grounding_numeric``) ---
 
 
 def _scrub_span(

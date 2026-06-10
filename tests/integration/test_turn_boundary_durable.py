@@ -178,7 +178,12 @@ class _RecordingGrounder:
         self.seen_keys: list[list[str]] = []
 
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
     ) -> GroundingResult:
         self.seen_keys.append(sorted(retrieved.keys()))
         claim = Claim(kind=ClaimKind.NUMBER, text="42", value=42.0)

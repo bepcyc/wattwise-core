@@ -14,10 +14,18 @@ Cited requirements: GROUND-R2, GROUND-R3, GROUND-R4, GROUND-R7, COACH-R2, QUAL-R
 
 from __future__ import annotations
 
+import datetime as _dt
 from collections.abc import Mapping, Sequence
+from typing import Any
 
-from wattwise_core.agent.capabilities import CanonicalEvidence
-from wattwise_core.agent.contracts import Claim, ClaimKind
+from pydantic import BaseModel, Field
+
+from wattwise_core.agent import grounding as _grounding
+from wattwise_core.agent import grounding_sweep as _sweep
+from wattwise_core.agent.capabilities import CanonicalEvidence, MetricEquivalence
+from wattwise_core.agent.contracts import ChatModel, Claim, ClaimKind, GroundingResult
+from wattwise_core.agent.structured import StructuredOutputError, run_structured
+from wattwise_core.analytics.service import AnalyticsService
 
 # The canonical training-prescription workout NAME library (GROUND-R2). A prescribed workout NAME
 # in a multi-day PLAN deliverable grounds ONLY if it normalizes to one of these canonical
@@ -124,8 +132,121 @@ async def _resolve_snapshots(
     return snapshots
 
 
+class _ExtractedClaim(BaseModel):
+    """One candidate claim the model points at (STRUCT-R5); code verifies it, not the model."""
+
+    model_config = {"extra": "forbid"}
+    kind: ClaimKind = ClaimKind.NUMBER
+    text: str = ""
+    metric: str | None = None
+    value: float | None = None
+    as_of: str | None = None
+
+
+class _ClaimSchema(BaseModel):
+    """The structured claim-extraction output (GROUND-R2/STRUCT-R5)."""
+
+    model_config = {"extra": "forbid"}
+    claims: list[_ExtractedClaim] = Field(default_factory=list)
+
+
+class ClaimGrounder:
+    """Model-extract + code-verify grounder over canonical evidence (GROUND-R1/R2/R7).
+
+    ``allow_names`` is the canonical workout-NAME library a NAME claim may ground against
+    (GROUND-R2): the free-form answer/digest grounder passes none (NAME claims fail closed, the
+    Phase-1 default), while a PLAN grounder passes :data:`CANONICAL_WORKOUT_NAMES` so a prescribed
+    workout name can ground rather than being auto-scrubbed (COACH-R2).
+
+    ``equivalence`` is the config-loaded metric-equivalence layer (§16): the canonical evidence
+    resolves a natural metric label a real model emits ("fitness", "Chronic Training Load (CTL)")
+    to its canonical key before reading the value (GROUND-R2). With none injected the evidence
+    degenerates to canonical-key-only resolution (the prior behaviour). ``reference_date`` anchors
+    the latest-available-date fallback for a claim that carries no as-of date.
+    """
+
+    def __init__(
+        self,
+        model: ChatModel,
+        svc: AnalyticsService,
+        *,
+        allow_names: frozenset[str] = frozenset(),
+        equivalence: MetricEquivalence | None = None,
+        reference_date: _dt.date | None = None,
+        tolerance: _grounding.NumericTolerance | None = None,
+        allowed_hosts: frozenset[str] | None = None,
+        lookback_days: int | None = None,
+        claim_system: str = "",
+    ) -> None:
+        self._model = model
+        self._svc = svc
+        self._allow_names = allow_names
+        self._equivalence = equivalence
+        self._reference_date = reference_date
+        # None -> the grounder's own default band (preserves the prior behaviour for any seam
+        # that injects no coach-config); the engine wires the config-loaded threshold in.
+        self._tolerance = tolerance if tolerance is not None else _grounding.NumericTolerance()
+        # Config-loaded GROUND-R4 URL allow-list + §16 dateless-claim lookback (CFG-R1a). None ->
+        # the canonical evidence's no-config fallbacks (empty host set, default lookback); the
+        # engine wires the loaded CoachBundle values in for EVERY grounder path (incl. edits).
+        self._allowed_hosts = allowed_hosts
+        self._lookback_days = lookback_days
+        # The loaded claim-extraction system prompt (§16 / SKILL-R1): the engine embeds NO prompt
+        # inline (CFG-R3 / ARCH-R29). Empty default preserves the prior FakeModel-suite behaviour
+        # (the suite scripts the extracted claims, so the prompt text is immaterial offline).
+        self._claim_system = claim_system
+
+    async def ground(
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
+    ) -> GroundingResult:
+        try:
+            extracted = await run_structured(
+                self._model, system=self._claim_system, data=draft, schema=_ClaimSchema
+            )
+            claims = [
+                Claim(kind=c.kind, text=c.text, metric=c.metric, value=c.value, ref=c.as_of)
+                for c in extracted.claims
+            ]
+        except (StructuredOutputError, NotImplementedError):
+            claims = []
+        evidence = CanonicalEvidence(
+            self._svc,
+            athlete_id,
+            equivalence=self._equivalence,
+            reference_date=self._reference_date,
+            allowed_hosts=self._allowed_hosts,
+            lookback_days=self._lookback_days,
+        )
+        snapshots = await _resolve_snapshots(evidence, claims)
+        snapshot_evidence = _SnapshotEvidence(evidence, snapshots, allow_names=self._allow_names)
+        # Numbers the ATHLETE supplied in their own request are sayable echoes (a plan's
+        # "5-7 hours a week" is the user's constraint, not a canonical-data claim): collect
+        # their tokens so the grounder/sweep can verify an echo instead of scrubbing it.
+        # Tokens are sign-stripped: in "5-7 hours" the dash is a RANGE separator, not a minus,
+        # so the echo set must carry "7", never "-7".
+        request_numbers = (
+            frozenset(tok.lstrip("-") for tok in _sweep.NUMBER_RE.findall(request_text))
+            if request_text
+            else frozenset()
+        )
+        return _grounding.ground(
+            draft,
+            claims,
+            snapshot_evidence,
+            allow_urls=(),
+            tolerance=self._tolerance,
+            request_numbers=request_numbers,
+        )
+
+
 __all__ = [
     "CANONICAL_WORKOUT_NAMES",
+    "ClaimGrounder",
     "_SnapshotEvidence",
     "_normalize_workout_name",
     "_resolve_snapshots",

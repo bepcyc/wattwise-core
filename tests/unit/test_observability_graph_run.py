@@ -77,7 +77,12 @@ class _Coverage:
 
 class _Grounder:
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
     ) -> GroundingResult:
         """Ground one claim (grounded) + one scrubbed (ungrounded) so scrub-count is exercised."""
         grounded = GroundedClaim(

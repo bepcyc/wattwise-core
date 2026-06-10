@@ -224,7 +224,13 @@ def _make_ground(svc: AgentServices) -> GraphNode:
         athlete_id = gs.athlete_id(state)
         draft = state.get("draft") or ""
         result = await svc.grounder.ground(
-            athlete_id=athlete_id, draft=draft, retrieved=gs.read_retrieved(state)
+            athlete_id=athlete_id,
+            draft=draft,
+            retrieved=gs.read_retrieved(state),
+            # The athlete's own request text: a number the USER supplied there is a sayable
+            # echo (the request's constraint, e.g. "5-7 hours a week"), never a canonical-data
+            # claim the grounder must fail closed on.
+            request_text=state.get("request_text"),
         )
         obs.record_grounding(result)
         citations = [gc.citation for gc in result.survivors if gc.citation is not None]
@@ -347,6 +353,7 @@ def _spine_nodes(
     model_routing: tiering.ModelRoutingPolicy,
     locales: LocalePolicy,
     context_token_budget: int | None,
+    detailed_compose_directive: str,
 ) -> dict[str, GraphNode]:
     """Construct every spine node implementation, keyed by node name (GRAPH-R2/R4)."""
     return {
@@ -357,7 +364,13 @@ def _spine_nodes(
         "reflect": make_reflect(model, reflect_system, model_routing),
         "redraft_tick": routing.make_redraft_tick(),
         "compose": make_compose(
-            svc, model, coach_system, model_routing, locales, context_token_budget
+            svc,
+            model,
+            coach_system,
+            model_routing,
+            locales,
+            context_token_budget,
+            detailed_compose_directive,
         ),
         "ground": _make_ground(svc),
         "interrupt_gate": _make_interrupt_gate(recorder),
@@ -377,6 +390,7 @@ def build_graph(
     model_routing: tiering.ModelRoutingPolicy | None = None,
     locales: LocalePolicy | None = None,
     context_token_budget: int | None = None,
+    detailed_compose_directive: str = "",
 ) -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
     """Assemble and compile the agent graph (GRAPH-R1/R2/R3/R5).
 
@@ -430,6 +444,7 @@ def build_graph(
         policy,
         packs,
         context_token_budget,
+        detailed_compose_directive,
     )
     for node_name, node_fn in nodes.items():
         builder.add_node(node_name, obs.traced(node_name, node_fn), input_schema=AgentState)

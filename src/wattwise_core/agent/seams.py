@@ -78,11 +78,18 @@ class Grounder(Protocol):
 
     Verifies each claimed number/name/URL against canonical evidence, scrubs the
     unmatched, and returns an aggregate :class:`GroundingResult` carrying the
-    bounded recovery :class:`GroundDecision`.
+    bounded recovery :class:`GroundDecision`. ``request_text`` is the athlete's own
+    request: a number the USER supplied there is a sayable echo (the request's own
+    constraint), never a canonical-data claim to fail closed on.
     """
 
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
     ) -> GroundingResult: ...
 
 

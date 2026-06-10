@@ -70,6 +70,7 @@ def make_compose(
     routing: tiering.ModelRoutingPolicy,
     locales: LocalePolicy,
     context_token_budget: int | None,
+    detailed_directive: str = "",
 ) -> GraphNode:
     """Build the compose node (DELIV-R*, MODEL-R1/-R2/-R3, LANG-R1/-R3/-R4)."""
 
@@ -105,6 +106,13 @@ def make_compose(
             token_budget=context_token_budget,
         )
         system = locales.compose_system(coach_system, state.get("locale"))
+        if detailed_directive and state.get("response_length") == "detailed":
+            # VOICE-R7/-R8 steering for a DETAILED run: the loaded config fragment telling the
+            # model to weave up to the detailed number cap of grounded figures into the prose
+            # (a detailed deep-dive with zero cited numbers is under-informative). Loaded
+            # content (CFG-R1a / ARCH-R29) — never an inline literal; grounding still decides
+            # truth downstream (§7).
+            system = f"{system}\n\n{detailed_directive}"
         draft = await node_model.compose(system=system, context=context)
         update: dict[str, Any] = {
             "draft": draft,

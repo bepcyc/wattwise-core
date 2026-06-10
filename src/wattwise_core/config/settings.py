@@ -327,6 +327,14 @@ class Settings(BaseSettings):
     # (LANG-R1). Shape-only here; resolution + the default-language fallback are owned by
     # ``LocalePolicy.from_config`` (the manifest's ``default_language`` is the LANG-R4 fallback).
     agent__coach__languages: dict[str, dict[str, str]]
+    # Generic any-language pass-through (accepted deviation from LANG-R1's packs-only reading,
+    # LANG-R4 fallback still recorded): when ON and a requested locale has no loaded pack, the
+    # compose prompt layers the templated directive (code interpolates {language_tag}/{locale})
+    # instead of the default pack's variant, so the coach answers in the requested language.
+    # Loaded packs stay authoritative; grounding/abstention are untouched. Schema only — the
+    # values live in defaults.toml (CFG-R1a).
+    agent__coach__language_passthrough: bool
+    agent__coach__language_passthrough_directive: str
     # Offline-eval cost/latency budgets (QA-EVAL-R8): the median cost-per-task and p95
     # latency the eval gate enforces, plus the price per 1k tokens used to cost a recorded
     # (network-free) run. Loaded content (CFG-R1a), never a gate hardcode; strictly positive.
