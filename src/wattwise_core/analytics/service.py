@@ -42,6 +42,7 @@ from wattwise_core.analytics._service_loaders import (
     _load_athlete_sex,
     _load_earliest_activity_date,
     _load_effective_signature,
+    _load_latest_activity_date,
     _load_threshold_history,
     _load_wellness_hrv_baseline,
     _load_wellness_hrv_summary,
@@ -348,6 +349,16 @@ class AnalyticsService:  # noqa: size-limits
         date — so the EWMA grid starts on the correct local day (PMC-R3/R5).
         """
         return await _load_earliest_activity_date(self._session, athlete_id)
+
+    async def latest_activity_date(self, athlete_id: str) -> _dt.date | None:
+        """The athlete-LOCAL date of the most recent activity, or ``None`` if none.
+
+        The record-freshness anchor for the readiness sufficiency check (GROUND-R6): the most
+        recent day real data was OBSERVED, which — unlike the latest PMC grid day (always filled to
+        today, PMC-R6) — exposes an unobserved tail left by a silently-withdrawn connector. Public
+        (unlike :meth:`_earliest_activity_date`) because the agent readiness gather reads it.
+        """
+        return await _load_latest_activity_date(self._session, athlete_id)
 
     async def pmc(
         self,
