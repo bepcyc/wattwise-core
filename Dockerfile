@@ -89,6 +89,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WATTWISE_API__HOST="0.0.0.0" \
     WATTWISE_API__PORT="8000"
 
+# Pull the base distro's security updates so fixed CVEs in base libs (e.g. gnutls) do not ship
+# (CONT-R1: the image gate admits no fixable Critical). Cache lists are removed in the same layer.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Drop privileges to a FIXED, non-root UID/GID (RUN-R2 / CONT-R1). No login shell, no home writes.
 # A static UID (10001) keeps file ownership reproducible and lets the platform map it predictably.
 RUN groupadd --system --gid 10001 wattwise \

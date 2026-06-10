@@ -26,6 +26,10 @@ on:
 env:
   UV_FROZEN: "1"
   PYTHON_VERSION: "3.13"
+  # Throwaway boot secrets for the service-booting jobs (see the GitHub workflow note):
+  # BOOT-R4 requires both keys before any engine entrypoint; CI boots disposable instances.
+  WATTWISE_ENCRYPTION_ROOT_KEY: "Y2ktb25seS10aHJvd2F3YXktcm9vdC1rZXktMzJieXQ="
+  WATTWISE_TOKEN_SIGNING_KEY: "ci-only-throwaway-signing-key-with-enough-entropy-0123456789abcdef"
 
 jobs:
   # ----------------------------------------------------------------- FAST STAGE

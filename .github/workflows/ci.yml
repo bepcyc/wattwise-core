@@ -35,6 +35,12 @@ env:
   # uv installs from the frozen lockfile (CI-R5/RUN-R3.2); pin the runtime to 3.13.
   UV_FROZEN: "1"
   PYTHON_VERSION: "3.13"
+  # Throwaway boot secrets for the service-booting jobs (migrate/bootstrap/integration/E2E).
+  # BOOT-R4 fail-closed validation requires both keys before any engine entrypoint runs; CI
+  # boots a disposable instance per run, so fixed CI-only values are correct here — they are
+  # NOT production secrets and protect nothing beyond the runner's own ephemeral database.
+  WATTWISE_ENCRYPTION_ROOT_KEY: "Y2ktb25seS10aHJvd2F3YXktcm9vdC1rZXktMzJieXQ="
+  WATTWISE_TOKEN_SIGNING_KEY: "ci-only-throwaway-signing-key-with-enough-entropy-0123456789abcdef"
 
 jobs:
   # ----------------------------------------------------------------- FAST STAGE
