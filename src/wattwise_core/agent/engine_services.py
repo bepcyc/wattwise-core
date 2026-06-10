@@ -29,22 +29,11 @@ from pydantic import BaseModel, Field
 from wattwise_core.agent import grounding as _grounding
 from wattwise_core.agent.capabilities import (
     CAPABILITY_BY_KEY,
-    CanonicalEvidence,
     MetricEquivalence,
     gather,
 )
-from wattwise_core.agent.contracts import (
-    ChatModel,
-    Claim,
-    ClaimKind,
-    GroundingResult,
-    RetrievalRequest,
-)
-from wattwise_core.agent.grounding_evidence import (
-    CANONICAL_WORKOUT_NAMES,
-    _resolve_snapshots,
-    _SnapshotEvidence,
-)
+from wattwise_core.agent.contracts import ChatModel, RetrievalRequest
+from wattwise_core.agent.grounding_evidence import CANONICAL_WORKOUT_NAMES, ClaimGrounder
 from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.seams import AgentServices
 from wattwise_core.agent.skills import CoachManifest, load_manifest
@@ -86,24 +75,6 @@ class _PlanSchema(BaseModel):
     model_config = {"extra": "forbid"}
     capabilities: list[PlanCapability] = Field(default_factory=list)
     window_days: int = Field(default=_DEFAULT_WINDOW_DAYS, ge=1, le=365)
-
-
-class _ExtractedClaim(BaseModel):
-    """One candidate claim the model points at (STRUCT-R5); code verifies it, not the model."""
-
-    model_config = {"extra": "forbid"}
-    kind: ClaimKind = ClaimKind.NUMBER
-    text: str = ""
-    metric: str | None = None
-    value: float | None = None
-    as_of: str | None = None
-
-
-class _ClaimSchema(BaseModel):
-    """The structured claim-extraction output (GROUND-R2/STRUCT-R5)."""
-
-    model_config = {"extra": "forbid"}
-    claims: list[_ExtractedClaim] = Field(default_factory=list)
 
 
 class ModelPlanner:
@@ -192,80 +163,6 @@ class DeterministicCoverage:
         return set() if retrieved else {"no_canonical_evidence"}
 
 
-class ClaimGrounder:
-    """Model-extract + code-verify grounder over canonical evidence (GROUND-R1/R2/R7).
-
-    ``allow_names`` is the canonical workout-NAME library a NAME claim may ground against
-    (GROUND-R2): the free-form answer/digest grounder passes none (NAME claims fail closed, the
-    Phase-1 default), while a PLAN grounder passes :data:`CANONICAL_WORKOUT_NAMES` so a prescribed
-    workout name can ground rather than being auto-scrubbed (COACH-R2).
-
-    ``equivalence`` is the config-loaded metric-equivalence layer (§16): the canonical evidence
-    resolves a natural metric label a real model emits ("fitness", "Chronic Training Load (CTL)")
-    to its canonical key before reading the value (GROUND-R2). With none injected the evidence
-    degenerates to canonical-key-only resolution (the prior behaviour). ``reference_date`` anchors
-    the latest-available-date fallback for a claim that carries no as-of date.
-    """
-
-    def __init__(
-        self,
-        model: ChatModel,
-        svc: AnalyticsService,
-        *,
-        allow_names: frozenset[str] = frozenset(),
-        equivalence: MetricEquivalence | None = None,
-        reference_date: _dt.date | None = None,
-        tolerance: _grounding.NumericTolerance | None = None,
-        allowed_hosts: frozenset[str] | None = None,
-        lookback_days: int | None = None,
-        claim_system: str = "",
-    ) -> None:
-        self._model = model
-        self._svc = svc
-        self._allow_names = allow_names
-        self._equivalence = equivalence
-        self._reference_date = reference_date
-        # None -> the grounder's own default band (preserves the prior behaviour for any seam
-        # that injects no coach-config); the engine wires the config-loaded threshold in.
-        self._tolerance = tolerance if tolerance is not None else _grounding.NumericTolerance()
-        # Config-loaded GROUND-R4 URL allow-list + §16 dateless-claim lookback (CFG-R1a). None ->
-        # the canonical evidence's no-config fallbacks (empty host set, default lookback); the
-        # engine wires the loaded CoachBundle values in for EVERY grounder path (incl. edits).
-        self._allowed_hosts = allowed_hosts
-        self._lookback_days = lookback_days
-        # The loaded claim-extraction system prompt (§16 / SKILL-R1): the engine embeds NO prompt
-        # inline (CFG-R3 / ARCH-R29). Empty default preserves the prior FakeModel-suite behaviour
-        # (the suite scripts the extracted claims, so the prompt text is immaterial offline).
-        self._claim_system = claim_system
-
-    async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
-    ) -> GroundingResult:
-        try:
-            extracted = await run_structured(
-                self._model, system=self._claim_system, data=draft, schema=_ClaimSchema
-            )
-            claims = [
-                Claim(kind=c.kind, text=c.text, metric=c.metric, value=c.value, ref=c.as_of)
-                for c in extracted.claims
-            ]
-        except (StructuredOutputError, NotImplementedError):
-            claims = []
-        evidence = CanonicalEvidence(
-            self._svc,
-            athlete_id,
-            equivalence=self._equivalence,
-            reference_date=self._reference_date,
-            allowed_hosts=self._allowed_hosts,
-            lookback_days=self._lookback_days,
-        )
-        snapshots = await _resolve_snapshots(evidence, claims)
-        snapshot_evidence = _SnapshotEvidence(evidence, snapshots, allow_names=self._allow_names)
-        return _grounding.ground(
-            draft, claims, snapshot_evidence, allow_urls=(), tolerance=self._tolerance
-        )
-
-
 class CoachBundle:
     """The loaded OSS coach-config: ALL prompts + skills + equivalence + tolerance (§16/SKILL-R*).
 
@@ -284,9 +181,9 @@ class CoachBundle:
     """
 
     __slots__ = (
-        "allowed_hosts", "claim_system", "equivalence", "locales", "lookback_days",
-        "manifest", "plan_system", "presentation", "readiness_system", "reflect_system",
-        "shared_preamble", "system_prompt", "tolerance",
+        "allowed_hosts", "claim_system", "detailed_compose_directive", "equivalence", "locales",
+        "lookback_days", "manifest", "plan_system", "presentation", "readiness_system",
+        "reflect_system", "shared_preamble", "system_prompt", "tolerance",
     )
 
     def __init__(
@@ -305,6 +202,7 @@ class CoachBundle:
         shared_preamble: str = "",
         manifest: CoachManifest | None = None,
         locales: LocalePolicy | None = None,
+        detailed_compose_directive: str = "",
     ) -> None:
         self.system_prompt = system_prompt
         self.equivalence = equivalence if equivalence is not None else MetricEquivalence({})
@@ -339,6 +237,12 @@ class CoachBundle:
         # copy resolve through this. The empty default (no packs) preserves the prior
         # English-prompt behaviour for any seam that injects no coach-config.
         self.locales = locales if locales is not None else LocalePolicy()
+        # The DETAILED-length compose steering fragment (VOICE-R7/-R8): layered after the
+        # localized system prompt ONLY when the run asked for a detailed answer, steering the
+        # model to weave up to the detailed number cap of grounded figures into the prose
+        # (a detailed deep-dive with zero cited numbers is under-informative). Loaded content
+        # (CFG-R1a); the empty default keeps the prior compose behaviour for no-bundle seams.
+        self.detailed_compose_directive = detailed_compose_directive
 
     @property
     def compose_system(self) -> str:
@@ -399,7 +303,15 @@ class CoachBundle:
             locales=LocalePolicy.from_config(
                 settings.agent__coach__languages,
                 settings.agent__coach__manifest["default_language"],
+                # The config-gated generic any-language pass-through (accepted deviation from
+                # LANG-R1 packs-only; LANG-R4 fallback still recorded): template + gate are
+                # loaded content (CFG-R1a), code only interpolates the language tag/locale.
+                passthrough_enabled=settings.agent__coach__language_passthrough,
+                passthrough_directive=settings.agent__coach__language_passthrough_directive,
             ),
+            detailed_compose_directive=settings.agent__coach__prompts[
+                "detailed_compose_directive"
+            ],
         )
 
     def services(

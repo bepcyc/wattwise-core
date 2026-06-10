@@ -231,6 +231,20 @@ system verifies every number against the canonical data and quietly removes anyt
 confirm, so describing the athlete's real state in plain coach language is exactly what reaches \
 them — a metrics dump is not."""
 
+# Generic any-language pass-through (LANG-R4 observability kept; accepted deviation from
+# LANG-R1's packs-only reading): when a requested locale has NO loaded pack below, the engine
+# composes with the default pack's POLICY but layers this templated directive instead — telling
+# the model to ANSWER IN THE REQUESTED LANGUAGE. The template is loaded content (CFG-R1a/CFG-R3);
+# code only interpolates the requested tag/locale into the {language_tag}/{locale} placeholders.
+# The fallback is still RECORDED (log + metric) and loaded packs stay authoritative when present;
+# grounding/abstention copy are untouched (the limitation stays the default pack's). Gate it off
+# to restore the strict packs-only LANG-R1 behaviour.
+language_passthrough = true
+language_passthrough_directive = """Answer entirely in the language whose IETF language tag is \
+'{language_tag}' (the athlete requested the locale '{locale}'). Every sentence of your answer — \
+including caveats and any note about missing data — must be written in that language. Never \
+switch to another language mid-answer."""
+
 # The per-language surface packs (LANG-R1/-R3/-R4): the SUPPORTED language set IS the keys of
 # this table (EN/DE/RU out of the box), and ADDING a language is editing THIS config — never an
 # engine code change (LANG-R1). Each pack carries the localized prompt VARIANT layered into the
@@ -287,6 +301,12 @@ claim_system = "Extract every factual numeric claim in the draft as a candidate 
 # The reflection system prompt (REFLECT-R2 / STRUCT-R1): moved VERBATIM from the former inline
 # ``_REFLECT_SYSTEM``. Constrains the model to the closed reflect verdict set; code routes on it.
 reflect_system = "You are the coaching agent's reflection step. Given the open coverage gaps and what has already been retrieved, decide the next move over the CLOSED verdict set {replan, answer_with_caveat, give_up_gracefully}. Choose replan only when adding or widening capability requests could close a gap; answer_with_caveat when a useful grounded answer is possible despite a gap; give_up_gracefully when nothing more can be retrieved. For replan, list the capability keys to add/widen."
+# The DETAILED-length compose steering fragment (VOICE-R7/-R8): layered after the localized
+# system prompt ONLY when the athlete asked for a detailed answer. A detailed deep-dive that
+# names ZERO grounded figures is under-informative, so this steers the model to weave up to the
+# VOICE-R7 detailed cap (four) of the canonical numbers it was given into the prose — each copied
+# exactly, with its date when recorded. Grounding still decides truth (§7); this only steers.
+detailed_compose_directive = "The athlete asked for a DETAILED answer: weave the few canonical numbers that matter most — up to four — into your prose, each copied exactly from the data with its date when the data records one. A detailed answer that names no concrete figure from the data is under-informative; keep it flowing coach prose, never a list or metrics dump."
 # The readiness narration system prompt (QA-EVAL-R2.4 / STRUCT-R1): moved VERBATIM from the former
 # inline ``_READINESS_SYSTEM``. Steers the structured readiness narration; the verdict is the
 # deterministic oracle's (canonical wins), the model only narrates it.
@@ -392,6 +412,20 @@ cost_per_1k_tokens_usd = 0.0002
 "hrv" = "hrv_rmssd_ms"
 "rmssd" = "hrv_rmssd_ms"
 "heart rate variability" = "hrv_rmssd_ms"
+# Maintenance AGGREGATE load targets (§16 aggregates): natural week/month phrasings a model
+# uses for a maintenance plan's load target, resolved to the deterministic CTL-derived
+# aggregate metrics (weekly = 7xCTL, 4-week = 28xCTL) so a month-horizon plan grounds its
+# targets against canonical PMC instead of scrubbing them.
+"weekly load" = "weekly_load_target"
+"weekly load target" = "weekly_load_target"
+"weekly training load" = "weekly_load_target"
+"monthly load" = "monthly_load_target"
+"monthly load target" = "monthly_load_target"
+"monthly training load" = "monthly_load_target"
+"monthly aggregate load" = "monthly_load_target"
+"4-week load" = "monthly_load_target"
+"four-week load" = "monthly_load_target"
+"28-day load" = "monthly_load_target"
 
 [retention]
 # 0 = retain indefinitely; >0 = per-athlete retention window in days (PRIV-R*).

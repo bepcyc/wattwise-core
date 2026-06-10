@@ -278,7 +278,14 @@ class _NoCoverage:
 class _UnreachedGrounder:
     """A grounder that must never run in a gather-only (interrupted) graph run."""
 
-    async def ground(self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]) -> Any:
+    async def ground(
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
+    ) -> Any:
         raise AssertionError("ground must not run in a gather-only run")
 
 

@@ -352,6 +352,15 @@ def _scalar_of(metric: MetricName, value: object) -> float | None:
     return float(getattr(value, attr))
 
 
+# Days each maintenance AGGREGATE load-target metric multiplies the canonical CTL by (§16
+# aggregates): steady-state maintenance load = CTL per day, so 7 days for the weekly target and
+# 28 days for the 4-week ("monthly") target. A closed, code-owned derivation table — the metric
+# vocabulary is the closed MetricName enum, never a free string.
+_AGGREGATE_TARGET_DAYS: Mapping[MetricName, float] = {
+    MetricName.WEEKLY_LOAD_TARGET: 7.0,
+    MetricName.MONTHLY_LOAD_TARGET: 28.0,
+}
+
 # Conservative fallback window (days back from the reference date) the latest-available-date
 # scan uses when a caller injects NO config-loaded lookback (the prior exact-key/no-config
 # behaviour). Production wires the §16 ``[agent.coach].latest_lookback_days`` (CFG-R1a) in via
@@ -417,9 +426,27 @@ class CanonicalEvidence:
         name = MetricName(canonical)
         if name in (MetricName.CTL, MetricName.ATL, MetricName.TSB, MetricName.FORM):
             return await self._pmc_scalar(name, resolved)
+        if name in _AGGREGATE_TARGET_DAYS:
+            return await self._aggregate_load_target(name, resolved)
         if name in (MetricName.CRITICAL_POWER_W, MetricName.W_PRIME_J):
             return await self._cp_scalar(name, resolved)
         return await self._hrv_scalar(name, resolved)
+
+    async def _aggregate_load_target(self, name: MetricName, as_of: _AsOf) -> float | None:
+        """A week/4-week maintenance load target derived from canonical PMC CTL (§16 aggregates).
+
+        Deterministic CODE over the canonical analytic, never a model number: holding CTL steady
+        needs an average daily load equal to CTL, so the weekly target is 7xCTL and the 4-week
+        ("monthly") target 28xCTL. This is what lets a month-horizon maintenance PLAN ground its
+        aggregate load targets instead of scrubbing them (the live month-plan DEGRADED defect).
+        An unavailable CTL stays ``None`` — the claim is scrubbed, never a placeholder
+        (GROUND-R7 fail-closed; the derivation itself is an accepted deviation from GROUND-R7's
+        strict verbatim reading, per the §16 aggregate-verification mandate).
+        """
+        ctl = await self._pmc_scalar(MetricName.CTL, as_of)
+        if ctl is None:
+            return None
+        return ctl * _AGGREGATE_TARGET_DAYS[name]
 
     async def _pmc_scalar(self, name: MetricName, as_of: _AsOf) -> float | None:
         # FORM is the athlete-facing alias of TSB: both read the canonical PmcDay.tsb field.

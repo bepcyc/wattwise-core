@@ -28,11 +28,9 @@ draft.
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from wattwise_core.agent.contracts import (
     Claim,
@@ -43,6 +41,15 @@ from wattwise_core.agent.contracts import (
     GroundingResult,
     GroundVerdict,
 )
+from wattwise_core.agent.grounding_numeric import (
+    _DEFAULT_TOLERANCE,
+    NumericTolerance,
+    _apply_number_scrub,
+    _Outcome,
+    _parse_request_values,
+    _scrubbed,
+    _verify_number,
+)
 from wattwise_core.agent.grounding_sweep import (
     NUMBER_RE,
     URL_RE,
@@ -51,46 +58,6 @@ from wattwise_core.agent.grounding_sweep import (
     scrub_uncovered_numbers,
     scrub_unverified_urls,
 )
-
-# Default numeric tolerance for matching a claimed metric value against the canonical
-# analytic (GROUND-R7). A claimed number within this band of the canonical value is treated
-# as a verbatim re-statement; anything outside is scrubbed/replaced. The default REL band is
-# wide enough to accept a model DISPLAYING the canonical value at sane human precision (e.g.
-# "your ctl is 6.7" for a canonical 6.7315, or a whole-number round of a small CTL/ATL/TSB),
-# while a FABRICATED number — wrong by tens of percent — is still scrubbed. The exact
-# threshold is config-loaded content (§16 / SKILL-R1 metric thresholds); this constant is the
-# fallback the OSS engine resolves it from, never a hidden hardcode of policy in the gate.
-_DEFAULT_REL_TOLERANCE = 0.02
-# Absolute floor so near-zero canonical values (e.g. tsb ≈ 0) still admit a 1-decimal
-# display ("0.0" for a canonical 0.004) without the relative band collapsing to nothing.
-_DEFAULT_ABS_TOLERANCE = 0.05
-# Decimal places the canonical value is rounded to when it REPLACES a recognized numeric span
-# in the published text (GROUND-R7). Config-loaded (§16); this is the no-config fallback.
-_DEFAULT_DISPLAY_DECIMALS = 1
-
-
-@dataclass(frozen=True, slots=True)
-class NumericTolerance:
-    """The numeric-match band the grounder accepts for a metric value (GROUND-R7).
-
-    Carried into :func:`ground` so the threshold is config-loaded content (§16 / SKILL-R1),
-    not a literal baked into the gate. ``rel`` is the relative band (a fraction of the
-    canonical magnitude) and ``abs_`` the absolute floor for near-zero canonical values; a
-    claimed value within EITHER band of the canonical value grounds. The defaults accept a
-    human-precision display of the canonical number and scrub a fabrication.
-
-    ``display_decimals`` is the precision the CANONICAL value is rounded to when it is PUBLISHED
-    in place of the model's numeric span (GROUND-R7 verbatim): the model's approximation — even
-    a within-tolerance one like "102" for a canonical 100 — is NEVER what reaches the athlete;
-    the canonical value, rounded for a human display, always is.
-    """
-
-    rel: float = _DEFAULT_REL_TOLERANCE
-    abs_: float = _DEFAULT_ABS_TOLERANCE
-    display_decimals: int = _DEFAULT_DISPLAY_DECIMALS
-
-
-_DEFAULT_TOLERANCE = NumericTolerance()
 
 
 @runtime_checkable
@@ -122,6 +89,7 @@ def ground(
     allow_urls: Iterable[str],
     *,
     tolerance: NumericTolerance = _DEFAULT_TOLERANCE,
+    request_numbers: frozenset[str] = frozenset(),
 ) -> GroundingResult:
     """Verify every claim against canonical evidence and scrub the draft (GROUND-R1/R3/R9).
 
@@ -139,14 +107,25 @@ def ground(
     values from the metric snapshot the caller resolved (see :func:`_verify_number`); it
     does not itself call a model or a live service, so the same inputs always yield the
     same result (GRAPH-R4).
+
+    ``request_numbers`` are the numeric tokens the ATHLETE supplied in their own request text. A
+    number the user supplied is not a canonical-data claim — it is the user's own constraint (e.g.
+    "5-7 hours a week" on a plan request) — so an ECHO of it is sayable: it verifies as a
+    user-request echo (cited ``user_request``) instead of failing closed against canonical
+    analytics, and the numeric sweep treats it as covered. Canonical verification still wins
+    whenever the claim's metric resolves to an available canonical value (a real metric claim is
+    never excused by a coincidental request echo).
     """
     allow_list = normalize_urls(allow_urls)
     name_library = evidence if isinstance(evidence, NameLibrary) else None
+    request_values = _parse_request_values(request_numbers)
     grounded: list[GroundedClaim] = []
     text = draft_text
     grounded_numbers: set[str] = set()
     for claim in claims:
-        outcome = _verify_claim(claim, evidence, name_library, allow_list, tolerance)
+        outcome = _verify_claim(
+            claim, evidence, name_library, allow_list, tolerance, request_values
+        )
         grounded.append(outcome.grounded)
         if outcome.scrub_text is None:
             continue
@@ -164,7 +143,7 @@ def ground(
             text = _scrub_span(text, claim.text, outcome.scrub_text)
     decision = _decide(grounded)
     text = scrub_unverified_urls(text, evidence, allow_list)
-    text, swept = scrub_uncovered_numbers(text, grounded_numbers)
+    text, swept = scrub_uncovered_numbers(text, grounded_numbers, request_numbers)
     if swept:
         # The draft carried a number the claim extractor never surfaced and the deterministic
         # sweep had to remove (GROUND-R3, mirroring the URL sweep). An unverified number reaching
@@ -194,68 +173,22 @@ def _downgrade_for_sweep(
     return GroundDecision.REPLAN
 
 
-class _Outcome:
-    """Internal per-claim result: the typed verdict + how to edit the draft.
-
-    ``scrub_text`` is ``None`` to leave the span untouched (a grounded survivor), an
-    empty string to remove the span (fail-closed scrub, GROUND-R3), or a replacement
-    string to substitute a canonical value/library item (GROUND-R7/R3).
-    """
-
-    __slots__ = ("grounded", "scrub_text")
-
-    def __init__(self, grounded: GroundedClaim, scrub_text: str | None) -> None:
-        self.grounded = grounded
-        self.scrub_text = scrub_text
-
-
 def _verify_claim(
     claim: Claim,
     evidence: GroundingEvidence,
     name_library: NameLibrary | None,
     allow_list: frozenset[str],
     tolerance: NumericTolerance,
+    request_values: frozenset[float] = frozenset(),
 ) -> _Outcome:
     """Dispatch one claim to its kind-specific verifier (GROUND-R2)."""
     if claim.kind is ClaimKind.NUMBER:
-        return _verify_number(claim, evidence, tolerance)
+        return _verify_number(claim, evidence, tolerance, request_values)
     if claim.kind is ClaimKind.NAME:
         return _verify_name(claim, name_library)
     if claim.kind is ClaimKind.URL:
         return _verify_url(claim, evidence, allow_list)
     return _verify_statement(claim)
-
-
-def _verify_number(
-    claim: Claim, evidence: GroundingEvidence, tolerance: NumericTolerance
-) -> _Outcome:
-    """Match a claimed number against the canonical analytic within tolerance (GROUND-R7).
-
-    A claim with no metric/value cannot be checked, so it fails closed (scrubbed). When
-    the canonical computation is unavailable the number is scrubbed entirely — never a
-    placeholder or zero (GROUND-R7).
-
-    Tolerance only decides whether a claim is RECOGNIZED as a (rounded/restated) reference to
-    the canonical number — it NEVER lets the model's own figure ship. A claimed value within
-    tolerance is ``grounded``, but the published span is ALWAYS rewritten to the canonical value
-    rounded to display precision (so canonical ctl=100 with a within-band claim of "102" ships
-    "100", never "102" — GROUND-R7 verbatim). A value outside tolerance is ``contradicted`` and
-    likewise replaced by the canonical value, and NEVER published as stated. Either way the
-    number the athlete sees is the canonical analytic, not the model's approximation.
-    """
-    if claim.metric is None or claim.value is None:
-        return _scrubbed(claim, GroundVerdict.UNGROUNDED)
-    canonical = _canonical_metric(evidence, claim.metric, claim.ref)
-    if canonical is None:
-        return _scrubbed(claim, GroundVerdict.UNGROUNDED)
-    # The PUBLISHED figure is ALWAYS the canonical value rounded to display precision — never the
-    # model's own number (GROUND-R7). ``scrub_text`` carries that bare canonical display token; the
-    # caller (:func:`_apply_number_scrub`) writes it over the model's numeric token in the draft.
-    canonical_display = _render_value(canonical, tolerance.display_decimals)
-    if _within_tolerance(claim.value, canonical, tolerance):
-        citation = _metric_citation(claim, canonical)
-        return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), canonical_display)
-    return _Outcome(GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), canonical_display)
 
 
 def _verify_name(claim: Claim, name_library: NameLibrary | None) -> _Outcome:
@@ -315,11 +248,6 @@ def _carries_checkable_token(text: str) -> bool:
     verified by its kind-specific verifier, never published on a statement's free pass.
     """
     return bool(NUMBER_RE.search(text) or URL_RE.search(text))
-
-
-def _scrubbed(claim: Claim, verdict: GroundVerdict) -> _Outcome:
-    """Build a scrub outcome: the span is removed and no citation is attached (GROUND-R3)."""
-    return _Outcome(GroundedClaim(claim, verdict, None), "")
 
 
 def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
@@ -389,107 +317,6 @@ def _is_publishable(claim: GroundedClaim) -> bool:
     if claim.verdict is GroundVerdict.COMPLEMENTARY:
         return not claim.claim.prescriptive
     return False
-
-
-# --- numeric helpers (GROUND-R7) ---
-
-
-def _canonical_metric(evidence: GroundingEvidence, metric: str, ref: str | None) -> float | None:
-    """Read the canonical value for a ``(metric, as_of)`` request, fail-closed (GROUND-R7).
-
-    The base :class:`GroundingEvidence` contract's ``metric_value`` is async; the grounder
-    is synchronous and deterministic, so the caller resolves snapshots ahead of time onto
-    an optional synchronous ``metric_snapshot(metric, as_of)`` accessor (the resolved-ahead
-    path). When that accessor is absent, or returns a non-finite/unavailable value, this
-    returns ``None`` — the number is then scrubbed, never surfaced as a placeholder. The
-    grounder never awaits inside ``ground``.
-    """
-    accessor = getattr(evidence, "metric_snapshot", None)
-    if accessor is None:
-        return None
-    raw: Any = accessor(metric, ref)
-    return _as_float(raw)
-
-
-def _as_float(raw: Any) -> float | None:
-    """Coerce a canonical value to a finite float, or ``None`` (fail-closed)."""
-    if raw is None or isinstance(raw, bool):
-        return None
-    if isinstance(raw, (int, float)):
-        value = float(raw)
-        return value if math.isfinite(value) else None
-    return None
-
-
-def _within_tolerance(
-    claimed: float, canonical: float, tolerance: NumericTolerance = _DEFAULT_TOLERANCE
-) -> bool:
-    """True iff a claimed number matches the canonical value within tolerance (GROUND-R7)."""
-    if not (math.isfinite(claimed) and math.isfinite(canonical)):
-        return False
-    return math.isclose(
-        claimed,
-        canonical,
-        rel_tol=tolerance.rel,
-        abs_tol=tolerance.abs_,
-    )
-
-
-def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
-    """Citation for a grounded number: canonical metric id + verbatim value (GROUND-R5/R7).
-
-    ``record_id`` is the stable canonical reference to the analytic the number was read
-    from — ``{metric}@{as_of}`` (or just the metric when no date) — so a deliverable layer
-    keeps the citation (a grounded number MUST carry a resolvable citation, GROUND-R5; a
-    citation with no record id is dropped downstream and the number would ship uncited).
-    """
-    record_id = f"{claim.metric}@{claim.ref}" if claim.ref else str(claim.metric)
-    return {
-        "kind": "metric",
-        "record_id": record_id,
-        "metric": claim.metric,
-        "value": canonical,
-        "as_of": claim.ref,
-    }
-
-
-def _apply_number_scrub(text: str, claim: Claim, replacement: str) -> tuple[str, str | None]:
-    """Rewrite the model's numeric token in ``text`` to the canonical value, or remove it (R7).
-
-    For a NUMBER claim the published figure is ALWAYS the canonical value (``replacement`` =
-    its display string, or ``""`` to remove an ungrounded/unavailable number). This finds the
-    model's own numeric token — the first number in ``claim.text`` (e.g. ``"63.50"`` from
-    ``"your fitness is at 63.50"``) — and replaces THAT token in the draft, so the rewrite is
-    robust to the model not reproducing ``claim.text`` verbatim (case / wording drift). Returns the
-    edited text and the canonical display string actually published (so the numeric-coverage sweep
-    treats it as covered), or ``None`` when nothing was published (removed / token not found).
-    """
-    token_match = NUMBER_RE.search(claim.text)
-    token = token_match.group(0) if token_match is not None else claim.text
-    idx = text.find(token)
-    if idx == -1:
-        # The model's token is not literally in the draft; nothing to publish/remove here. The
-        # numeric sweep is the backstop for any uncovered number that DID reach the draft.
-        return text, replacement or None
-    edited = text[:idx] + replacement + text[idx + len(token) :]
-    if replacement == "":
-        edited = re.sub(r"\s{2,}", " ", edited)
-        edited = re.sub(r"\s+([.,;:!?])", r"\1", edited).strip()
-        return edited, None
-    return edited, replacement
-
-
-def _render_value(value: float, decimals: int) -> str:
-    """Render the canonical value at ``decimals`` precision, dropping a trailing ``.0``.
-
-    Rounds to the configured display precision (so a high-precision canonical value surfaces as
-    the human number a coach would say) and, when the rounded value is integral, renders it
-    without a trailing ``.0`` for display parity (``84.0`` -> ``"84"``).
-    """
-    rounded = round(value, decimals)
-    if rounded == int(rounded):
-        return str(int(rounded))
-    return f"{rounded:.{decimals}f}"
 
 
 # --- span helpers (the URL/number sweep primitives live in ``grounding_sweep``) ---

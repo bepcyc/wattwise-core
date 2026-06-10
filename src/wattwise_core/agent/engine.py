@@ -49,13 +49,12 @@ from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (hi
     DeterministicCoverage,
     ModelPlanner,
     RegistryGateway,
-    _ClaimSchema,
-    _ExtractedClaim,
     _PlanSchema,
     build_services,
 )
 from wattwise_core.agent.goals import active_goals_for
 from wattwise_core.agent.graph import DEFAULT_MAX_TOOL_ITERATIONS, build_graph
+from wattwise_core.agent.grounding_evidence import _ClaimSchema, _ExtractedClaim  # noqa: F401
 from wattwise_core.agent.plan_deliverable import _project_plan, safe_plan_html
 from wattwise_core.agent.plan_deliverable import plan as _plan
 from wattwise_core.agent.plan_regrounding import accept_edit
@@ -244,8 +243,11 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             # is in the prompt the model actually receives (INJECT-R2), not merely loaded.
             coach_system=self._coach.compose_system,
             reflect_system=self._coach.reflect_system,
-            node_visit_ceiling=NODE_VISIT_CEILING,
-            max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
+            # VOICE-R7/-R8: the loaded detailed-length steering fragment, layered only when
+            # the run asked for a detailed answer (a detailed deep-dive should surface up to
+            # the cap of grounded numbers, never zero).
+            detailed_compose_directive=self._coach.detailed_compose_directive,
+            node_visit_ceiling=NODE_VISIT_CEILING, max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
         )
         wall = ent.wall_clock_seconds
         return CompiledCoachGraph(compiled, wall_clock_seconds=wall, locales=self._coach.locales)

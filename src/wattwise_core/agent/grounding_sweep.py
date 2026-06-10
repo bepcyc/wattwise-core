@@ -27,6 +27,24 @@ from wattwise_core.agent.contracts import GroundingEvidence
 # A numeric literal token in athlete-facing prose (the numeric-coverage sweep target).
 NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
+# A whole numeric PHRASE: one number optionally chained into a range by hyphen/en-dash/em-dash
+# ("5-7", "5 - 7", an en/em-dash range). The sweep removes WHOLE phrases, never a lone member
+# of a range, so a scrub can not leave a dangling range dash between two vanished numbers
+# (VOICE-R2 clean copy).
+NUMBER_PHRASE_RE = re.compile(r"-?\d+(?:\.\d+)?(?:\s*[-\u2013\u2014]\s*\d+(?:\.\d+)?)*")
+
+# An orphan range/punctuation dash left DIRECTLY before a removed numeric phrase (an
+# "... - 5 h"-shaped lead with the 5 scrubbed): removed together with the phrase so no
+# dangling dash survives.
+_LEADING_ORPHAN_DASH_RE = re.compile(r"(?:^|(?<=\s))[-\u2013\u2014]\s*\Z")
+
+# A spaced duration/distance/percentage unit token DIRECTLY after a removed numeric phrase
+# ("5-7 h" -> removing the range must also take the now-empty unit " h"), mirroring the attached
+# _UNIT_SUFFIX_RE vocabulary. Only the unit itself — never a following word.
+_TRAILING_ORPHAN_UNIT_RE = re.compile(
+    r"\A\s*(?:(?:m|min|mins|h|hr|hrs|s|sec|km|mi)(?![A-Za-z])|%)", re.IGNORECASE
+)
+
 # A URL token in athlete-facing prose; the deterministic URL sweep checks every match against the
 # allow-list / matched-record destinations regardless of model extraction (GROUND-R4).
 URL_RE = re.compile(r"https?://[^\s)>\]]+", re.IGNORECASE)
@@ -102,23 +120,32 @@ def scrub_unverified_urls(
 
 
 def scrub_uncovered_numbers(
-    text: str, grounded_numbers: frozenset[str] | set[str]
+    text: str,
+    grounded_numbers: frozenset[str] | set[str],
+    request_numbers: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[str, int]:
     """Scrub every number-like span not covered by a grounded claim / safe token (GROUND-R7 / H4).
 
     The deterministic NUMERIC analogue of :func:`scrub_unverified_urls`: numeric fail-closure must
     not depend on the LLM claim-extractor catching every span. "CTL is 60 and TSB is 999" where the
     extractor returns only the CTL claim leaves the fabricated 999 in the body — so this second,
-    extraction-independent net sweeps the text and removes any numeric span that is neither (a) a
+    extraction-independent net sweeps the text and removes any numeric PHRASE that is neither (a) a
     GROUNDED canonical value the grounder already verified (``grounded_numbers``, the values it just
-    published) nor (b) a structurally safe NON-metric token (a date, a "Day/Week/Phase/Block/Zone N"
-    ordinal, an "NxM" interval structure, or a duration/percentage with an attached unit, per
-    :func:`_is_safe_numeric_context`). Anything else — a bare or metric-attached figure the grounder
-    did not verify — is removed (fail-closed, "when in doubt, scrub"). Returns the cleaned text and
-    the number of spans removed (the caller downgrades the decision if any was). A body with no
-    uncovered number is returned untouched.
+    published), (b) an ECHO of a number the ATHLETE supplied in their own request
+    (``request_numbers`` — a user-supplied constraint such as "5-7 hours a week" is not a
+    canonical-data claim and stays sayable, GROUND-R3 scope), nor (c) a structurally safe NON-metric
+    token (a date, a "Day/Week/Phase/Block/Zone N" ordinal, an "NxM" interval structure, or a
+    duration/percentage with an attached unit, per :func:`_is_safe_numeric_context`). Anything
+    else — a bare or metric-attached figure the grounder did not verify — is removed (fail-closed,
+    "when in doubt, scrub").
+
+    Removal is PHRASE-wise (:data:`NUMBER_PHRASE_RE`): a range like "5-7" is taken as one span, an
+    orphan dash directly before it and a now-empty spaced unit token directly after it are removed
+    with it, so the surrounding sentence stays grammatical — never a dangling range dash or a
+    bare unit (VOICE-R2 clean copy). A range with ANY uncovered member is removed whole
+    (fail-closed). Returns the cleaned text and the number of phrases removed (the caller
+    downgrades the decision if any was). A body with no uncovered number is returned untouched.
     """
-    removed = 0
     # Pre-compute the spans EVERY digit-group inside which is safe regardless of per-token context:
     #  - a surviving URL (``/activity/42``): an already-verified first-party link (URL sweep ran
     #    first and kept it), never a free-floating metric;
@@ -127,22 +154,85 @@ def scrub_uncovered_numbers(
     # date (``-08`` of ``2026-06-08``) from being scrubbed (the per-token window missed it).
     safe_spans = [(m.start(), m.end()) for m in URL_RE.finditer(text)]
     safe_spans += [(m.start(), m.end()) for m in _SAFE_SPAN_RE.finditer(text)]
+    covered = set(grounded_numbers) | set(request_numbers)
 
-    def _keep(match: re.Match[str]) -> str:
-        token = match.group(0)
-        if any(start <= match.start() < end for start, end in safe_spans):
-            return token
-        if token in grounded_numbers or _is_safe_numeric_context(text, match):
-            return token
-        nonlocal removed
+    removed = 0
+    out: list[str] = []
+    cursor = 0
+    for match in NUMBER_PHRASE_RE.finditer(text):
+        if _phrase_covered(text, match, safe_spans, covered):
+            continue
+        start, end = _expand_removal_span(text, match.start(), match.end())
+        out.append(text[cursor:start])
+        cursor = end
         removed += 1
-        return ""
-
-    cleaned = NUMBER_RE.sub(_keep, text)
     if not removed:
         return text, 0
+    out.append(text[cursor:])
+    cleaned = "".join(out)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return re.sub(r"\s+([.,;:!?])", r"\1", cleaned).strip(), removed
+
+
+def _phrase_covered(
+    text: str,
+    match: re.Match[str],
+    safe_spans: list[tuple[int, int]],
+    covered: set[str],
+) -> bool:
+    """True iff a numeric PHRASE may stay: safe span / structural context / every token covered.
+
+    A phrase inside a pre-computed safe span (URL / ISO date / NxM structure) stays whole; a phrase
+    whose FIRST token sits in a safe structural context ("Week 1-4", an attached unit "45m") stays
+    whole; otherwise EVERY numeric token of the phrase must be a covered (grounded/request-echo)
+    value — a range with any unverified member is removed whole (fail-closed, GROUND-R3).
+    """
+    if any(start <= match.start() < end for start, end in safe_spans):
+        return True
+    if _is_safe_numeric_context(text, match):
+        return True
+    # Sign-stripped comparison too: within a range phrase ("5-7") the dash is a separator,
+    # so the second member tokenizes as "-7" but is covered by an echoed/grounded "7".
+    return all(
+        tok.group(0) in covered or tok.group(0).lstrip("-") in covered
+        for tok in NUMBER_RE.finditer(match.group(0))
+    )
+
+
+def _expand_removal_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a removal span over an orphan leading dash / trailing empty unit (VOICE-R2).
+
+    Removing a numeric phrase must not strand the punctuation/unit that existed only to carry it:
+    a dash directly before the phrase and a spaced unit token directly after it
+    ("5-7 h") are removed with the phrase so the remaining prose reads cleanly — no dangling dash,
+    no bare empty unit. Deterministic and purely lexical (GRAPH-R4).
+    """
+    lead = _LEADING_ORPHAN_DASH_RE.search(text[:start])
+    if lead is not None:
+        start = lead.start()
+    trail = _TRAILING_ORPHAN_UNIT_RE.match(text[end:])
+    if trail is not None:
+        end += trail.end()
+    return start, end
+
+
+def remove_numeric_span(text: str, start: int, end: int) -> str:
+    """Remove one numeric token by its WHOLE containing phrase, keeping prose clean (GROUND-R3).
+
+    The per-claim scrub path's analogue of the phrase-wise sweep: the grounder removes an
+    ungrounded number by its FULL numeric phrase (the whole "5-7" range, plus an orphan leading
+    dash / trailing empty unit), so a claim-level scrub can never leave a dangling dash or a bare
+    unit behind (VOICE-R2 clean copy). Whitespace and stranded punctuation at the splice collapse.
+    """
+    for match in NUMBER_PHRASE_RE.finditer(text):
+        if match.start() <= start < match.end():
+            start, end = _expand_removal_span(text, match.start(), match.end())
+            break
+    else:
+        start, end = _expand_removal_span(text, start, end)
+    edited = text[:start] + text[end:]
+    edited = re.sub(r"\s{2,}", " ", edited)
+    return re.sub(r"\s+([.,;:!?])", r"\1", edited).strip()
 
 
 def _is_safe_numeric_context(text: str, match: re.Match[str]) -> bool:
@@ -168,10 +258,12 @@ def _is_safe_numeric_context(text: str, match: re.Match[str]) -> bool:
 
 
 __all__ = [
+    "NUMBER_PHRASE_RE",
     "NUMBER_RE",
     "URL_RE",
     "normalize_url",
     "normalize_urls",
+    "remove_numeric_span",
     "scrub_uncovered_numbers",
     "scrub_unverified_urls",
 ]
