@@ -90,6 +90,9 @@ _LEAF_TABLE_KEYS: frozenset[str] = frozenset(
         "agent__coach__prompts",
         "agent__coach__grounding_rules",
         "agent__coach__manifest",
+        # The per-language surface packs (LANG-R1/-R4): a lang -> {compose_directive,
+        # limitation} map the engine consumes whole (one dict-valued setting).
+        "agent__coach__languages",
     }
 )
 
@@ -254,6 +257,10 @@ class Settings(BaseSettings):
     agent__cost__output_per_million_usd: float = Field(ge=0.0)
     agent__temperature: float = Field(ge=0.0, le=2.0)
     agent__max_output_tokens: int = Field(ge=1)
+    # The target model's context window (tokens) for the MODEL-R3 input budget: the compose
+    # context is assembled within this window minus the reserved output headroom (the resolved
+    # output-token budget). Loaded content (CFG-R1a); set per the deployed model.
+    agent__context_window_tokens: int = Field(ge=1024)
     agent__grounding_min_coverage: float = Field(ge=0.0, le=1.0)
     agent__request_timeout_seconds: float = Field(gt=0)
     # AGT-SEC-R4 provider-send PII policy ("where policy requires"): when true the model seam
@@ -290,6 +297,11 @@ class Settings(BaseSettings):
     agent__coach__grounding_rules: dict[str, str]
     agent__coach__manifest: dict[str, str]
     agent__coach__skills: list[dict[str, Any]]
+    # The per-language surface packs (LANG-R1/-R3/-R4): lang -> {compose_directive, limitation}.
+    # The SUPPORTED language set is the keys; adding a language is a config/content change only
+    # (LANG-R1). Shape-only here; resolution + the default-language fallback are owned by
+    # ``LocalePolicy.from_config`` (the manifest's ``default_language`` is the LANG-R4 fallback).
+    agent__coach__languages: dict[str, dict[str, str]]
     # Offline-eval cost/latency budgets (QA-EVAL-R8): the median cost-per-task and p95
     # latency the eval gate enforces, plus the price per 1k tokens used to cost a recorded
     # (network-free) run. Loaded content (CFG-R1a), never a gate hardcode; strictly positive.

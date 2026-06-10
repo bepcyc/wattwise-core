@@ -387,6 +387,12 @@ async def weekly_digest(
 # sibling depends only on the contracts + analytics, never back on ``deliverables``), so there is
 # no cycle; re-exporting keeps ``AgentDiagnosis``/``InputCoverage``/``InputStatus`` importable from
 # ``wattwise_core.agent.deliverables`` like every other deliverable type.
+from wattwise_core.agent.briefing_deliverable import (  # noqa: E402
+    Briefing,
+    Insight,
+    briefing,
+    insight,
+)
 from wattwise_core.agent.diagnose_deliverable import (  # noqa: E402
     AgentDiagnosis,
     InputCoverage,
@@ -411,11 +417,13 @@ from wattwise_core.agent.readiness_deliverable import (  # noqa: E402
 __all__ = [
     "AgentAnswer",
     "AgentDiagnosis",
+    "Briefing",
     "Citation",
     "CoachGraph",
     "Digest",
     "InputCoverage",
     "InputStatus",
+    "Insight",
     "Observation",
     "Plan",
     "Readiness",
@@ -425,10 +433,12 @@ __all__ = [
     "StructuredNarrator",
     "answer_from_state",
     "answer_question",
+    "briefing",
     "conversation_id_of",
     "count_foregrounded_numbers",
     "diagnose_coverage",
     "first_sentence",
+    "insight",
     "leads_with_state",
     "new_conversation_id",
     "number_cap",

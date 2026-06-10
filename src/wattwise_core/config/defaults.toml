@@ -138,6 +138,12 @@ temperature = 0.0
 # budget and emitted BEFORE the answer, so a small allowance yields an empty answer
 # (MODEL-R5a). Must comfortably hold reasoning trace + visible answer.
 max_output_tokens = 8192
+# The target model's context window (tokens), for the MODEL-R3 input budget: the engine
+# assembles the compose context within ``context_window_tokens`` minus the reserved OUTPUT
+# headroom (the resolved output-token budget above), trimming lowest-relevance records first.
+# Loaded content (CFG-R1a) — set per the deployed model; the 2026 default model carries a
+# large window, sized here conservatively so a swapped smaller model is not silently overrun.
+context_window_tokens = 131072
 # Fail-closed grounding (GROUND-R*): the agent abstains unless every claim is
 # grounded in retrieved canonical data at/above this coverage.
 grounding_min_coverage = 1.0
@@ -219,6 +225,33 @@ plain language, and briefly note that a single six-week total isn't something tr
 system verifies every number against the canonical data and quietly removes anything it cannot \
 confirm, so describing the athlete's real state in plain coach language is exactly what reaches \
 them — a metrics dump is not."""
+
+# The per-language surface packs (LANG-R1/-R3/-R4): the SUPPORTED language set IS the keys of
+# this table (EN/DE/RU out of the box), and ADDING a language is editing THIS config — never an
+# engine code change (LANG-R1). Each pack carries the localized prompt VARIANT layered into the
+# compose system prompt at composition time (``compose_directive``, written IN the target
+# language so the coach answers in it end-to-end; LANG-R3 — surface only, grounding/verdicts
+# unchanged) and the localized fail-closed abstain copy (``limitation``, GROUND-R6). A requested
+# language with no pack here falls back to the bundle manifest's ``default_language`` and the
+# fallback is recorded for observability (LANG-R4); languages are never mixed in one deliverable.
+[agent.coach.languages.en]
+compose_directive = """Reply entirely in English — every sentence of your answer, including \
+caveats and any note about missing data."""
+limitation = """I don't have enough confirmed data to answer that reliably yet. Sync your \
+sources and I'll take another look."""
+
+[agent.coach.languages.de]
+compose_directive = """Antworte vollständig auf Deutsch — jeder Satz deiner Antwort, auch \
+Einschränkungen und Hinweise auf fehlende Daten. Sprich die Athletin oder den Athleten \
+persönlich mit "du" an und bleib warm und konkret."""
+limitation = """Mir fehlen noch genug gesicherte Daten, um das verlaesslich zu beantworten. \
+Synchronisiere deine Quellen und ich schaue noch einmal."""
+
+[agent.coach.languages.ru]
+compose_directive = """Отвечай полностью по-русски — каждое предложение ответа, включая \
+оговорки и замечания о недостающих данных. Обращайся к спортсмену на "ты", тепло и конкретно."""
+limitation = """Пока недостаточно подтверждённых данных, чтобы ответить надёжно. \
+Синхронизируй источники, и я посмотрю снова."""
 
 [agent.coach.prompts]
 # The externalized system/agent prompt FRAGMENTS (SKILL-R1/-R3, CFG-R3): EVERY system prompt the
