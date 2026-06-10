@@ -31,6 +31,7 @@ import pytest_asyncio
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from tests.integration._fake_capability import fake_capability
 from tests.integration._session_provider import FactorySessionProvider
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import (
@@ -44,6 +45,7 @@ from wattwise_core.domain.enums import (
 )
 from wattwise_core.ingestion._sync_records import incremental_floor_date, watermark_floor
 from wattwise_core.ingestion.base import FetchContext, SourceDescriptorRef
+from wattwise_core.ingestion.capability import CapabilityDescriptor
 from wattwise_core.ingestion.registry import registry_from_adapters
 from wattwise_core.ingestion.sync import SyncOrchestrator, SyncOutcome, SyncWindow
 from wattwise_core.ingestion.watermark import (
@@ -107,6 +109,7 @@ class FakeApiAdapter:
     kind: ClassVar[SourceKind] = SourceKind.OAUTH_API
     adapter_version: ClassVar[str] = "1"
     mapping_version: ClassVar[str] = "1"
+    capability: ClassVar[CapabilityDescriptor] = fake_capability("fake_api")
 
     def __init__(self, asbos: list[Any]) -> None:
         self._asbos = asbos

@@ -1,0 +1,123 @@
+[
+ {
+  "adapter_version": "1",
+  "confidence": 1.0,
+  "content_hash": "cc7a674c886de294158b6c1497a063275678e01af4583a6b55650e7f2a690699",
+  "gbo_type": "activity",
+  "mapping_version": "1",
+  "observed_at": "2024-01-02 10:00:00+00:00",
+  "payload": {
+   "avg_cadence_rpm": null,
+   "avg_hr_bpm": null,
+   "avg_power_w": null,
+   "avg_speed_mps": null,
+   "avg_temp_c": null,
+   "device_class": "powermeter",
+   "distance_m": null,
+   "elapsed_time_s": null,
+   "elevation_gain_m": null,
+   "energy_kj": null,
+   "has_cadence": true,
+   "has_gps": true,
+   "has_hr": true,
+   "has_power": true,
+   "laps": [
+    {
+     "avg_cadence_rpm": 90.0,
+     "avg_hr_bpm": 142.0,
+     "avg_power_w": null,
+     "distance_m": 24.0,
+     "duration_s": 3,
+     "lap_index": 0,
+     "max_hr_bpm": 144.0,
+     "max_power_w": null,
+     "start_offset_s": 0
+    }
+   ],
+   "max_hr_bpm": null,
+   "max_power_w": null,
+   "moving_time_s": null,
+   "sport": "cycling",
+   "start_time": "2024-01-02 10:00:00+00:00",
+   "streams": {
+    "altitude_m": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      100.0,
+      101.0,
+      102.0
+     ]
+    },
+    "cadence_rpm": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      90.0,
+      91.0,
+      92.0
+     ]
+    },
+    "distance_m": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      0.0,
+      8.0,
+      16.0
+     ]
+    },
+    "hr_bpm": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      140.0,
+      142.0,
+      144.0
+     ]
+    },
+    "latlng": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      [
+       45.0,
+       7.0
+      ],
+      [
+       45.0001,
+       7.0001
+      ],
+      [
+       45.0002,
+       7.0002
+      ]
+     ]
+    },
+    "power_w": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      200.0,
+      210.0,
+      220.0
+     ]
+    },
+    "speed_mps": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      8.0,
+      8.2,
+      8.4
+     ]
+    }
+   },
+   "sub_sport": null,
+   "total_work_j": null
+  },
+  "source_native_id": "2024-01-02T10:00:00+00:00|3.000|24.000",
+  "trust_tier": "raw_stream",
+  "untrusted_content": true
+ }
+]

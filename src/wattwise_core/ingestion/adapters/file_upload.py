@@ -35,7 +35,13 @@ import gzip
 from typing import Any, ClassVar, Final
 
 from wattwise_core.domain.candidate import GboCandidate
-from wattwise_core.domain.enums import ActivityFileFormat, AuthArchetype, Fidelity, SourceKind
+from wattwise_core.domain.enums import (
+    ActivityFileFormat,
+    AuthArchetype,
+    Fidelity,
+    GboType,
+    SourceKind,
+)
 from wattwise_core.ingestion.adapters import _map_activity as _m
 from wattwise_core.ingestion.adapters._asbo import (
     ActivityAsbo,
@@ -52,6 +58,12 @@ from wattwise_core.ingestion.base import (
     FileImportError,
     SourceDescriptorRef,
     UploadDecode,
+)
+from wattwise_core.ingestion.capability import (
+    CapabilityDescriptor,
+    DiscoveryOrder,
+    Granularity,
+    SyncMode,
 )
 from wattwise_core.storage import content_hash
 
@@ -137,6 +149,25 @@ class FileUploadAdapter:
     kind: ClassVar[SourceKind] = SourceKind.FILE_UPLOAD
     adapter_version: ClassVar[str] = "1"
     mapping_version: ClassVar[str] = "1"
+    #: Static machine-readable capability declaration (ADP-R1; validated at
+    #: registration, ADP-R2/ONB-R2). File import writes ONLY activities (the ADP-R3
+    #: declared set the engine enforces) at full-stream granularity from the verbatim
+    #: original; it is connectionless (no rate-limit profile, no discover phase — the
+    #: declared order keeps the descriptor total/deterministic per ADP-R5).
+    capability: ClassVar[CapabilityDescriptor] = CapabilityDescriptor(
+        source_key=FILE_IMPORT_SOURCE_KEY,
+        supported_gbo_types=frozenset({GboType.ACTIVITY}),
+        sync_modes=frozenset({SyncMode.FILE_IMPORT}),
+        auth_archetype=AuthArchetype.FILE_UPLOAD,
+        server_side_incremental=False,
+        discovery_order=DiscoveryOrder.NEWEST_FIRST,
+        granularity={GboType.ACTIVITY: Granularity.FULL_STREAMS},
+        # doc 20 §7.5: an original recording file carries per-second power — the
+        # raw_stream member of the training_load equivalence class (DM-SUB-R1).
+        equivalence_classes=("training_load",),
+        default_trust_profile=Fidelity.RAW_STREAM,
+        rate_limit_config_section=None,
+    )
 
     def map(
         self,

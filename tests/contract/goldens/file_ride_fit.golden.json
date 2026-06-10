@@ -1,0 +1,140 @@
+[
+ {
+  "adapter_version": "1",
+  "confidence": 1.0,
+  "content_hash": "9d5a0a520031d48eeaf5f04735b21b16765c88d91a8d4945c4bc84c7802cc488",
+  "gbo_type": "activity",
+  "mapping_version": "1",
+  "observed_at": "2024-01-02 10:00:00+00:00",
+  "payload": {
+   "avg_cadence_rpm": 91.0,
+   "avg_hr_bpm": 142.0,
+   "avg_power_w": 210.0,
+   "avg_speed_mps": null,
+   "avg_temp_c": null,
+   "device_class": "powermeter",
+   "distance_m": 24.0,
+   "elapsed_time_s": 3,
+   "elevation_gain_m": 2.0,
+   "energy_kj": null,
+   "has_cadence": true,
+   "has_gps": true,
+   "has_hr": true,
+   "has_power": true,
+   "laps": [
+    {
+     "avg_cadence_rpm": 91.0,
+     "avg_hr_bpm": 142.0,
+     "avg_power_w": 210.0,
+     "distance_m": 24.0,
+     "duration_s": 3,
+     "lap_index": 0,
+     "max_hr_bpm": 144.0,
+     "max_power_w": 220.0,
+     "start_offset_s": 0
+    }
+   ],
+   "max_hr_bpm": 144.0,
+   "max_power_w": 220.0,
+   "moving_time_s": 3,
+   "sport": "cycling",
+   "start_time": "2024-01-02 10:00:00+00:00",
+   "streams": {
+    "altitude_m": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      100.0,
+      101.0,
+      102.0
+     ]
+    },
+    "cadence_rpm": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      90.0,
+      91.0,
+      92.0
+     ]
+    },
+    "distance_m": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      0.0,
+      8.0,
+      16.0
+     ]
+    },
+    "hr_bpm": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      140.0,
+      142.0,
+      144.0
+     ]
+    },
+    "latlng": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      [
+       45.0,
+       6.999999918043613
+      ],
+      [
+       45.00009999610484,
+       7.000099997967482
+      ],
+      [
+       45.00019999220967,
+       7.000199994072318
+      ]
+     ]
+    },
+    "power_w": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      200.0,
+      210.0,
+      220.0
+     ]
+    },
+    "rr_intervals_ms": {
+     "sample_basis": "event",
+     "sample_rate_hz": 1.0,
+     "values": [
+      789.0,
+      812.0
+     ]
+    },
+    "speed_mps": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      8.0,
+      8.2,
+      8.4
+     ]
+    },
+    "temp_c": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      21.0,
+      21.0,
+      21.0
+     ]
+    }
+   },
+   "sub_sport": null,
+   "total_work_j": null
+  },
+  "source_native_id": "garmin|3121|1234567|2024-01-02T10:00:00+00:00",
+  "trust_tier": "raw_stream",
+  "untrusted_content": false
+ }
+]

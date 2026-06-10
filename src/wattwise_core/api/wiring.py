@@ -168,6 +168,11 @@ def _make_import_processor(
                 decoded.candidates,
                 ingest_run_id=uuid.UUID(ctx.ingest_run_id),
                 original_files=[original],
+                # ADP-R3: the import path enforces the same declared-type contract —
+                # the engine refuses any candidate type the adapter did not declare.
+                declared_gbo_types=getattr(adapter, "capability", None)
+                and adapter.capability.supported_gbo_types,  # type: ignore[attr-defined]
+                source_key=FILE_IMPORT_SOURCE_KEY,
             )
         job_id = next(iter(result.activities_written), ctx.ingest_run_id)
         return queued_job(job_id, filename)

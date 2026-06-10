@@ -43,6 +43,10 @@ from wattwise_core.ingestion._ingest_steps import (
     _write_activity_canonical,
     _write_wellness,
 )
+from wattwise_core.ingestion.capability import (
+    UndeclaredGboTypeError,
+    require_declared_types,
+)
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
 from wattwise_core.persistence.types import uuid7
 from wattwise_core.seams import ConflictResolver, DefaultConflictResolver
@@ -96,6 +100,8 @@ class IngestService:
         ingest_run_id: uuid.UUID | None = None,
         original_files: list[OriginalFile] | None = None,
         synced_range: SyncedRange | None = None,
+        declared_gbo_types: frozenset[GboType] | None = None,
+        source_key: str = "",
     ) -> IngestResult:
         """Land candidates into the canonical store in DURABLE, fault-isolated batches.
 
@@ -113,7 +119,13 @@ class IngestService:
         OPEN transient gap fully inside that range is closed — AFTER all batch data has been
         committed above (SYN-R3 / ING-UPS-R2 / ING-GAP-R4), so store, cursor, and gap state
         stay mutually consistent and a crash mid-run never advances past un-committed data (ING-R6).
+
+        ADP-R3 (fail-closed): BEFORE any write, every candidate's ``gbo_type`` must be in
+        the adapter's ``declared_gbo_types`` (when given) AND in the engine-writable set —
+        an undeclared/unknown type raises :class:`UndeclaredGboTypeError`; the batch is
+        REFUSED, never partially/silently dropped from the canonical store.
         """
+        require_declared_types(candidates, declared_gbo_types, source_key=source_key)
         athlete = _uid(athlete_id)
         descriptor = _uid(source_descriptor_id)
         run_id = ingest_run_id or uuid7()
@@ -171,6 +183,28 @@ class IngestService:
         (the re-resolution path calls it on the service).
         """
         await _write_wellness(self, athlete, local_date)
+
+
+async def _windowed_activities(
+    session: AsyncSession, athlete: uuid.UUID, start: _dt.datetime
+) -> list[Activity]:
+    """Existing activities whose ``start_time`` falls within ±2h of ``start``.
+
+    Returns them in a stable order (start_time, then activity_id) so identity
+    resolution is deterministic (CONF-R4). The fuzzy start/duration/sport matcher
+    is run per candidate; nothing outside the window is considered (DEDUP-R7).
+    """
+    lo, hi = start - _IDENTITY_WINDOW, start + _IDENTITY_WINDOW
+    stmt = (
+        select(Activity)
+        .where(
+            Activity.athlete_id == athlete,
+            Activity.start_time >= lo,
+            Activity.start_time <= hi,
+        )
+        .order_by(Activity.start_time, Activity.activity_id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 def _batched(candidates: list[GboCandidate], size: int | None) -> list[list[GboCandidate]]:

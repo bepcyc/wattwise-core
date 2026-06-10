@@ -42,6 +42,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
+from tests.integration._fake_capability import fake_capability
 from tests.integration._session_provider import FactorySessionProvider
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus, Fidelity, SourceKind
@@ -51,6 +52,7 @@ from wattwise_core.ingestion.base import (
     FetchErrorKind,
     SourceDescriptorRef,
 )
+from wattwise_core.ingestion.capability import CapabilityDescriptor
 from wattwise_core.ingestion.registry import registry_from_adapters
 from wattwise_core.ingestion.sync import SyncOrchestrator, SyncOutcome, SyncWindow
 from wattwise_core.persistence.models import (
@@ -89,6 +91,7 @@ class HealthyAdapter:
     kind: ClassVar[SourceKind] = SourceKind.OAUTH_API
     adapter_version: ClassVar[str] = "1"
     mapping_version: ClassVar[str] = "1"
+    capability: ClassVar[CapabilityDescriptor] = fake_capability("healthy_api")
 
     def __init__(self) -> None:
         self.fetched = False
@@ -144,6 +147,7 @@ class RevokedAdapter:
     kind: ClassVar[SourceKind] = SourceKind.OAUTH_API
     adapter_version: ClassVar[str] = "1"
     mapping_version: ClassVar[str] = "1"
+    capability: ClassVar[CapabilityDescriptor] = fake_capability("revoked_api")
 
     async def fetch(
         self, *, api_key: str | None, athlete_native_id: str | None, window: SyncWindow
@@ -164,6 +168,7 @@ class CancellingAdapter:
     kind: ClassVar[SourceKind] = SourceKind.OAUTH_API
     adapter_version: ClassVar[str] = "1"
     mapping_version: ClassVar[str] = "1"
+    capability: ClassVar[CapabilityDescriptor] = fake_capability("cancel_api")
 
     async def fetch(
         self, *, api_key: str | None, athlete_native_id: str | None, window: SyncWindow

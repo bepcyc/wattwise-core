@@ -93,6 +93,10 @@ local_root = "/var/lib/wattwise/objects"
 # watermark/gap model (ING-UPS-R2). Strictly positive; loaded here (CFG-R1a), never a code
 # literal — operator-tunable.
 batch_size = 500
+# Backfill chunk size in days (SYN-R5): the on-demand backfill iterates the requested
+# historical range oldest-first in bounded windows of this many days, committing + advancing
+# the resume cursor per window (SYN-R6). Loaded here (CFG-R1a), never a code literal.
+backfill_window_days = 90
 
 [adapters.intervals_icu]
 # Intervals.icu outbound-client resilience values (CLI-R6/R10/R11, CFG-R1a). The typed
@@ -113,6 +117,8 @@ bucket_reduce_factor = 0.5
 bucket_min_rate = 0.5
 # --- request timeout (CLI-R4: connect + total read ceiling, seconds) ---
 http_timeout_s = 30.0
+# --- discover pagination (ADP-R7: page size for the discover phase's cursor pages) ---
+discover_page_size = 200
 
 [analytics]
 # PMC time constants (doc 40 PMC-R*): CTL=42d, ATL=7d exponential decay.
