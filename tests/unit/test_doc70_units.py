@@ -20,6 +20,7 @@ from wattwise_core.observability.audit import (
     audit_event,
     record_erasure_hook,
     reset_chain_for_tests,
+    verify_chain,
 )
 from wattwise_core.persistence.migrations_state import expected_head
 
@@ -33,8 +34,9 @@ def test_audit_events_form_a_verifiable_hash_chain() -> None:
     """Consecutive audit events chain: each ``prev_hash`` is the prior ``entry_hash`` (LOG-R6.2).
 
     The chain is recomputable from the records alone: ``entry_hash`` = SHA-256 over the
-    canonicalized payload + ``prev_hash``, so editing or dropping any earlier event
-    breaks verification of every later one (tamper evidence).
+    canonicalized payload INCLUDING ``stream`` and ``audit_seq`` + ``prev_hash``, so
+    editing, renumbering, stream-swapping, or dropping any earlier event breaks
+    verification of every later one (tamper evidence).
     """
     reset_chain_for_tests()
     first = audit_event("auth_token_issued", athlete_id="a-1")
@@ -42,14 +44,20 @@ def test_audit_events_form_a_verifiable_hash_chain() -> None:
     assert first["audit_seq"] == 1
     assert second["audit_seq"] == 2
     assert second["prev_hash"] == first["entry_hash"]
-    # Recompute the second hash independently from the record's own payload fields.
-    payload = {"event": "data_export_started", "athlete_id": "a-1"}
+    # Recompute the second hash independently from the record's own fields: the hash
+    # input is the payload PLUS the stream discriminator and the sequence number.
+    payload = {
+        "event": "data_export_started",
+        "athlete_id": "a-1",
+        "stream": "audit",
+        "audit_seq": 2,
+    }
     canonical = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     expected = hashlib.sha256((second["prev_hash"] + canonical).encode()).hexdigest()
     assert second["entry_hash"] == expected
     # A tampered payload no longer verifies against the recorded hash.
     tampered = json.dumps(
-        {"event": "data_export_started", "athlete_id": "a-2"},
+        {**payload, "athlete_id": "a-2"},
         sort_keys=True,
         default=str,
         separators=(",", ":"),
@@ -58,6 +66,38 @@ def test_audit_events_form_a_verifiable_hash_chain() -> None:
         hashlib.sha256((second["prev_hash"] + tampered).encode()).hexdigest()
         != (second["entry_hash"])
     )
+
+
+def test_audit_chain_verification_binds_seq_and_stream() -> None:
+    """``verify_chain`` fails on a renumbered or stream-swapped stored row (LOG-R6.2).
+
+    ``audit_seq`` and ``stream`` are hash INPUTS, so tampering either on a stored
+    record breaks verification even when the payload and linkage are untouched —
+    renumbering cannot be hidden by also fixing contiguity.
+    """
+    reset_chain_for_tests()
+    records = [
+        audit_event("auth_token_issued", athlete_id="a-1"),
+        audit_event("source_connected", athlete_id="a-1"),
+        audit_event("data_export_started", athlete_id="a-1"),
+    ]
+    assert verify_chain(records)
+    assert verify_chain([])  # an empty run verifies trivially
+    # Tamper audit_seq on the FIRST stored row: no predecessor enforces contiguity,
+    # so ONLY the seq-inside-the-hash binding can catch it — and it does.
+    renumbered = [dict(r) for r in records]
+    renumbered[0]["audit_seq"] = 9
+    assert not verify_chain(renumbered)
+    # Swap a stored row onto another stream: the hash no longer verifies.
+    swapped = [dict(r) for r in records]
+    swapped[0]["stream"] = "application"
+    assert not verify_chain(swapped)
+    # Dropping a middle record breaks linkage + contiguity for the rest.
+    assert not verify_chain([records[0], records[2]])
+    # Editing a payload field breaks the recomputed hash.
+    edited = [dict(r) for r in records]
+    edited[1]["athlete_id"] = "a-2"
+    assert not verify_chain(edited)
 
 
 def test_erasure_hook_event_names_the_athlete(  # LOG-R8

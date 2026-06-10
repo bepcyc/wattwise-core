@@ -23,7 +23,7 @@ from sqlalchemy import Table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
-from wattwise_core.domain.enums import GboType
+from wattwise_core.domain.enums import ActivityFileFormat, GboType
 from wattwise_core.ingestion import _canonical as _cw
 from wattwise_core.ingestion import _canonical_streams as _cs
 from wattwise_core.ingestion._candidate_store import (
@@ -51,6 +51,7 @@ from wattwise_core.ingestion._mapping import (
 from wattwise_core.ingestion.capability import UndeclaredGboTypeError
 from wattwise_core.ingestion.trust import load_trust_policy
 from wattwise_core.ingestion.validation import validate_candidate
+from wattwise_core.observability.audit import audit_event
 from wattwise_core.persistence.localdate import (
     MissingReferenceTimezone,
     project_local_date,
@@ -289,6 +290,15 @@ async def _write_wellness(svc: IngestService, athlete: uuid.UUID, local_date: _d
     )
 
 
+#: Original-file formats that can embed a raw GPS track (PRIV-R2). Every recording-file
+#: format the upload path currently produces (``.fit``/``.fit.gz`` land as ``fit``,
+#: plus ``gpx``/``tcx``) carries precise location, so all of them are withheld under
+#: the opt-out; ``json``/``other`` are not produced by the upload path today.
+_GPS_BEARING_FORMATS = frozenset(
+    {ActivityFileFormat.FIT, ActivityFileFormat.GPX, ActivityFileFormat.TCX}
+)
+
+
 async def _capture_original(
     svc: IngestService,
     athlete: uuid.UUID,
@@ -297,9 +307,29 @@ async def _capture_original(
     original: OriginalFile | None,
     fetched_at: _dt.datetime | None,
 ) -> None:
-    """Store the verbatim original file + its activity_file reference (ING-R8/FIL-R1)."""
+    """Store the verbatim original file + its activity_file reference (ING-R8/FIL-R1).
+
+    PRIV-R2: when the athlete has opted out of storing raw GPS coordinates and the
+    original format can embed a GPS track, the verbatim capture is WITHHELD entirely —
+    stripping only the canonical ``latlng`` channel while retaining the raw ``.fit``
+    bytes would leave the track in object storage. The skip is a typed, queryable
+    fact: the activity simply has no ``activity_file`` row, and a ``raw_file_withheld``
+    event (reason ``store_raw_gps``) goes to the audit stream + central structured log.
+    RAW-R1's verbatim retention is the default behavior, not a MUST that overrides the
+    explicit PRIV-R2 opt-out; the disclosed consequence is that RAW-R2 re-derivation is
+    unavailable for these activities.
+    """
     if original is None:
         return  # a direct-API source has no original recording file -> no ActivityFile
+    if not svc._store_raw_gps and original.file_format in _GPS_BEARING_FORMATS:
+        audit_event(
+            "raw_file_withheld",
+            reason="store_raw_gps",
+            athlete_id=str(athlete),
+            activity_id=str(activity_id),
+            file_format=original.file_format.value,
+        )
+        return
     store = svc._object_store or create_object_store()
     await _cw.create_activity_file(
         svc._session,

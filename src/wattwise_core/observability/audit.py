@@ -11,9 +11,11 @@ field so the shipper can route it to its dedicated, longer-retention sink.
 
 Tamper evidence (LOG-R6.2) is a per-process SHA-256 hash chain: each event carries
 ``audit_seq`` (monotonic), ``prev_hash`` (the previous event's ``entry_hash``), and
-``entry_hash`` = SHA-256 over the canonicalized event payload + ``prev_hash``. Removing,
-reordering, or editing any emitted event breaks the chain for every later event, so the
-stream is verifiable append-only from the records alone.
+``entry_hash`` = SHA-256 over the canonicalized event payload **including the
+``stream`` discriminator and ``audit_seq``** + ``prev_hash``. Removing, reordering,
+renumbering (``audit_seq`` tamper), stream-swapping, or editing any emitted event
+breaks verification, so the stream is verifiable append-only from the records alone
+(:func:`verify_chain`).
 
 LOG-R8's per-athlete erasure hook is :func:`record_erasure_hook`: a PRIV-R8 erasure
 emits an audit event naming the erased athlete so the platform's log retention layer
@@ -49,9 +51,19 @@ class _AuditChain:
         self._prev_hash = _GENESIS
 
     @staticmethod
-    def _entry_hash(payload: dict[str, Any], prev_hash: str) -> str:
-        """The SHA-256 chain hash over the canonicalized payload + previous hash."""
-        canonical = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    def _entry_hash(payload: dict[str, Any], prev_hash: str, seq: int, stream: str) -> str:
+        """SHA-256 over the canonicalized payload + ``stream`` + ``audit_seq`` + prev hash.
+
+        ``audit_seq`` and the ``stream`` discriminator are INSIDE the hash input, so
+        renumbering a stored record or swapping it onto another stream breaks
+        verification — not only deleting/reordering/editing the payload (LOG-R6.2).
+        """
+        canonical = json.dumps(
+            {**payload, "stream": stream, "audit_seq": seq},
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
         return hashlib.sha256((prev_hash + canonical).encode()).hexdigest()
 
     def append(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -64,7 +76,9 @@ class _AuditChain:
                 "audit_seq": self._seq,
                 "prev_hash": self._prev_hash,
             }
-            record["entry_hash"] = self._entry_hash(payload, self._prev_hash)
+            record["entry_hash"] = self._entry_hash(
+                payload, self._prev_hash, self._seq, AUDIT_STREAM
+            )
             self._prev_hash = record["entry_hash"]
         return record
 
@@ -106,9 +120,51 @@ def record_erasure_hook(athlete_id: str) -> dict[str, Any]:
     return audit_event("log_pii_erasure_hook", athlete_id=athlete_id)
 
 
+#: The chain-envelope keys a record carries OUTSIDE its event payload.
+_ENVELOPE_KEYS = frozenset({"stream", "audit_seq", "prev_hash", "entry_hash"})
+
+
+def verify_chain(records: list[dict[str, Any]]) -> bool:
+    """Verify a contiguous run of audit records from the records alone (LOG-R6.2).
+
+    For every record, recomputes ``entry_hash`` from its own payload fields + its
+    stored ``stream`` + ``audit_seq`` + ``prev_hash``, and checks that ``prev_hash``
+    links to the prior record's ``entry_hash`` and that ``audit_seq`` is contiguous.
+    Because ``audit_seq`` and ``stream`` are hash inputs, a renumbered or
+    stream-swapped record fails even when its payload is untouched. An empty run
+    verifies trivially; the first record anchors the run (its ``prev_hash`` is the
+    genesis sentinel for a full-process run, or the preceding segment's head).
+    """
+    prev_hash: str | None = None
+    prev_seq: int | None = None
+    for record in records:
+        payload = {k: v for k, v in record.items() if k not in _ENVELOPE_KEYS}
+        seq = record.get("audit_seq")
+        if not isinstance(seq, int):
+            return False
+        if prev_hash is not None and record.get("prev_hash") != prev_hash:
+            return False
+        if prev_seq is not None and seq != prev_seq + 1:
+            return False
+        expected = _AuditChain._entry_hash(
+            payload, str(record.get("prev_hash")), seq, str(record.get("stream"))
+        )
+        if record.get("entry_hash") != expected:
+            return False
+        prev_hash = expected
+        prev_seq = seq
+    return True
+
+
 def reset_chain_for_tests() -> None:
     """Reset the chain to genesis (test isolation only; never called in production)."""
     _chain.reset()
 
 
-__all__ = ["AUDIT_STREAM", "audit_event", "record_erasure_hook", "reset_chain_for_tests"]
+__all__ = [
+    "AUDIT_STREAM",
+    "audit_event",
+    "record_erasure_hook",
+    "reset_chain_for_tests",
+    "verify_chain",
+]

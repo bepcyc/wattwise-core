@@ -1,10 +1,13 @@
 """App lifespan: startup retention sweeps + graceful shutdown (RUN-R11, PRIV-R7/R11.2).
 
-RUN-R11: on ``SIGTERM`` the service stops accepting new work, marks itself NOT-READY
-(``app.state.draining`` flips the OBS-R6.2 readiness probe to 503 so the orchestrator
-drains it from rotation), lets the server drain in-flight requests within its bounded
-grace period (uvicorn delivers the shutdown lifespan event after the accept loop stops),
-and closes the connection pools cleanly. In-flight agent runs need no extra shutdown
+RUN-R11: on ``SIGTERM`` a loop signal handler registered at STARTUP immediately marks
+the instance NOT-READY (``app.state.draining`` flips the OBS-R6.2 readiness probe to
+503 so the orchestrator drains it from rotation WHILE the accept loop is still open —
+uvicorn delivers the shutdown lifespan event only after the accept loop stops, which
+is too late for a rolling deploy), chains to uvicorn's own handler so its graceful
+shutdown drains in-flight requests within the bounded grace period, and the lifespan
+finally re-asserts the drain flag (backstop) and closes the connection pools cleanly.
+In-flight agent runs need no extra shutdown
 work to stay resumable: every step is durably checkpointed at the node boundary by the
 agent-state saver (CKPT-R*), so a resumed instance continues from the last committed
 checkpoint — nothing here can lose or double a terminal settlement.
@@ -23,6 +26,9 @@ window is enforced again next boot), but every purge is recorded on the audit st
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import signal
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -49,17 +55,62 @@ def build_lifespan() -> Callable[[FastAPI], Any]:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """Startup: sweeps + ready; shutdown: drain-marked, pools closed (RUN-R11)."""
         app.state.draining = False
+        restore_handler = _install_sigterm_drain(app)
         await _run_retention_sweeps(app)
         try:
             yield
         finally:
-            # RUN-R11: mark not-ready FIRST (readiness 503 → drained from rotation),
-            # then close the pools. Agent runs are already durably checkpointed per
-            # step, so a resume continues from the last committed checkpoint.
+            # RUN-R11 BACKSTOP: the primary drain flip is the SIGTERM handler above,
+            # which fires while the server is STILL accepting (so the readiness probe
+            # turns 503 and the orchestrator drains the instance from rotation before
+            # uvicorn closes the accept loop). This finally re-asserts the flag for
+            # shutdown paths that never saw a SIGTERM, then closes the pools. Agent
+            # runs are already durably checkpointed per step, so a resume continues
+            # from the last committed checkpoint.
             app.state.draining = True
+            restore_handler()
             await _dispose_databases(app)
 
     return lifespan
+
+
+def _install_sigterm_drain(app: FastAPI) -> Callable[[], None]:
+    """Flip ``app.state.draining`` the instant ``SIGTERM`` arrives (RUN-R11).
+
+    The lifespan-shutdown flip alone is TOO LATE for rolling deploys: uvicorn delivers
+    the shutdown lifespan event only AFTER the accept loop has closed, so the readiness
+    probe would keep answering 200 through the whole drain window. This registers a
+    loop signal handler at STARTUP that marks the instance draining (readiness 503,
+    OBS-R6.2) while it still serves, then chains to the previously installed handler
+    (uvicorn's own, so its graceful shutdown still runs). The drain callback is also
+    exposed as ``app.state.begin_drain`` — the SIGTERM-equivalent seam for tests and
+    embedders. On platforms/threads without loop signal handlers (Windows Proactor,
+    non-main threads e.g. under TestClient) registration is skipped gracefully and the
+    lifespan-finally backstop still applies. Returns a restorer for lifespan shutdown.
+    """
+    previous = None
+    with contextlib.suppress(ValueError):  # signal API is main-thread-only
+        previous = signal.getsignal(signal.SIGTERM)
+
+    def _begin_drain() -> None:
+        app.state.draining = True  # readiness flips 503; in-flight requests still serve
+        if callable(previous):  # chain to uvicorn's handler → graceful shutdown proceeds
+            previous(signal.SIGTERM, None)
+
+    app.state.begin_drain = _begin_drain
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _begin_drain)
+    except (NotImplementedError, RuntimeError, ValueError):
+        return lambda: None  # unsupported platform/thread: finally backstop only
+
+    def _restore() -> None:
+        with contextlib.suppress(Exception):
+            loop.remove_signal_handler(signal.SIGTERM)
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+
+    return _restore
 
 
 async def _dispose_databases(app: FastAPI) -> None:

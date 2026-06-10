@@ -270,6 +270,63 @@ async def test_gps_default_stores_latlng(tmp_path: Path) -> None:
     assert "power_w" in channels
 
 
+async def test_gps_opt_out_withholds_verbatim_original_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The opt-out also withholds the verbatim GPS-bearing original file (PRIV-R2).
+
+    Stripping only the canonical ``latlng`` channel while storing the raw ``.fit``
+    bytes would leave the GPS track verbatim in object storage. An opted-out upload of
+    a GPS-bearing FIT therefore produces ZERO object-store writes and ZERO
+    ``activity_file`` rows, and the withholding is a disclosed, queryable fact: a
+    ``raw_file_withheld`` event (reason ``store_raw_gps``) on the audit stream. The
+    canonical activity (with its non-locating channels) still lands. The opted-in path
+    is unchanged (the retention test below stores and reads back the verbatim bytes).
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'withhold.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    objects_root = tmp_path / "objects"
+    store = LocalObjectStore(objects_root)
+    try:
+        async with factory() as session:
+            athlete_id, descriptor_id = await _seed_minimal(session)
+            svc = IngestService(session, object_store=store, store_raw_gps=False)
+            capsys.readouterr()  # drain anything logged before the act
+            await svc.ingest(
+                athlete_id,
+                descriptor_id,
+                [_gps_ride("withheld-ride-1")],
+                original_files=[
+                    OriginalFile(
+                        data=b"verbatim-gps-bytes",
+                        file_format=ActivityFileFormat.FIT,
+                        source_native_id="withheld-ride-1",
+                    )
+                ],
+            )
+            await session.commit()
+            logs = [
+                json.loads(line)
+                for line in capsys.readouterr().out.splitlines()
+                if line.startswith("{")
+            ]
+            # Zero activity_file rows and zero object-store writes.
+            assert (await session.execute(select(ActivityFile))).scalars().all() == []
+            assert not [p for p in objects_root.rglob("*") if p.is_file()]
+            # The canonical activity itself landed (only the raw file is withheld).
+            assert len((await session.execute(select(Activity))).scalars().all()) == 1
+            # The skip is disclosed on the audit stream via the central logger
+            # (the LOG-R5 allowlist redactor governs which fields ship verbatim).
+            withheld = [e for e in logs if e.get("event") == "raw_file_withheld"]
+            assert withheld, logs
+            assert withheld[0]["reason"] == "store_raw_gps"
+            assert withheld[0]["athlete_id"] == athlete_id  # the opaque id (PRIV-R5)
+    finally:
+        await engine.dispose()
+
+
 # ------------------------------------------------------- PRIV-R7 / PRIV-R11.2 raw-file purge
 
 
@@ -456,6 +513,29 @@ def test_shutdown_marks_draining_and_closes_pools(tmp_path: Path) -> None:
     assert app.state.draining is False
     client.__exit__(None, None, None)  # delivers the shutdown lifespan event
     assert app.state.draining is True  # drained from rotation before pool close (RUN-R11)
+
+
+def test_sigterm_drain_flips_readiness_while_still_serving(tmp_path: Path) -> None:
+    """SIGTERM flips readiness to 503 BEFORE the accept loop closes (RUN-R11).
+
+    The lifespan-finally flip alone is too late for a rolling deploy (uvicorn delivers
+    the shutdown lifespan event only after it stops accepting). The startup-registered
+    handler — exercised through its ``app.state.begin_drain`` SIGTERM-equivalent seam,
+    since a TestClient loop runs off the main thread where real signal delivery is
+    unavailable — marks the instance draining while it STILL serves: the readiness
+    probe answers 503 (drained from rotation) and liveness keeps answering 200.
+    """
+    app = create_app(_settings(tmp_path))
+    provision_app_schema(app)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.get("/readyz").status_code == 200
+        app.state.begin_drain()  # the SIGTERM handler body (RUN-R11)
+        assert app.state.draining is True
+        response = client.get("/readyz")
+        assert response.status_code == 503  # drained from rotation...
+        assert response.json()["checks"]["not_draining"] is False
+        assert client.get("/healthz").status_code == 200  # ...while still serving
+    assert app.state.draining is True  # the lifespan-finally backstop still holds
 
 
 # ------------------------------------------------------------- RUN-R13 stateless instances
