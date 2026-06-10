@@ -16,6 +16,7 @@ from wattwise_core.api.routers import (
     athlete,
     connections,
     connections_management,
+    export,
     goals,
     imports,
     onboarding,
@@ -30,6 +31,7 @@ from wattwise_core.api.routers import (
 #: Every feature router, in mount order. Each already carries its full ``/v1/...``
 #: prefix, so the factory includes them verbatim (no extra prefix).
 ROUTERS: list[APIRouter] = [
+    export.router,
     performance.router,
     performance_history.router,
     activities.router,

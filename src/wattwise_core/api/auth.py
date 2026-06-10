@@ -38,6 +38,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Final
 
 import jwt
+import structlog
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -53,8 +54,10 @@ TOKEN_ISSUER: Final = "wattwise-core"  # noqa: S105 (a public protocol value, no
 #: Symmetric signing algorithm for the first-party access token (token_signing_key).
 TOKEN_ALGORITHM: Final = "HS256"  # noqa: S105 (an algorithm name, not a secret)
 
-#: Default access-token lifetime; the issued ``expires_in`` echoes this (API-R23).
-DEFAULT_ACCESS_TTL_SECONDS: Final = 3600
+#: SEC-R2.3 hard ceiling on the access-token lifetime (60 minutes). The configured value
+#: (``auth__access_ttl_seconds``) is validated ≤ this at config load; the issuer enforces
+#: it again fail-closed so no caller can mint an over-an-hour or non-expiring token.
+MAX_ACCESS_TTL_SECONDS: Final = 3600
 
 #: The WWW-Authenticate challenge returned with every ``401`` (AUTH-R1).
 _BEARER_CHALLENGE: Final = {"WWW-Authenticate": "Bearer"}
@@ -195,9 +198,7 @@ _bearer_scheme: Final = HTTPBearer(auto_error=False, scheme_name="bearer")
 
 def authenticate(
     request: Request,
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
-    ],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
 ) -> Principal:
     """Resolve the acting :class:`Principal` from the bearer token (AUTH-R1/R2/R3/R6).
 
@@ -212,6 +213,10 @@ def authenticate(
     settings = _settings_of(request)
     principal = _principal_from_claims(_decode(credentials.credentials, settings))
     request.state.athlete_id = principal.athlete_id
+    # LOG-R3 / OBS-R2: bind the opaque athlete id into the request's log-correlation
+    # context (cleared by RequestContextMiddleware at request end) so every log line
+    # emitted while serving this request carries it.
+    structlog.contextvars.bind_contextvars(athlete_id=principal.athlete_id)
     return principal
 
 
@@ -263,15 +268,22 @@ def issue_access_token(
     *,
     subject: str,
     scopes: Iterable[Scope],
-    ttl_seconds: int = DEFAULT_ACCESS_TTL_SECONDS,
+    ttl_seconds: int | None = None,
 ) -> AuthTokens:
     """Mint a signed first-party access token for ``subject`` (API-R23, AUTH-R6).
 
     The token carries the verified-on-every-request claims (``iss``/``aud``/``exp``/
     ``sub``/``scope``) so :func:`authenticate` can re-derive the principal entirely
-    server-side. The refresh token is a separate opaque credential minted by the auth
-    router (rotation/reuse-detection live there); this helper issues the access leg.
+    server-side. The lifetime is the CONFIG-LOADED ``auth__access_ttl_seconds``
+    (SEC-R2.3 — validated 1..3600 at config load) unless the caller passes an explicit
+    ``ttl_seconds``; either way a non-positive or over-an-hour lifetime is refused
+    fail-closed here (never read as "never expires"). The refresh token is a separate
+    opaque credential minted by the refresh router (rotation/reuse-detection live
+    there); this helper issues the access leg.
     """
+    ttl = settings.auth__access_ttl_seconds if ttl_seconds is None else ttl_seconds
+    if not 0 < ttl <= MAX_ACCESS_TTL_SECONDS:
+        raise ProblemError("internal-error")  # SEC-R2.3: never an unbounded lifetime
     granted = tuple(scope.value for scope in scopes)
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
@@ -280,19 +292,19 @@ def issue_access_token(
         "sub": subject,
         "scope": " ".join(granted),
         "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),
+        "exp": int((now + timedelta(seconds=ttl)).timestamp()),
     }
     access = jwt.encode(payload, _signing_key(settings), algorithm=TOKEN_ALGORITHM)
     return AuthTokens(
         access_token=access,
         refresh_token="",
-        expires_in=ttl_seconds,
+        expires_in=ttl,
         scopes=granted,
     )
 
 
 __all__ = [
-    "DEFAULT_ACCESS_TTL_SECONDS",
+    "MAX_ACCESS_TTL_SECONDS",
     "TOKEN_AUDIENCE",
     "TOKEN_ISSUER",
     "AuthTokens",

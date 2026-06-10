@@ -31,7 +31,7 @@ from collections.abc import Callable
 from importlib import import_module
 from typing import Annotated, Any, Final
 
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,15 +40,22 @@ from wattwise_core.agent.engine import UnconfiguredAgentEngine, build_agent_engi
 from wattwise_core.agent.state_db import build_agent_state_database
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.api.auth import (
+    AuthTokens,
     Principal,
     Scope,
     authenticate,
     issue_access_token,
     require_scopes,
 )
+from wattwise_core.api.auth_refresh import build_refresh_router, mint_refresh_token
 from wattwise_core.api.deps import AppSettings, get_db, get_master_data_db, get_rate_limiter
 from wattwise_core.api.errors import ProblemError, install_error_handlers
-from wattwise_core.api.middleware import EndpointMetricsMiddleware, JSONBodySizeLimitMiddleware
+from wattwise_core.api.lifecycle import build_lifespan
+from wattwise_core.api.middleware import (
+    EndpointMetricsMiddleware,
+    JSONBodySizeLimitMiddleware,
+    RequestContextMiddleware,
+)
 from wattwise_core.api.openapi import install_openapi
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers import activities as activities_router
@@ -70,13 +77,16 @@ from wattwise_core.api.security import (
     mount_readiness,
     resolve_entitlement,
 )
+from wattwise_core.api.service_auth import ServiceAuthMiddleware
 from wattwise_core.api.wiring import build_ingestion_seams
 from wattwise_core.config import Settings, get_settings
 from wattwise_core.entitlement import OssEntitlementResolver, validate_plan
 from wattwise_core.identity import OWNER_SUBJECT
+from wattwise_core.observability.audit import audit_event
 from wattwise_core.observability.logging import configure_logging
 from wattwise_core.observability.metrics import get_registry
 from wattwise_core.persistence import Database
+from wattwise_core.seams import EngineSessionProvider
 
 #: The WWW-Authenticate challenge returned with an invalid sign-in (AUTH-R1/API-R23).
 _BEARER_CHALLENGE: Final = {"WWW-Authenticate": "Bearer"}
@@ -117,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=_OPENAPI_PATH,
         docs_url=_DOCS_PATH,
         redoc_url=None,
+        lifespan=build_lifespan(),  # RUN-R11: drain-marked shutdown + clean pool close
     )
     app.state.settings = resolved
     app.state.database = Database(resolved)
@@ -143,7 +154,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     install_security_middleware(app, resolved)
+    # SEC-R4: the constant-time X-Service-Auth service-principal second factor —
+    # verified OUTSIDE Authorization, in addition to (never instead of) the bearer gate.
+    app.add_middleware(ServiceAuthMiddleware, settings=resolved)
     app.add_middleware(JSONBodySizeLimitMiddleware)
+    # LOG-R3: bind/clear the per-request correlation context (request_id) around every
+    # request so each log line emitted while serving it carries the correlation ids.
+    app.add_middleware(RequestContextMiddleware)
     # Added LAST so it is the OUTERMOST middleware: it times the WHOLE request (including a
     # body-size rejection or a security-middleware short-circuit) and reads the matched route the
     # router binds into the shared scope, recording the OBS-R5 per-endpoint request/latency/error
@@ -155,6 +172,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mount_readiness(app)
     app.include_router(_public_router())
     app.include_router(_auth_router())
+    app.include_router(build_refresh_router(API_PREFIX))
     register_routers(app)
     _wire_router_seams(app)
     install_openapi(app)
@@ -257,9 +275,7 @@ def _wire_router_seams(app: FastAPI) -> None:
         overrides[connections_router.credential_sink] = lambda: sink
 
 
-def _wire_planning(
-    overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object
-) -> None:
+def _wire_planning(overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object) -> None:
     """Bind the planning router's seams to the real gates + the shared agent engine (API-R32).
 
     The planning surface mirrors the agent/performance routers: GENERATION (``POST
@@ -433,11 +449,33 @@ def _auth_router() -> APIRouter:
     router = APIRouter(prefix=f"{API_PREFIX}/auth", tags=["auth"])
 
     @router.post("/token", operation_id="issueToken")
-    async def issue_token(body: _TokenRequest, settings: AppSettings) -> dict[str, object]:
-        """Exchange the first-party owner credential for an access token (API-R23/R24)."""
+    async def issue_token(
+        body: _TokenRequest, settings: AppSettings, request: Request
+    ) -> dict[str, object]:
+        """Exchange the owner credential for access + revocable refresh tokens (API-R23/R24).
+
+        The access lifetime is the config-loaded ``auth__access_ttl_seconds`` (SEC-R2.3);
+        the refresh leg is a SEPARATE opaque, revocable credential persisted hash-only and
+        rotated by ``POST /v1/auth/refresh``. Issuance is recorded on the tamper-evident
+        audit stream (LOG-R6.2: authentication events).
+        """
         _verify_owner_secret(settings, body.owner_secret)
-        tokens = issue_access_token(settings, subject=OWNER_SUBJECT, scopes=_OWNER_SCOPES)
-        return tokens.to_dict()
+        access = issue_access_token(settings, subject=OWNER_SUBJECT, scopes=_OWNER_SCOPES)
+        database: Database = request.app.state.database
+        async with EngineSessionProvider(database).session(subject=OWNER_SUBJECT) as session:
+            refresh = await mint_refresh_token(
+                session,
+                settings,
+                subject=OWNER_SUBJECT,
+                scopes=tuple(s.value for s in _OWNER_SCOPES),
+            )
+        audit_event("auth_token_issued", athlete_id=OWNER_SUBJECT)
+        return AuthTokens(
+            access_token=access.access_token,
+            refresh_token=refresh,
+            expires_in=access.expires_in,
+            scopes=access.scopes,
+        ).to_dict()
 
     return router
 

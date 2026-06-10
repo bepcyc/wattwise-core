@@ -15,6 +15,7 @@ provenance.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 from collections import defaultdict
 from dataclasses import dataclass
@@ -210,9 +211,7 @@ class AnalyticsService:  # noqa: size-limits
             # inapplicable sport is gated as NOT_APPLICABLE_FOR_SPORT inside wbal().
             return _wbal.wbal(None, None, None, sport=act.sport)
         sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
-        return _wbal.wbal(
-            resample_to_1hz(power), sig.cp_w, sig.w_prime_j, sport=act.sport
-        )
+        return _wbal.wbal(resample_to_1hz(power), sig.cp_w, sig.w_prime_j, sport=act.sport)
 
     async def aerobic_decoupling(self, activity_id: str) -> MetricResult[float]:
         """Compute aerobic decoupling for an activity (DEC-R1)."""
@@ -377,7 +376,11 @@ class AnalyticsService:  # noqa: size-limits
         series = [loads[d] for d in ordered]
         # Thread per-day load coverage: a day fed by a substituted member carries
         # SUBSTITUTED + reduced confidence (DEGR-R2), never presented as raw power-TSS.
-        full = _pmc.pmc(series, seed=seed, day_load_coverage=[day_cov[d] for d in ordered])
+        # PERF-R3: the PMC series computation is CPU-bound numpy work; run it on a
+        # worker thread so a long-history request never blocks the event loop.
+        full = await asyncio.to_thread(
+            _pmc.pmc, series, seed=seed, day_load_coverage=[day_cov[d] for d in ordered]
+        )
         start_index = (from_date - origin).days
         return full[start_index:]
 
@@ -401,7 +404,11 @@ class AnalyticsService:  # noqa: size-limits
             if power is None:
                 continue
             aid, day = str(act.activity_id), act.start_time.date()
-            _fold_curve_point(best, power, activity_id=aid, local_date=day, sport=sport)
+            # PERF-R3: the per-activity mean-maximal window scan is CPU-bound; offload it
+            # so a season-long curve build never blocks the event loop.
+            await asyncio.to_thread(
+                _fold_curve_point, best, power, activity_id=aid, local_date=day, sport=sport
+            )
         return best
 
     async def critical_power(
@@ -410,7 +417,8 @@ class AnalyticsService:  # noqa: size-limits
         """Fit CP/W' from the sport-partitioned aggregate power curve (CP-R1, ANL-R13)."""
         curve = await self.power_curve(athlete_id, from_date, to_date, sport=sport)
         points = {d: res.value.mean_power_w for d, res in curve.items() if is_computed(res)}
-        return _mmp.cp_wprime(points, sport=sport)
+        # PERF-R3: the CP/W' curve fit is CPU-bound; offload it off the event loop.
+        return await asyncio.to_thread(_mmp.cp_wprime, points, sport=sport)
 
     async def endurance_score(self, athlete_id: str, as_of: _dt.date) -> MetricResult[float]:
         # Composed of upstream capability results only (CTL / durability / decoupling):
@@ -418,9 +426,7 @@ class AnalyticsService:  # noqa: size-limits
         """Composed ``[0,100]`` endurance score as-of a local date (ES-R1/R2/R3)."""
         return await _gather_endurance_score(self, athlete_id, as_of)
 
-    async def hrv(
-        self, athlete_id: str, local_date: _dt.date
-    ) -> MetricResult[_hrv.TimeDomainHrv]:
+    async def hrv(self, athlete_id: str, local_date: _dt.date) -> MetricResult[_hrv.TimeDomainHrv]:
         """Compute time-domain HRV for a wellness day (HRV-R0/R3, fail-closed)."""
         rr = await _load_wellness_rr(self._session, athlete_id, local_date)
         summary = await _load_wellness_hrv_summary(self._session, athlete_id, local_date)

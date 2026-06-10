@@ -41,6 +41,7 @@ from wattwise_core.persistence.models.athlete import (
 from wattwise_core.persistence.models.athlete_preference import (
     AthleteSourcePreference,
 )
+from wattwise_core.persistence.models.auth import AuthRefreshToken
 from wattwise_core.persistence.models.derived import (
     DerivedActivityMetric,
     FitnessStateDaily,
@@ -76,6 +77,7 @@ __all__ = [
     "ActivityStreamSet",
     "Athlete",
     "AthleteSourcePreference",
+    "AuthRefreshToken",
     "Base",
     "Connection",
     "DailyWellness",

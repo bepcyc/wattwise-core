@@ -31,27 +31,15 @@ Layer: L3 ingestion/sync — the ONLY writer to the store (ARCH-R3, via
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 from typing import Any
 
 from sqlalchemy import select
 
 from wattwise_core.domain.enums import ConnectionStatus
-from wattwise_core.ingestion._sync_discover import (
-    DiscoverFetch,
-    DiscoverOutput,
-    PhaseStats,
-    emit_run_trace,
-)
-from wattwise_core.ingestion._sync_run import (
-    AdapterFetch,
-    OriginalArtifactSource,
-    RunContext,
-    discover_batch,
-    fetch_and_map,
-    land,
-    narrow_incremental,
-)
+from wattwise_core.ingestion._sync_exec import sync_one
+from wattwise_core.ingestion._sync_run import AdapterFetch, OriginalArtifactSource, RunContext
 from wattwise_core.ingestion._sync_targets import (
     SessionFactory,
     SourceSyncResult,
@@ -60,18 +48,13 @@ from wattwise_core.ingestion._sync_targets import (
     SyncWindow,
     _ConnectionTarget,
     _uid,
-    degrade_with_gap,
-    degraded,
-    handle_reauth,
-    skipped,
 )
 from wattwise_core.ingestion.backfill import (
     advance_backfill_cursor,
     chunk_windows,
     read_backfill_cursor,
 )
-from wattwise_core.ingestion.base import AuthError
-from wattwise_core.ingestion.registry import AdapterRegistry, UnknownSourceError
+from wattwise_core.ingestion.registry import AdapterRegistry
 from wattwise_core.persistence.models import Connection, SourceDescriptor
 from wattwise_core.persistence.types import utcnow, uuid7
 from wattwise_core.seams import SessionProvider
@@ -100,12 +83,25 @@ class SyncOrchestrator:
         registry: AdapterRegistry,
         credential_store: CredentialStore | None = None,
         now: Any = None,
+        concurrency: int = 1,
+        store_raw_gps: bool = True,
     ) -> None:
         self._sessions = sessions
         self._registry = registry
         self._credentials = credential_store
         self._now = now or utcnow
-        self._ctx = RunContext(sessions=sessions, credentials=credential_store, now=self._now)
+        # PERF-R2: independent source syncs run CONCURRENTLY bounded by this limit
+        # (loaded config, ``ingestion__sync_concurrency``; per-provider pacing is the
+        # adapter token-bucket, CLI-R10). The wiring clamps it to 1 on SQLite — the
+        # single-writer backend degrades gracefully to serialized syncs (PERF-R2 caveat)
+        # with no correctness loss. Never below 1 (fail-closed against a 0/negative knob).
+        self._concurrency = max(1, concurrency)
+        self._ctx = RunContext(
+            sessions=sessions,
+            credentials=credential_store,
+            now=self._now,
+            store_raw_gps=store_raw_gps,
+        )
 
     def _factory_for(self, athlete_id: str) -> SessionFactory:
         """A zero-arg :class:`SessionFactory` over the provider seam, subject-bound (SEAM-R11)."""
@@ -135,11 +131,30 @@ class SyncOrchestrator:
         )
         explicit_window = window is not None
         connections = await self._select_connections(athlete_id, connection_id, source)
-        for conn in connections:
-            result = await self._sync_one(
-                athlete_id, conn, win, fetched_at, run.sync_run_id, explicit_window
-            )
-            run.results.append(result)
+        if self._concurrency <= 1 or len(connections) <= 1:
+            for conn in connections:
+                result = await self._sync_one(
+                    athlete_id, conn, win, fetched_at, run.sync_run_id, explicit_window
+                )
+                run.results.append(result)
+            return run
+        # PERF-R2: independent sources run CONCURRENTLY, bounded by the configured
+        # limit. Each source still lands in its OWN transaction/session (CON-R3), and
+        # ``_sync_one`` never raises past itself, so one failure degrades only its own
+        # result. Results are collected in connection order (deterministic output).
+        semaphore = asyncio.Semaphore(self._concurrency)
+        ordered: list[SourceSyncResult | None] = [None] * len(connections)
+
+        async def _bounded(index: int, conn: _ConnectionTarget) -> None:
+            async with semaphore:
+                ordered[index] = await self._sync_one(
+                    athlete_id, conn, win, fetched_at, run.sync_run_id, explicit_window
+                )
+
+        async with asyncio.TaskGroup() as group:
+            for index, conn in enumerate(connections):
+                group.create_task(_bounded(index, conn))
+        run.results.extend(result for result in ordered if result is not None)
         return run
 
     async def _select_connections(
@@ -225,8 +240,12 @@ class SyncOrchestrator:
             if result.outcome is not SyncOutcome.OK:
                 break  # resume point = last committed window; re-run continues here
             await advance_backfill_cursor(
-                factory, athlete, descriptor, range_oldest=window.oldest,
-                through=_dt.date.fromisoformat(win.newest), ingest_run_id=_uid(sync_run_id),
+                factory,
+                athlete,
+                descriptor,
+                range_oldest=window.oldest,
+                through=_dt.date.fromisoformat(win.newest),
+                ingest_run_id=_uid(sync_run_id),
             )
         return results
 
@@ -239,53 +258,16 @@ class SyncOrchestrator:
         sync_run_id: str,
         explicit_window: bool,
     ) -> SourceSyncResult:
-        """Authorize -> discover -> fetch -> map -> land ONE source, never raising past it.
-
-        Prefers the full five-phase :class:`DiscoverFetch` contract (ADP-R4/R5/R7);
-        falls back to the legacy window-fetch seam for adapters that expose only
-        ``fetch``. A failure degrades WITH a persisted typed gap (ING-R3), never a
-        crash (CON-R3 / ARCH-R9) and never a swallowed-into-a-string outcome.
-        """
-        try:
-            adapter = self._registry.get(target.source_key)
-        except UnknownSourceError:
-            return degraded(target, "source is not installed")
-        if not isinstance(adapter, DiscoverFetch | AdapterFetch):
-            # No direct-API fetch seam (e.g. connectionless file upload): nothing to
-            # pull on demand. Skipped, not degraded — this is the expected shape.
-            return skipped(target, "source has no on-demand fetch")
-        since: _dt.datetime | None = None
-        if not explicit_window:
-            window, since = await narrow_incremental(self._ctx, athlete_id, target, window)
-        stats = PhaseStats()
-        out: DiscoverOutput | None = None
-        try:
-            if isinstance(adapter, DiscoverFetch):
-                out = await discover_batch(
-                    self._ctx, adapter, target, window, fetched_at, sync_run_id, since
-                )
-                batch, stats = out.batch, out.stats
-            else:
-                batch, stats = await fetch_and_map(
-                    self._ctx, adapter, target, window, fetched_at, sync_run_id
-                )
-        except AuthError as exc:  # credential revoked/expired -> reauth, stop the source (AUT-R4)
-            result = await handle_reauth(
-                self._factory_for(athlete_id), athlete_id, target, exc, seen_at=fetched_at
-            )
-            emit_run_trace(target.source_key, result.outcome.value, stats, gaps_opened=1)
-            return result
-        except Exception as exc:  # isolate the failure; degrade + typed gap (ARCH-R9/ING-R3)
-            result = await degrade_with_gap(
-                self._factory_for(athlete_id), athlete_id, target, window, exc,
-                seen_at=fetched_at, detail="source fetch or mapping failed",
-            )
-            emit_run_trace(target.source_key, result.outcome.value, stats, gaps_opened=1)
-            return result
-        originals = adapter.original_files() if isinstance(adapter, OriginalArtifactSource) else []
-        return await land(
-            self._ctx, athlete_id, target, batch, window, sync_run_id, fetched_at, originals,
-            adapter=adapter, discover=out, stats=stats,
+        """Run ONE source's sync leg (delegates to :func:`._sync_exec.sync_one`)."""
+        return await sync_one(
+            self._ctx,
+            self._registry,
+            athlete_id,
+            target,
+            window,
+            fetched_at,
+            sync_run_id,
+            explicit_window,
         )
 
 

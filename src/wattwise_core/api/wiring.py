@@ -26,6 +26,7 @@ journey. Configuring a probe upgrades the api_key path in place through the same
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -91,9 +92,27 @@ def build_ingestion_seams(database: Database, settings: Settings) -> IngestionSe
     store = _build_credential_store(settings)
     return IngestionSeams(
         import_processor=_make_import_processor(database, settings, registry),
-        sync_orchestrator=_make_sync_orchestrator(database, registry, store),
+        sync_orchestrator=_make_sync_orchestrator(
+            database,
+            registry,
+            store,
+            concurrency=_sync_concurrency(settings),
+            store_raw_gps=settings.privacy__store_raw_gps,
+        ),
         credential_sink=CredentialSink(store=store.store) if store is not None else None,
     )
+
+
+def _sync_concurrency(settings: Settings) -> int:
+    """The PERF-R2 bounded sync concurrency, clamped to 1 on SQLite.
+
+    Independent source syncs run concurrently up to ``ingestion__sync_concurrency``
+    (loaded config, CFG-R1a). On SQLite the canonical write is single-writer, so the
+    runner degrades gracefully to serialized syncs with no correctness loss (the
+    PERF-R2 backend caveat); PostgreSQL/MariaDB get the configured limit.
+    """
+    dsn = settings.canonical_write_dsn() or ""
+    return 1 if dsn.startswith("sqlite") else settings.ingestion__sync_concurrency
 
 
 def _build_credential_store(settings: Settings) -> CredentialStore | None:
@@ -142,8 +161,14 @@ def _make_import_processor(
                 kind=SourceKind(descriptor.kind),
             )
             try:
-                decoded = adapter.decode_upload(
-                    data, filename=filename, source_descriptor=ref, fetch_context=ctx
+                # PERF-R3: FIT/GPX/TCX decode is CPU-bound; run it on a worker thread so
+                # a large-file parse never blocks the event loop mid-request.
+                decoded = await asyncio.to_thread(
+                    adapter.decode_upload,
+                    data,
+                    filename=filename,
+                    source_descriptor=ref,
+                    fetch_context=ctx,
                 )
             except FileImportError as exc:
                 raise ImportRejected(
@@ -162,6 +187,7 @@ def _make_import_processor(
                 session,
                 object_store=_object_store(),
                 batch_size=settings.ingestion__batch_size,
+                store_raw_gps=settings.privacy__store_raw_gps,
             ).ingest(
                 athlete_id,
                 descriptor.source_descriptor_id,
@@ -194,7 +220,12 @@ def _file_import_adapter(registry: AdapterRegistry) -> FileImportAdapter:
 
 
 def _make_sync_orchestrator(
-    database: Database, registry: AdapterRegistry, store: CredentialStore | None
+    database: Database,
+    registry: AdapterRegistry,
+    store: CredentialStore | None,
+    *,
+    concurrency: int = 1,
+    store_raw_gps: bool = True,
 ) -> RouterSyncOrchestrator:
     """Adapt the real :class:`SyncOrchestrator` to the router's started-run seam (API-R46a).
 
@@ -203,7 +234,11 @@ def _make_sync_orchestrator(
     via a raw bound ``database.session`` method.
     """
     orchestrator = SyncOrchestrator(
-        EngineSessionProvider(database), registry=registry, credential_store=store
+        EngineSessionProvider(database),
+        registry=registry,
+        credential_store=store,
+        concurrency=concurrency,
+        store_raw_gps=store_raw_gps,
     )
 
     async def run(target: SyncTarget) -> RouterSyncRun:

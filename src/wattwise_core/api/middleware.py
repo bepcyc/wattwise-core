@@ -20,8 +20,10 @@ OBS-R5 (per-endpoint request rate/latency/error rate).
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Final
 
+import structlog
 from fastapi import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -171,8 +173,48 @@ def _route_template(scope: Scope) -> str:
     return "unmatched"
 
 
+class RequestContextMiddleware:
+    """Bind the per-request correlation context into the log stream (LOG-R3 / OBS-R2).
+
+    LOG-R3: every log line carries, where applicable, the ``request_id`` (and the
+    athlete/run ids bound downstream: :func:`wattwise_core.api.auth.authenticate` binds
+    ``athlete_id`` once the token verifies; the agent run-invoke binds
+    ``trace_id``/``run_id``/``thread_id``). This middleware CLEARS any stale context and
+    binds a fresh ``request_id`` (honoring an inbound ``X-Request-ID`` so a gateway's id
+    correlates end-to-end, else minting one) for the duration of the request, so a
+    request is fully reconstructable from the structured stream by its ids.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Clear stale context, bind ``request_id``, serve, then clear again."""
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        request_id = _inbound_request_id(scope) or str(uuid.uuid4())
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        try:
+            await self._app(scope, receive, send)
+        finally:
+            structlog.contextvars.clear_contextvars()
+
+
+def _inbound_request_id(scope: Scope) -> str | None:
+    """A sane inbound ``X-Request-ID`` value, if the gateway supplied one."""
+    for key, value in scope.get("headers", []):
+        if key.lower() == b"x-request-id":
+            text = str(bytes(value).decode("latin-1")).strip()
+            if 0 < len(text) <= 128:
+                return text
+    return None
+
+
 __all__ = [
     "DEFAULT_JSON_MAX_BYTES",
     "EndpointMetricsMiddleware",
     "JSONBodySizeLimitMiddleware",
+    "RequestContextMiddleware",
 ]

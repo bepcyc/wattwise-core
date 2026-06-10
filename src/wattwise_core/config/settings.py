@@ -162,6 +162,30 @@ class Settings(BaseSettings):
     api__rate_limit_per_minute: int = Field(ge=1)
     api__request_max_bytes: int = Field(ge=1)
 
+    # --- auth: first-party token lifetimes (SEC-R2.3, CFG-R1a) ---
+    # Access-token lifetime MUST be <= 60 minutes and a 0/negative/unbounded lifetime is
+    # rejected AT CONFIG LOAD (SEC-R2.3): ``ge=1`` refuses 0/negative and ``le=3600`` refuses
+    # an unbounded/over-an-hour lifetime — never interpreted as "never expires". Refresh is a
+    # SEPARATE, revocable opaque token whose own finite window is bounded the same way.
+    auth__access_ttl_seconds: int = Field(ge=1, le=3600)
+    auth__refresh_ttl_days: int = Field(ge=1, le=365)
+
+    # --- privacy (PRIV-R2): athlete opt-out of storing raw GPS coordinates ---
+    # When false, ingestion drops the raw ``latlng`` channel before canonical landing while
+    # every derived non-locating metric still lands. Loaded config (CFG-R1a) — in the
+    # single-athlete OSS the layered config IS the athlete/operator surface.
+    privacy__store_raw_gps: bool
+
+    # --- database pool sizing (PERF-R4, CFG-R1a) ---
+    # Bounded connection pools with explicit sizes, acquisition timeout, and recycling for
+    # the server backends (PostgreSQL/MariaDB); pool exhaustion surfaces as a bounded-wait
+    # error after ``pool_timeout_s``, never an unbounded hang. SQLite keeps its small
+    # non-pooled footprint (these knobs do not apply there). Values live in defaults.toml.
+    database__pool_size: int = Field(ge=1)
+    database__max_overflow: int = Field(ge=0)
+    database__pool_timeout_s: float = Field(gt=0)
+    database__pool_recycle_s: int = Field(ge=-1)
+
     # --- security: CORS / allowed-host / transport headers (SEC-R10/.1/.2, CFG-R1a) ---
     # Config-driven, never hardcoded origins/hosts (SEC-R10.2 "no per-deployment values
     # baked into code"). The OSS defaults are first-party-client-correct out of the box;
@@ -213,6 +237,11 @@ class Settings(BaseSettings):
     # later batch fails (ING-UPS-R3). Strictly positive; the value lives here (CFG-R1a),
     # never a code literal.
     ingestion__batch_size: int = Field(ge=1)
+    # PERF-R2: independent source syncs run CONCURRENTLY bounded by this limit (the
+    # per-provider rate limit is the adapter token-bucket, CLI-R10). On SQLite the caller
+    # clamps to 1 (single-writer graceful degradation, PERF-R2 backend caveat). Strictly
+    # positive — 0/negative is rejected at config load (SEC-R11.2 fail-closed rule).
+    ingestion__sync_concurrency: int = Field(ge=1)
 
     # --- adapters: Intervals.icu outbound-client resilience (CLI-R6/R10/R11, CFG-R1a) ---
     # The typed client's per-source retry budget (CLI-R6) + client-side token-bucket limiter
@@ -365,6 +394,12 @@ class Settings(BaseSettings):
     encryption_root_key: SecretStr | None = None
     token_signing_key: SecretStr | None = None
     llm_api_key: SecretStr | None = None
+    # SEC-R4: the OPTIONAL high-entropy service-principal shared secret a first-party
+    # service runtime (e.g. the Telegram bot) presents in the dedicated ``X-Service-Auth``
+    # header — compared in constant time, carried OUTSIDE ``Authorization``, and presented
+    # IN ADDITION to the athlete bearer token, never as a replacement. Env/secret-store
+    # only (CFG-R2); unset means no service principal is provisioned.
+    service_auth_secret: SecretStr | None = None
 
     def canonical_write_dsn(self) -> str | None:
         """The canonical-WRITE DSN (Ingestion/Sync role, ARCH-R3); ``None`` if unset."""
@@ -495,6 +530,7 @@ def _require_strong_signing_key(self: Settings) -> None:
             "(too few distinct bytes — a repeated/degenerate value, not real entropy); "
             "the service refuses to start (SEC-R3)"
         )
+
 
 def _reject_wildcard_cors_with_credentials(self: Settings) -> None:
     """Reject the wildcard-origin + credentials configuration cliff (SEC-R10 / SEC-R10-AC).
