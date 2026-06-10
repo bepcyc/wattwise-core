@@ -133,6 +133,36 @@ training_load_confidence_penalty = 0.7
 # instead of thresholds derived from a bad fit). A modeled signature carrying NO
 # fit_quality is refused outright.
 signature_min_fit_r2 = 0.85
+# --- endurance-score (ES-R1): declared, documented weighting + normalization ---
+# The score is 100 x the weight-renormalized mean of three [0,1] component scores
+# (the engine embeds NO hidden constants — every knob lives here, CFG-R1a):
+#   f_ctl        = clamp(CTL / ctl_full_scale, 0, 1)                        (higher CTL -> higher)
+#   f_durability = clamp((ratio - floor) / (ceiling - floor), 0, 1)         (higher ratio -> higher)
+#   f_decoupling = clamp(1 - drift_pct / decoupling_full_penalty_pct, 0, 1) (higher drift -> lower)
+# Weights are relative (renormalized over the present components); each >= 0, sum > 0.
+endurance_score_weight_ctl = 0.4
+endurance_score_weight_durability = 0.3
+endurance_score_weight_decoupling = 0.3
+# CTL at (or above) which the chronic-load component saturates at 1.0.
+endurance_score_ctl_full_scale = 100.0
+# Durability ratio MMP(long_s)/MMP(short_s) normalization band: floor -> 0, ceiling -> 1.
+endurance_score_durability_floor = 0.5
+endurance_score_durability_ceiling = 1.0
+# Aerobic-decoupling drift (%) at (or above) which the decoupling component bottoms at 0.
+endurance_score_decoupling_full_penalty_pct = 10.0
+# ES-R2 scoring policy: when true, a subset containing CTL (the non-substitutable
+# component) is a DECLARED-valid composition basis — the score composes on the available
+# components with reduced confidence recorded in QualityReport. When false, any missing
+# component fails closed to Unavailable(MISSING_REQUIRED_INPUT). Never a silent 0.
+endurance_score_allow_partial = true
+# Confidence multiplier applied when composing on a declared-valid partial subset (ES-R2b).
+endurance_score_partial_confidence_penalty = 0.7
+# Service gather window (days back from as_of) for the power-curve durability ratio and
+# the most-recent aerobic-decoupling sample.
+endurance_score_window_days = 90
+# Power-curve durations for the durability ratio MMP(long)/MMP(short) (ES-R1: 20 vs 5 min).
+endurance_score_long_duration_s = 1200
+endurance_score_short_duration_s = 300
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.

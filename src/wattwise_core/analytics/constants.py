@@ -32,6 +32,23 @@ def _analytics_default(key: str) -> float:
         )
     return float(analytics[key])
 
+
+def _analytics_default_bool(key: str) -> bool:
+    """Read one ``[analytics]`` boolean from the packaged dead config file (CFG-R1a).
+
+    Same fail-closed contract as :func:`_analytics_default`; a non-boolean value is a
+    config defect and fails closed rather than being truthiness-coerced.
+    """
+    with _DEFAULTS_PATH.open("rb") as fh:
+        analytics = tomllib.load(fh).get("analytics", {})
+    if key not in analytics or not isinstance(analytics[key], bool):
+        raise RuntimeError(
+            f"fail-closed: analytics.{key} is absent or non-boolean in {_DEFAULTS_PATH.name} "
+            "(CFG-R1a: the value belongs in defaults.toml, not a code literal)"
+        )
+    return bool(analytics[key])
+
+
 # --- resampling / time base ---
 MAX_INTERP_GAP_S: Final = 3.0  # ANL-R8
 RDP_MAX_BISECTION_STEPS: Final = 32  # ANL-R8b
@@ -60,6 +77,30 @@ TRAINING_LOAD_CONFIDENCE_PENALTY: Final[float] = _analytics_default(
 # GBO-R28: the stated fit-quality floor below which a stored MODELED signature is
 # REFUSED by resolution (fail-closed, typed gap — never thresholds from a bad fit).
 SIGNATURE_MIN_FIT_R2: Final[float] = _analytics_default("signature_min_fit_r2")
+
+# --- endurance-score (ES-R1/ES-R2) — declared weighting + normalization ---
+# Every VALUE lives in ``[analytics]`` of the packaged defaults.toml (CFG-R1a) and is
+# typed + range-validated by the ``Settings.analytics__endurance_score_*`` schema fields;
+# the engine embeds no hidden constants (ES-R1). Weights are relative and renormalized
+# over the PRESENT components; the normalization shape is documented in defaults.toml.
+ES_WEIGHT_CTL: Final[float] = _analytics_default("endurance_score_weight_ctl")
+ES_WEIGHT_DURABILITY: Final[float] = _analytics_default("endurance_score_weight_durability")
+ES_WEIGHT_DECOUPLING: Final[float] = _analytics_default("endurance_score_weight_decoupling")
+ES_CTL_FULL_SCALE: Final[float] = _analytics_default("endurance_score_ctl_full_scale")
+ES_DURABILITY_FLOOR: Final[float] = _analytics_default("endurance_score_durability_floor")
+ES_DURABILITY_CEILING: Final[float] = _analytics_default("endurance_score_durability_ceiling")
+ES_DECOUPLING_FULL_PENALTY_PCT: Final[float] = _analytics_default(
+    "endurance_score_decoupling_full_penalty_pct"
+)
+# ES-R2 missing-component policy: True declares any subset CONTAINING CTL valid (compose
+# with reduced confidence); False fails closed on any missing component.
+ES_ALLOW_PARTIAL: Final[bool] = _analytics_default_bool("endurance_score_allow_partial")
+ES_PARTIAL_CONFIDENCE_PENALTY: Final[float] = _analytics_default(
+    "endurance_score_partial_confidence_penalty"
+)
+ES_WINDOW_DAYS: Final[int] = int(_analytics_default("endurance_score_window_days"))
+ES_LONG_DURATION_S: Final[int] = int(_analytics_default("endurance_score_long_duration_s"))
+ES_SHORT_DURATION_S: Final[int] = int(_analytics_default("endurance_score_short_duration_s"))
 
 # --- Normalized Power / TSS ---
 NP_ROLLING_WINDOW_S: Final = 30  # NP-R1
