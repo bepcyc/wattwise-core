@@ -120,6 +120,13 @@ CP_R2_MIN: Final = 0.95  # CP-R3
 CP_DOMAIN_MIN_S: Final = 120  # CP-R2
 CP_DOMAIN_MAX_S: Final = 1200  # CP-R2
 CP_LONG_DURATION_BIAS_S: Final = 1200  # CP-R6 (fires strictly above)
+# CP-R3/R4 pre-fit degeneracy gate: a (near-)constant in-domain MMP power set —
+# relative spread strictly below this epsilon — is refused as INSUFFICIENT_DATA
+# BEFORE any regression, so the fail-closed verdict never depends on
+# platform-dependent fit numerics. The VALUE is NOT a code literal (CFG-R1a): it is
+# loaded from ``[analytics]`` in the packaged defaults.toml and typed +
+# range-validated by ``Settings.analytics__cp_power_spread_epsilon``.
+CP_POWER_SPREAD_EPSILON: Final[float] = _analytics_default("cp_power_spread_epsilon")
 
 # --- MMP grid ---
 MMP_DURATION_GRID_S: Final[tuple[int, ...]] = (

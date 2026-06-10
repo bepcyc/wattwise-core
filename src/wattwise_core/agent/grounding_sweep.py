@@ -8,10 +8,11 @@ URL or a fabricated number the extractor missed must still never reach athlete-f
 
 * :func:`scrub_unverified_urls` — remove every URL not first-party allow-listed / accepted by the
   evidence (GROUND-R4: invented URLs scrubbed unconditionally, even unextracted ones).
-* :func:`scrub_uncovered_numbers` — remove every number-like span not covered by a GROUNDED claim's
-  published canonical value or a structurally safe NON-metric token (a date, a "Day/Week/Zone N"
-  ordinal, an "NxM" interval, or a duration/percentage with an attached unit). Anything else — a
-  bare or metric-attached figure the grounder did not verify — is removed (fail-closed, H4).
+* :func:`scrub_uncovered_numbers` — remove every number-like span not POSITIONALLY covered by a
+  character range the grounder verified/rewrote (:func:`span_covered`, issue #4) and not a
+  structurally safe NON-metric token (a date, a "Day/Week/Zone N" ordinal, an "NxM" interval, or a
+  duration/percentage with an attached unit). Anything else — a bare or metric-attached figure the
+  grounder did not verify — is removed (fail-closed, H4).
 
 Everything here is a pure, synchronous function of its text inputs (GRAPH-R4): it calls no model
 and no service, so the same inputs always yield the same result.
@@ -20,7 +21,7 @@ and no service, so the same inputs always yield the same result.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from wattwise_core.agent.contracts import GroundingEvidence
 
@@ -51,6 +52,16 @@ _UNIT_SUFFIX_RE = re.compile(
 # text (like URL spans) so EVERY digit-group within them is skipped — a narrow per-token window
 # would miss the trailing group of a date (``-08`` of ``2026-06-08``).
 _SAFE_SPAN_RE = re.compile(r"\d{4}-\d{2}-\d{2}|\d+\s*x\s*\d+", re.IGNORECASE)
+
+
+def span_covered(ranges: Sequence[tuple[int, int]], start: int, end: int) -> bool:
+    """True iff ``[start, end)`` lies WITHIN a verified/rewritten character range.
+
+    The POSITIONAL coverage test of the numeric sweep (GROUND-R7 / H4, issue #4): a numeric
+    token is covered only when the grounder actually verified/rewrote THOSE characters of
+    the draft — string equality with some other claim's published value covers nothing.
+    """
+    return any(s <= start and end <= e for s, e in ranges)
 
 
 def normalize_urls(urls: Iterable[str]) -> frozenset[str]:
@@ -102,7 +113,7 @@ def scrub_unverified_urls(
 
 
 def scrub_uncovered_numbers(
-    text: str, grounded_numbers: frozenset[str] | set[str]
+    text: str, covered_ranges: Sequence[tuple[int, int]]
 ) -> tuple[str, int]:
     """Scrub every number-like span not covered by a grounded claim / safe token (GROUND-R7 / H4).
 
@@ -110,13 +121,14 @@ def scrub_uncovered_numbers(
     not depend on the LLM claim-extractor catching every span. "CTL is 60 and TSB is 999" where the
     extractor returns only the CTL claim leaves the fabricated 999 in the body — so this second,
     extraction-independent net sweeps the text and removes any numeric span that is neither (a) a
-    GROUNDED canonical value the grounder already verified (``grounded_numbers``, the values it just
-    published) nor (b) a structurally safe NON-metric token (a date, a "Day/Week/Phase/Block/Zone N"
-    ordinal, an "NxM" interval structure, or a duration/percentage with an attached unit, per
-    :func:`_is_safe_numeric_context`). Anything else — a bare or metric-attached figure the grounder
-    did not verify — is removed (fail-closed, "when in doubt, scrub"). Returns the cleaned text and
-    the number of spans removed (the caller downgrades the decision if any was). A body with no
-    uncovered number is returned untouched.
+    character range the grounder actually VERIFIED/REWROTE (``covered_ranges``, positions in
+    ``text`` — coverage is POSITIONAL, never string membership: a leftover wrong token that merely
+    EQUALS another claim's published value is still swept, issue #4) nor (b) a structurally safe
+    NON-metric token (a date, a "Day/Week/Phase/Block/Zone N" ordinal, an "NxM" interval structure,
+    or a duration/percentage with an attached unit, per :func:`_is_safe_numeric_context`). Anything
+    else — a bare or metric-attached figure the grounder did not verify — is removed (fail-closed,
+    "when in doubt, scrub"). Returns the cleaned text and the number of spans removed (the caller
+    downgrades the decision if any was). A body with no uncovered number is returned untouched.
     """
     removed = 0
     # Pre-compute the spans EVERY digit-group inside which is safe regardless of per-token context:
@@ -132,7 +144,9 @@ def scrub_uncovered_numbers(
         token = match.group(0)
         if any(start <= match.start() < end for start, end in safe_spans):
             return token
-        if token in grounded_numbers or _is_safe_numeric_context(text, match):
+        if span_covered(covered_ranges, match.start(), match.end()):
+            return token
+        if _is_safe_numeric_context(text, match):
             return token
         nonlocal removed
         removed += 1
@@ -174,4 +188,5 @@ __all__ = [
     "normalize_urls",
     "scrub_uncovered_numbers",
     "scrub_unverified_urls",
+    "span_covered",
 ]

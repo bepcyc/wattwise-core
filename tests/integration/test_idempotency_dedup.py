@@ -194,11 +194,6 @@ def _engine(
     )
 
 
-def _xfail_mariadb(state_db: AgentStateDatabase) -> None:
-    if state_db.engine.dialect.name in ("mysql", "mariadb"):
-        pytest.xfail("MariaDB _ensure_thread concurrent-create race (Core-B checkpoint.py)")
-
-
 async def _ask(engine: GraphAgentEngine, question: str, thread_id: str | None = None) -> Any:
     return await engine.answer(
         athlete_id=ATHLETE_A,
@@ -221,7 +216,6 @@ async def test_resubmitted_same_turn_returns_existing_run_without_duplicate(
     the deviated behaviour (a random conversation id per turn) the second turn would mint a NEW
     thread and run again, so ``compose_calls`` would be 2 and the thread ids would differ.
     """
-    _xfail_mariadb(state_db)
     model = _answer_model()
     engine = _engine(canonical, state_db, model, window=3600)
 
@@ -239,7 +233,6 @@ async def test_different_turn_opens_new_run(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
 ) -> None:
     """A genuinely DIFFERENT turn is not deduped: it opens a new thread and runs (CKPT-R4)."""
-    _xfail_mariadb(state_db)
     model = _answer_model()
     engine = _engine(canonical, state_db, model, window=3600)
 
