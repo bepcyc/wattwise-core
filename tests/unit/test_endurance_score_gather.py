@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from wattwise_core.analytics._service_loaders import _gather_endurance_score
+from wattwise_core.analytics._service_es import _gather_endurance_score
 from wattwise_core.analytics.result import Unavailable, UnavailableReason
 from wattwise_core.analytics.service import AnalyticsService
 
