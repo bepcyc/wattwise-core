@@ -18,6 +18,7 @@ conflict path was never exercised). PostgreSQL / MariaDB legs run when ``WATTWIS
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -575,3 +576,49 @@ async def test_concurrent_consume_exactly_one_wins(
 
     rows = await _interrupt_rows(factory, THREAD_ID)
     assert [r.status for r in rows] == ["consumed"], "the single live row ended consumed once"
+
+
+async def test_ensure_row_isolation_does_not_stick_to_the_pooled_connection() -> None:
+    """``ensure_row``'s READ COMMITTED leg never leaks isolation into later checkouts (UPS-R2).
+
+    The MySQL-family leg of :func:`ensure_row` runs its statement at ``READ COMMITTED`` via a
+    per-connection execution option. SQLAlchemy resets a checkout-time isolation override on
+    pool check-in (the dialect's ``reset_isolation_level``); this pins that invariant on a REAL
+    MariaDB pool sized to ONE connection, so the very same DBAPI connection is re-checked-out
+    and must report the server default (REPEATABLE-READ) again — a sticky override would
+    silently run every later transaction at the wrong isolation.
+    """
+    maria = os.environ.get("WATTWISE_MARIADB_DSN")
+    if not maria:
+        pytest.skip("no MariaDB DSN (container leg only)")
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from wattwise_core.agent.state_store import AgentThread
+    from wattwise_core.persistence.upsert import ensure_row
+
+    engine = create_async_engine(maria, pool_size=1, max_overflow=0)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(AgentStateBase.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        await ensure_row(
+            factory,
+            AgentThread.__table__,
+            {
+                "thread_id": f"iso-{uuid.uuid4()}",
+                "athlete_id": uuid.uuid4(),
+                "conversation_id": "iso",
+                "created_at": _dt.datetime.now(_dt.UTC),
+            },
+            conflict_keys=["thread_id"],
+        )
+        async with factory() as probe:
+            level = (
+                await probe.execute(text("SELECT @@transaction_isolation"))
+            ).scalar_one()
+        assert str(level).upper().replace("_", "-") == "REPEATABLE-READ", (
+            f"isolation leaked across pool check-in: {level!r}"
+        )
+    finally:
+        await engine.dispose()
