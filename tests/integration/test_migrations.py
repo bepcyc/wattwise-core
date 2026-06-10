@@ -3,9 +3,11 @@
 The contract/fuzz suites build the schema from ``Base.metadata.create_all`` (the LIVE ORM),
 so a model-vs-migration drift — an enum value added to the model but not to a migration's
 CHECK — is invisible to them. This suite runs the REAL Alembic chain to ``head`` and then
-ingests a PWX activity END TO END (decode → pure map → :class:`IngestService` →
+ingests a TCX activity END TO END (decode → pure map → :class:`IngestService` →
 ``activity_file`` row), so the ``activity_file.format`` CHECK and the tier-1 original-file
-capture are exercised on a MIGRATED database — what production actually runs.
+capture are exercised on a MIGRATED database — what production actually runs. The CHECK is
+the SPEC-CLOSED 5-member ``fit|gpx|tcx|json|other`` set (SCHEMA-R3 / API-R33) — migration
+0011 narrows it back after the since-reverted ``pwx`` widening of 0004.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ from wattwise_core.storage import LocalObjectStore, content_hash
 pytestmark = pytest.mark.integration
 
 _REPO = Path(__file__).resolve().parents[2]
-_PWX = _REPO / "tests" / "contract" / "fixtures" / "file_upload" / "ride.pwx"
+_TCX = _REPO / "tests" / "contract" / "fixtures" / "file_upload" / "ride.tcx"
 
 
 def _alembic_cfg(dsn: str, monkeypatch: pytest.MonkeyPatch) -> Config:
@@ -68,8 +70,8 @@ def _upgrade_to_head(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
     command.upgrade(_alembic_cfg(dsn, monkeypatch), "head")
 
 
-async def _ingest_pwx(dsn: str, object_root: Path) -> ActivityFile | None:
-    """Decode + map + ingest ``ride.pwx`` against the migrated DB; return its ActivityFile."""
+async def _ingest_tcx(dsn: str, object_root: Path) -> ActivityFile | None:
+    """Decode + map + ingest ``ride.tcx`` against the migrated DB; return its ActivityFile."""
     engine = create_async_engine(dsn)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     try:
@@ -79,8 +81,8 @@ async def _ingest_pwx(dsn: str, object_root: Path) -> ActivityFile | None:
                     select(SourceDescriptor).where(SourceDescriptor.source_key == "file_import")
                 )
             ).scalar_one()  # seeded by migration 0001
-            data = _PWX.read_bytes()
-            asbo = decode(data, filename="ride.pwx")
+            data = _TCX.read_bytes()
+            asbo = decode(data, filename="ride.tcx")
             ref = SourceDescriptorRef(
                 source_descriptor_id=str(descriptor.source_descriptor_id),
                 source_key="file_import",
@@ -94,7 +96,7 @@ async def _ingest_pwx(dsn: str, object_root: Path) -> ActivityFile | None:
             candidates = FileUploadAdapter().map_upload(data, asbo, ref, ctx)
             original = OriginalFile(
                 data=data,
-                file_format=ActivityFileFormat.PWX,
+                file_format=ActivityFileFormat.TCX,
                 source_native_id=native_id(asbo, data),
             )
             ingest = IngestService(session, object_store=LocalObjectStore(object_root))
@@ -110,20 +112,21 @@ async def _ingest_pwx(dsn: str, object_root: Path) -> ActivityFile | None:
         await engine.dispose()
 
 
-def test_pwx_persists_under_the_migrated_format_check(
+def test_tcx_persists_under_the_migrated_format_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A PWX import stores an ``activity_file`` with format='pwx' on a MIGRATED DB (DOD-R2).
+    """A TCX import stores an ``activity_file`` with format='tcx' on a MIGRATED DB (DOD-R2).
 
-    Catches the model/migration drift class directly: migration 0004 must widen the
-    ``activity_file.format`` CHECK to accept 'pwx', or this INSERT fails closed under the
+    Catches the model/migration drift class directly: the live ORM enum and the migrated
+    ``activity_file.format`` CHECK must agree on the spec-closed 5-member set
+    (``fit|gpx|tcx|json|other``, SCHEMA-R3) or this INSERT fails closed under the
     constraint even though decode + map succeed.
     """
     dsn = f"sqlite+aiosqlite:///{tmp_path / 'migrated.db'}"
     _upgrade_to_head(dsn, monkeypatch)
-    activity_file = asyncio.run(_ingest_pwx(dsn, tmp_path / "objects"))
-    assert activity_file is not None, "the PWX activity_file row must persist on the migrated DB"
-    assert activity_file.format is ActivityFileFormat.PWX
+    activity_file = asyncio.run(_ingest_tcx(dsn, tmp_path / "objects"))
+    assert activity_file is not None, "the TCX activity_file row must persist on the migrated DB"
+    assert activity_file.format is ActivityFileFormat.TCX
 
 
 # --- per-athlete source override on the MIGRATED schema (PRV-R7, ARCH-P2-03) ----------------

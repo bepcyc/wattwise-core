@@ -63,9 +63,9 @@ from wattwise_core.api.agent_stream import (
 from wattwise_core.api.errors import ProblemError, resolve_trace_id
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers.agent_request import (
-    header_locale,
     resolve_locale,
     resolve_response_length,
+    scan_header_locale,
     validate_request,
 )
 from wattwise_core.api.routers.agent_schemas import (
@@ -197,10 +197,23 @@ def rate_limiter() -> RateLimiter:
     )
 
 
+def persisted_locale() -> str | None:
+    """The owner's PERSISTED language subtag (API-R37), or ``None`` when unset.
+
+    The app factory overrides this with a reader of ``athlete.primary_locale`` (the
+    canonical home of the language preference) so the stored default applies to every
+    athlete-facing agent answer when no per-request override is given (API-R37). The
+    unwired default is ``None`` — the resolver then falls through to the engine ``en``
+    baseline, exactly the spec's behavior for an unset preference.
+    """
+    return None
+
+
 _Agent = Depends(require_agent_scope)
 AthleteId = Annotated[str, Depends(current_athlete_id)]
 Engine = Annotated[AgentEngine, Depends(agent_engine)]
 Limiter = Annotated[RateLimiter, Depends(rate_limiter)]
+PersistedLocale = Annotated[str | None, Depends(persisted_locale)]
 
 
 async def _run_engine(
@@ -292,6 +305,7 @@ async def agent_ask(
     engine: Engine,
     athlete_id: AthleteId,
     limiter: Limiter,
+    stored_locale: PersistedLocale,
     accept_language: Annotated[str | None, Header()] = None,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> Any:
@@ -302,15 +316,16 @@ async def agent_ask(
     is the named status-discriminated :class:`AgentAskResponse` (SCHEMA-R1/API-R11a) with
     a server-sanitized ``answer_html`` (API-R13) and no billing/model machinery
     (API-R11c); a run that cannot ground fails closed ``422`` ``agent-grounding-failed``
-    (API-R12). The response language resolves body ``language`` -> ``Accept-Language`` ->
-    ``en`` (API-R37). With ``stream:true`` it returns a cancellation-safe SSE stream
+    (API-R12). The response language resolves body ``language`` -> ``Accept-Language``
+    -> the PERSISTED ``athlete.primary_locale`` subtag -> ``en`` (API-R37). With
+    ``stream:true`` it returns a cancellation-safe SSE stream
     (heartbeats + ``Last-Event-ID`` resume, API-R22a) whose terminal ``done`` carries the
     identical union (API-R22 / PERF-R10(b)).
     """
     limiter.check(athlete_id, LimitClass.AGENT)
     validate_request(body)
     trace_id = resolve_trace_id(request)
-    locale = resolve_locale(body, accept_language)
+    locale = resolve_locale(body, accept_language, stored_locale)
     if body.stream:
         return StreamingResponse(
             _stream_answer(request, engine, athlete_id, body, trace_id, locale, last_event_id),
@@ -334,6 +349,7 @@ async def agent_readiness(
     engine: Engine,
     athlete_id: AthleteId,
     limiter: Limiter,
+    stored_locale: PersistedLocale,
     accept_language: Annotated[str | None, Header()] = None,
 ) -> ReadinessResponse:
     """Read the athlete's readiness/form state (API-R41); a typed verdict, never a number.
@@ -351,7 +367,7 @@ async def agent_readiness(
     """
     limiter.check(athlete_id, LimitClass.AGENT)
     trace_id = resolve_trace_id(request)
-    locale = header_locale(accept_language)
+    locale = scan_header_locale(accept_language) or stored_locale or "en"
     readiness = await engine.readiness(
         athlete_id=athlete_id, locale=locale, response_length="standard"
     )
@@ -428,8 +444,10 @@ async def agent_decision(
 # these seams without an import cycle; ``router`` is fully typed (the ``has-type`` is the cycle, not
 # a real ambiguity). ``current_session`` is re-exported so the factory wires it on this module.
 from wattwise_core.api.routers import agent_breadth as _breadth  # noqa: E402
+from wattwise_core.api.routers import agent_memory_routes as _memory  # noqa: E402
 
 router.include_router(_breadth.router)  # type: ignore[has-type]
+router.include_router(_memory.router)  # type: ignore[has-type]
 current_session = _breadth.current_session
 
 __all__ = [
@@ -447,3 +465,6 @@ __all__ = [
     "require_agent_scope",
     "router",
 ]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_agent_scope.required_scopes = ("agent",)  # type: ignore[attr-defined]

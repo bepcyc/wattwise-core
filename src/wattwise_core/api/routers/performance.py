@@ -366,3 +366,6 @@ __all__ = [
     "require_read_scope",
     "router",
 ]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_read_scope.required_scopes = ("read",)  # type: ignore[attr-defined]

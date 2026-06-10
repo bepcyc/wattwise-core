@@ -117,6 +117,15 @@ _AGENT_TRANSITIVE: Mapping[str, _Transitive] = {
     "agent_write": _Transitive((("thread_id", (("agent_thread", "thread_id", "athlete_id"),)),)),
 }
 
+# Agent-state OPERATIONAL auth tables (amended ARCH-R13) scoped by a STRING ``subject``
+# column carrying the owner id (API-R23 refresh families / AUTH-R8 link challenges): a
+# per-athlete erasure deletes the rows whose subject is the athlete; an UNBOUND link
+# challenge (NULL subject) holds no personal data and simply expires.
+_AGENT_SUBJECT_SCOPED: Mapping[str, str] = {
+    "agent_auth_refresh_token": "subject",
+    "agent_auth_link_challenge": "subject",
+}
+
 # Tables that MUST be deleted before topological order would otherwise place them: a no-FK
 # child whose scope subquery reads a parent that the topo order would delete first. The
 # un-FK'd ``stream_channel`` (no FK -> topo-sorted as a root, hence deleted LAST) reads
@@ -193,7 +202,7 @@ def _ordered_scoped_tables(
         name = table.name
         if name in shared:
             continue
-        if "athlete_id" in table.columns or name in transitive:
+        if "athlete_id" in table.columns or name in transitive or name in _AGENT_SUBJECT_SCOPED:
             ordered.append(table)
             continue
         raise RuntimeError(
@@ -216,6 +225,23 @@ async def _delete_direct(session: AsyncSession, table: Table, athlete_id: uuid.U
     result = cast(
         CursorResult[Any],
         await session.execute(delete(table).where(column == athlete_id)),
+    )
+    return int(result.rowcount or 0)
+
+
+async def _delete_subject_scoped(
+    session: AsyncSession, table: Table, athlete_id: uuid.UUID, column_name: str
+) -> int:
+    """Delete (and count) operational auth rows scoped by the STRING ``subject`` column.
+
+    The subject is the server-derived owner id rendered as a string (API-R23 token
+    families / AUTH-R8 link challenges); NULL-subject rows (unbound challenges) carry no
+    personal data and are left to expire.
+    """
+    column = table.c[column_name]
+    result = cast(
+        CursorResult[Any],
+        await session.execute(delete(table).where(column == str(athlete_id))),
     )
     return int(result.rowcount or 0)
 
@@ -316,7 +342,11 @@ async def _erase_store(
     """
     deleted_rows: dict[str, int] = {}
     for table in order:
-        if "athlete_id" in table.columns:
+        if table.name in _AGENT_SUBJECT_SCOPED:
+            deleted_rows[table.name] = await _delete_subject_scoped(
+                session, table, athlete_id, _AGENT_SUBJECT_SCOPED[table.name]
+            )
+        elif "athlete_id" in table.columns:
             deleted_rows[table.name] = await _delete_direct(session, table, athlete_id)
         else:
             deleted_rows[table.name] = await _delete_transitive(

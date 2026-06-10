@@ -29,6 +29,7 @@ from typing import Any, cast
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel
+from sqlalchemy import create_engine as _create_sync_engine
 from starlette.testclient import TestClient
 
 from wattwise_core.agent.contracts import (
@@ -63,6 +64,7 @@ from wattwise_core.config import Settings, load_settings
 from wattwise_core.entitlement import Entitlements, OssEntitlementResolver
 from wattwise_core.identity import OWNER_SUBJECT
 from wattwise_core.persistence import Database
+from wattwise_core.persistence.models import Base
 from wattwise_core.security.crypto import EnvelopeCipher
 
 pytestmark = pytest.mark.integration
@@ -495,6 +497,20 @@ class _RecordingEngine:
         )
 
 
+def _create_canonical_schema(db_file: Path) -> None:
+    """Create the canonical schema on the harness FILE DB (what migrations do in prod).
+
+    ``POST /v1/agent/ask`` now legitimately reads the canonical ``athlete`` row for the
+    persisted language default (API-R37), so the harness database must carry the
+    canonical schema even when the test seeds no rows.
+    """
+    sync_engine = _create_sync_engine(f"sqlite:///{db_file}")
+    try:
+        Base.metadata.create_all(sync_engine)
+    finally:
+        sync_engine.dispose()
+
+
 def test_med2_request_resolved_entitlement_threads_into_engine(tmp_path: Path) -> None:
     """The per-request resolved entitlement is threaded from the HTTP gate INTO the engine (MED-2).
 
@@ -505,6 +521,7 @@ def test_med2_request_resolved_entitlement_threads_into_engine(tmp_path: Path) -
     REAL end to end, not a noop that re-derives from config inside the engine.
     """
     settings = _settings(tmp_path)
+    _create_canonical_schema(tmp_path / "ent_bounds.db")
     app = create_app(settings)
     engine = _RecordingEngine()
     app.dependency_overrides[agent_routes.agent_engine] = lambda: engine  # only the engine is faked

@@ -138,6 +138,9 @@ class RecalledItem:
     content: str
     inferred: bool
     recorded_at: _dt.datetime
+    #: The instant the row was last revised; ``None`` falls back to ``recorded_at`` at the
+    #: API projection (API-R15a ``updated_at``).
+    updated_at: _dt.datetime | None = None
 
 
 # --- the recall seam (MEM-R4) ---
@@ -191,6 +194,7 @@ def _to_recalled(row: MemoryItem) -> RecalledItem:
         content=row.content,
         inferred=row.inferred,
         recorded_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 

@@ -1,7 +1,7 @@
-"""File-upload source adapter — FIT/GPX/TCX/PWX (CLI-R13/CLI-R14, FIL-R*, LIN-R1.1, MAP-R*).
+"""File-upload source adapter — FIT/GPX/TCX (CLI-R13/CLI-R14, FIL-R*, LIN-R1.1, MAP-R*).
 
 The single OSS file-upload importer. Every connectionless activity-file upload — a
-Garmin ``.fit``, a platform-exported ``.gpx``/``.tcx``/``.pwx``, INCLUDING the compliant
+Garmin ``.fit``, a platform-exported ``.gpx``/``.tcx``, INCLUDING the compliant
 Strava-export path (CLI-R14: Strava is file-upload-only, never a direct API) — lands
 under ONE built-in ``source_descriptor`` (``source_key = "file_import"``, LIN-R1.1);
 no per-platform descriptor is inferred from file contents, so source-invisibility
@@ -11,7 +11,7 @@ Two strictly separated layers:
 
 * :func:`decode` — impure I/O: verbatim bytes -> a typed :class:`ActivityAsbo` via the
   per-format decoders (FIT: ``garmin-fit-sdk`` + ``fitdecode`` fallback; GPX: ``gpxpy``;
-  TCX/PWX: ``lxml``). Malformed input raises a TYPED :class:`FileDecodeError`, never a bare
+  TCX: ``lxml``). Malformed input raises a TYPED :class:`FileDecodeError`, never a bare
   crash or a wrong-but-plausible record (TIER-R5 fuzz / CLI-R2).
 * :meth:`FileUploadAdapter.map` — **pure and deterministic** (MAP-R1): no clock, no
   randomness, no network. It turns one :class:`ActivityAsbo` into canonical
@@ -22,7 +22,7 @@ Two strictly separated layers:
   re-decode + re-map is deterministic (GBO-AC-1, FIL-R3/FIL-R5).
 
 ``source_native_id`` is derived per LIN-R1.1 from the file's OWN immutable identity:
-FIT = the ``file_id``-message fingerprint; GPX/TCX/PWX = the per-format start/elapsed/extent
+FIT = the ``file_id``-message fingerprint; GPX/TCX = the per-format start/elapsed/extent
 fingerprint; fallback = the ``content_hash`` over the verbatim bytes. The adapter depends
 only on its decoders + canonical models + lineage/enums (ADP-R16) and is fully
 exercisable offline (ADP-R17, TST-R1).
@@ -51,7 +51,6 @@ from wattwise_core.ingestion.adapters._asbo import (
 )
 from wattwise_core.ingestion.adapters._decode_fit import decode_fit
 from wattwise_core.ingestion.adapters._decode_gpx import decode_gpx
-from wattwise_core.ingestion.adapters._decode_pwx import decode_pwx
 from wattwise_core.ingestion.adapters._decode_tcx import decode_tcx
 from wattwise_core.ingestion.base import (
     FetchContext,
@@ -72,7 +71,7 @@ FILE_IMPORT_SOURCE_KEY: Final = "file_import"
 
 
 def detect_format(filename: str | None, data: bytes) -> str:
-    """Detect the file format from name + magic bytes (closed enum: fit/gpx/tcx/pwx).
+    """Detect the file format from name + magic bytes (closed enum: fit/gpx/tcx).
 
     Raises :class:`FileDecodeError` for an unrecognized format so an unsupported
     upload fails closed (never a silent best-guess parse, CLI-R2/TIER-R5).
@@ -83,11 +82,9 @@ def detect_format(filename: str | None, data: bytes) -> str:
         return "fit"
     if suffix == "tcx" or b"TrainingCenterDatabase" in head:
         return "tcx"
-    if suffix == "pwx" or b"<pwx" in head:
-        return "pwx"
     if suffix == "gpx" or (head.startswith((b"<?xml", b"<gpx")) and b"<gpx" in data[:2048]):
         return "gpx"
-    raise FileDecodeError("unrecognized activity-file format (expected FIT/GPX/TCX/PWX)")
+    raise FileDecodeError("unrecognized activity-file format (expected FIT/GPX/TCX)")
 
 
 def _looks_like_fit(data: bytes) -> bool:
@@ -118,8 +115,6 @@ def decode(data: bytes, *, filename: str | None = None) -> ActivityAsbo:
         return decode_fit(blob)
     if fmt == "gpx":
         return decode_gpx(blob)
-    if fmt == "pwx":
-        return decode_pwx(blob)
     return decode_tcx(blob)
 
 

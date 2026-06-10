@@ -209,13 +209,11 @@ async def test_history_paginates_across_pages_without_overlap(seeded: Env) -> No
     assert len(set(seen)) == 3
 
 
-async def test_history_clamps_nonpositive_limit_to_default(seeded: Env) -> None:
-    """A non-positive limit is clamped to the default page size, never unbounded/zero (PAGE-R3)."""
+async def test_history_rejects_nonpositive_limit(seeded: Env) -> None:
+    """A limit < 1 is REJECTED 422 validation-error, never coerced to a default (PAGE-R3)."""
     resp = await seeded.client.get("/v1/athlete/fitness-signature/history", params={"limit": 0})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["page"]["limit"] == 50  # DEFAULT_PAGE_LIMIT
-    assert len(body["data"]) == 3
+    assert resp.status_code == 422
+    assert resp.json()["type"].endswith("/validation-error")
 
 
 async def test_history_tampered_cursor_is_invalid_cursor(seeded: Env) -> None:

@@ -74,6 +74,25 @@ def get_master_data_database(request: Request) -> Database:
     return database
 
 
+async def get_agent_state_session(request: Request) -> AsyncIterator[AsyncSession]:
+    """A session on the dedicated AGENT-STATE store (ARCH-R13 operational API state).
+
+    Refresh-token families, account-link challenges, export jobs + their signed-URL
+    nonces, and import-job rows are OPERATIONAL state and live on the agent-state store
+    (the agent-state role) — never the canonical GBO store (amended ARCH-R13). The
+    factory binds the store at startup; its schema is ensured lazily ONCE per process
+    (a no-op on a migrated database). Commits on success, rolls back on error.
+    """
+    state_db = getattr(request.app.state, "agent_state_db", None)
+    if state_db is None:
+        raise ProblemError("internal-error")
+    if not getattr(request.app.state, "agent_state_schema_ready", False):
+        await state_db.create_all()
+        request.app.state.agent_state_schema_ready = True
+    async with state_db.session() as session:  # commits on success, rolls back on error
+        yield session
+
+
 def request_subject(
     principal: Annotated[Principal, Depends(authenticate)],
 ) -> str:
@@ -180,11 +199,36 @@ AppSettings = Annotated[Settings, Depends(get_settings)]
 RateLimit = Depends(enforce_rate_limit)
 
 
+def enforce_public_rate_limit(
+    request: Request,
+    response: Response,
+    limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+) -> None:
+    """Debit a shared PRE-TOKEN bucket for a public endpoint (LIMIT-R1, AUTH-R10).
+
+    A public/pre-token route has no verified athlete to key on, so the OSS baseline
+    debits one fixed anonymous bucket (the deployment fronts a single owner) using the
+    same read/mutating ceilings — every endpoint stays rate-limited (LIMIT-R1) and an
+    exhausted bucket raises ``429`` ``rate-limited`` exactly like the bearer surface.
+    """
+    limit_class = (
+        LimitClass.MUTATING if request.method.upper() in _MUTATING_METHODS else LimitClass.READ
+    )
+    headers = limiter.check("public", limit_class)
+    response.headers.update(headers.to_dict())
+
+
+#: A router-level dependency that debits the shared pre-token bucket (LIMIT-R1/AUTH-R10).
+PublicRateLimit = Depends(enforce_public_rate_limit)
+
+
 __all__ = [
     "AppSettings",
     "CurrentPrincipal",
     "DbSession",
+    "PublicRateLimit",
     "RateLimit",
+    "enforce_public_rate_limit",
     "enforce_rate_limit",
     "get_database",
     "get_db",

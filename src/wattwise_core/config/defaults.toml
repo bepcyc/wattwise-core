@@ -27,6 +27,17 @@ port = 8000
 rate_limit_per_minute = 60
 request_max_bytes = 33554432   # 32 MiB upload ceiling for FIT/GPX/TCX imports
 
+[auth]
+# Rotating refresh-token family lifetime + single-use account-link challenge lifetime
+# (API-R23 / AUTH-R8). Loaded content (CFG-R1a) — never a code literal.
+refresh_ttl_seconds = 1209600   # 14 days
+link_ttl_seconds = 600          # 10 minutes
+
+[exports]
+# Signed export-download URL lifetime (API-R34: short-lived, single-use, owner-bound;
+# the spec default ceiling is 5 minutes).
+signed_url_ttl_seconds = 300
+
 [security]
 # CORS / allowed-host / transport-header policy (SEC-R10/.1/.2). Config-driven, never
 # hardcoded in code (SEC-R10.2: "no per-deployment values baked into code"). The OSS

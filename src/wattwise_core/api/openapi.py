@@ -22,7 +22,9 @@ from typing import Any, Final
 
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
+from fastapi.routing import APIRoute
 
+from wattwise_core.api.auth import authenticate
 from wattwise_core.api.errors import PROBLEM_BASE_URI, PROBLEM_MEDIA_TYPE
 
 #: The catalog statuses every operation may emit (the closed error surface, ERR-R8).
@@ -98,6 +100,51 @@ def _attach_error_responses(operation: dict[str, Any]) -> None:
         responses[str(status)] = _problem_response("Error (RFC 9457 problem)")
 
 
+def _route_security(route: APIRoute) -> list[str] | None:
+    """The scopes a route's dependency tree declares, or ``None`` for a public route.
+
+    Walks the (pre-override) dependant tree: any dependency that is the bearer
+    ``authenticate`` seam marks the operation as bearer-protected; any dependency
+    stamped with ``required_scopes`` (the ``require_scopes`` factory and the per-router
+    scope-gate seams) contributes its scope tokens. The result feeds the per-operation
+    ``security`` declaration (DOC-R3): the contract names the required scopes, not just
+    "a bearer exists".
+    """
+    scopes: set[str] = set()
+    protected = False
+
+    def _walk(dependant: Any) -> None:
+        nonlocal protected
+        for sub in dependant.dependencies:
+            call = sub.call
+            if call is authenticate:
+                protected = True
+            required = getattr(call, "required_scopes", None)
+            if required:
+                protected = True
+                scopes.update(required)
+            _walk(sub)
+
+    _walk(route.dependant)
+    if not protected:
+        return None
+    return sorted(scopes)
+
+
+def _security_by_operation(app: FastAPI) -> dict[tuple[str, str], list[str]]:
+    """Map ``(path, method)`` -> declared scopes for every protected operation."""
+    out: dict[tuple[str, str], list[str]] = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        declared = _route_security(route)
+        if declared is None:
+            continue
+        for method in route.methods or ():
+            out[(route.path_format, method.lower())] = declared
+    return out
+
+
 def build_openapi(app: FastAPI) -> dict[str, Any]:
     """Build the enriched OpenAPI document for ``app`` (DOC-R3/R4/R5).
 
@@ -113,10 +160,21 @@ def build_openapi(app: FastAPI) -> dict[str, Any]:
     components["ProblemFieldError"] = _problem_field_error_schema()
     components["Problem"] = _problem_schema()
     components["PageEnvelope"] = _page_envelope_schema()
-    for path_item in schema.get("paths", {}).values():
+    # Drop FastAPI's default validation-error components: every 422 is re-documented
+    # as the RFC 9457 ``Problem`` (DOC-R4), so these are unreferenced — and their
+    # untyped ``input`` member would break strict client generation (DOC-R5).
+    components.pop("HTTPValidationError", None)
+    components.pop("ValidationError", None)
+    security = _security_by_operation(app)
+    for path, path_item in schema.get("paths", {}).items():
         for method, operation in path_item.items():
             if method in {"get", "post", "put", "patch", "delete"} and isinstance(operation, dict):
                 _attach_error_responses(operation)
+                declared = security.get((path, method))
+                if declared is not None:
+                    # The per-operation security declaration carries the REQUIRED
+                    # scope tokens (DOC-R3) against the bearer scheme (DOC-R4).
+                    operation["security"] = [{"bearer": declared}]
     return schema
 
 

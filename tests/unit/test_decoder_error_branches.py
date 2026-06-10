@@ -1,6 +1,6 @@
 """Decoder error/edge branches for the file-upload formats (CLI-R13, TIER-R5, MAP-R5).
 
-Targets the fail-closed paths of the pure TCX/GPX/PWX/FIT decode layers and the
+Targets the fail-closed paths of the pure TCX/GPX/FIT decode layers and the
 ``file_upload`` dispatch: corrupt/empty documents raise the typed
 :class:`FileDecodeError` (never a bare crash); absent optional elements become typed
 gaps (``None``, never ``0``); unparseable scalar/instant tokens are dropped rather
@@ -20,11 +20,9 @@ from lxml import etree
 from wattwise_core.domain.enums import SourceKind
 from wattwise_core.ingestion.adapters import _decode_fit as dfit
 from wattwise_core.ingestion.adapters import _decode_gpx as dgpx
-from wattwise_core.ingestion.adapters import _decode_pwx as dpwx
 from wattwise_core.ingestion.adapters import _decode_tcx as dtcx
 from wattwise_core.ingestion.adapters._asbo import ActivityAsbo, AsboRecord, FileDecodeError
 from wattwise_core.ingestion.adapters._decode_gpx import decode_gpx
-from wattwise_core.ingestion.adapters._decode_pwx import decode_pwx
 from wattwise_core.ingestion.adapters._decode_tcx import decode_tcx
 from wattwise_core.ingestion.adapters.file_upload import (
     FileUploadAdapter,
@@ -210,63 +208,6 @@ def test_gpx_scalar_and_instant_helpers_fail_closed() -> None:
     assert dgpx._as_dt("2026-06-01") is None  # non-datetime -> gap
     naive = _dt.datetime(2026, 6, 1, 10, 0)  # intentionally naive input
     assert dgpx._as_dt(naive) == naive.replace(tzinfo=_dt.UTC)
-
-
-# --------------------------------------------------------------------------- PWX
-
-
-def test_pwx_without_workout_element_fails_closed() -> None:
-    """TIER-R5: a <pwx> with no <workout> raises the typed FileDecodeError."""
-    with pytest.raises(FileDecodeError, match="no workout"):
-        decode_pwx(b"<pwx xmlns='http://www.peaksware.com/PWX/1/0'/>")
-
-
-def test_pwx_parse_seam_reraises_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CLI-R2: a FileDecodeError from the XML seam surfaces verbatim (no double-wrap)."""
-
-    class _Etree:
-        @staticmethod
-        def XMLParser(**_: object) -> object:  # mirrors the lxml API
-            return object()
-
-        @staticmethod
-        def fromstring(_: bytes, parser: object) -> Any:
-            raise FileDecodeError("inner typed failure")
-
-    monkeypatch.setattr(dpwx, "etree", _Etree)
-    with pytest.raises(FileDecodeError, match="inner typed failure"):
-        decode_pwx(b"<pwx><workout/></pwx>")
-
-
-def test_pwx_without_workout_time_has_no_timestamps_and_no_fingerprint() -> None:
-    """LIN-R1.1/MAP-R5: no <time> means no sample/lap instants and no fingerprint."""
-    doc = (
-        b"<pwx xmlns='http://www.peaksware.com/PWX/1/0'><workout>"
-        b"<!-- comment exercises the non-string tag path -->"
-        b"<sample><timeoffset>5</timeoffset><pwr>200</pwr></sample>"
-        b"<segment><summarydata><beginning>0</beginning></summarydata></segment>"
-        b"<segment/>"
-        b"</workout></pwx>"
-    )
-    asbo = decode_pwx(doc)
-    assert asbo.native_fingerprint is None
-    assert asbo.records[0].timestamp is None  # offset present but no start instant
-    assert asbo.records[0].power_w == 200.0
-    assert asbo.laps[0].start_time is None
-    # Second segment has no <summarydata> at all: every lap scalar is a typed gap.
-    assert asbo.laps[1].duration_s is None
-    assert asbo.laps[1].avg_power_w is None
-
-
-def test_pwx_helper_edges_fail_closed() -> None:
-    """MAP-R5: PWX scalar/instant helpers drop unusable tokens rather than fabricate."""
-    assert dpwx._as_float("watts") is None
-    assert dpwx._findall(None, "sample") == []
-    assert dpwx._as_dt(123) is None
-    assert dpwx._as_dt("yesterday") is None
-    naive = _dt.datetime(2026, 6, 1, 9, 0)  # intentionally naive input
-    assert dpwx._as_dt(naive) == naive.replace(tzinfo=_dt.UTC)
-    assert dpwx._as_dt("2026-06-01T09:00:00") == _dt.datetime(2026, 6, 1, 9, 0, tzinfo=_dt.UTC)
 
 
 # --------------------------------------------------------------------------- FIT

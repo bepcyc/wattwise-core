@@ -94,6 +94,7 @@ class _FakeEngine:
     ) -> AgentAnswer:
         self.seen_athlete_id = athlete_id
         self.seen_entitlement = entitlement
+        self.seen_locale = locale
         return self._answer
 
     async def readiness(self, *, athlete_id: str, locale: str, response_length: str) -> Readiness:
@@ -817,3 +818,34 @@ def _last_data_block(sse_body: str) -> dict[str, Any]:
     assert data_lines, "SSE body carried no data lines"
     parsed: dict[str, Any] = json.loads(data_lines[-1])
     return parsed
+
+
+# --- API-R37: the persisted language default on the agent path -------------------
+
+
+def test_ask_applies_persisted_language_default() -> None:
+    """With no body language and no Accept-Language, the STORED subtag is applied (API-R37)."""
+    app, engine = _build_app(_grounded_answer())
+    app.dependency_overrides[agent_routes.persisted_locale] = lambda: "de"
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/ask",
+            json={"question": "How am I doing?"},
+            headers={"Authorization": f"Bearer {_token(app)}"},
+        )
+    assert resp.status_code == 200
+    assert engine.seen_locale == "de"  # the persisted default reached the engine
+
+
+def test_ask_per_request_language_overrides_persisted_default() -> None:
+    """A per-request body language wins over the stored default without mutating it (API-R37)."""
+    app, engine = _build_app(_grounded_answer())
+    app.dependency_overrides[agent_routes.persisted_locale] = lambda: "de"
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/ask",
+            json={"question": "How am I doing?", "language": "ru"},
+            headers={"Authorization": f"Bearer {_token(app)}"},
+        )
+    assert resp.status_code == 200
+    assert engine.seen_locale == "ru"  # the override applies for this one call only

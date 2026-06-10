@@ -37,6 +37,7 @@ from wattwise_core.agent.deliverables import (
     conversation_id_of,
     weekly_digest,
 )
+from wattwise_core.agent.digest_history import record_digest
 from wattwise_core.agent.engine_entitlement import effective_entitlement, sized_model
 from wattwise_core.agent.engine_extras import DeliverableEngineMixin
 from wattwise_core.agent.engine_graph import (
@@ -304,13 +305,17 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             graph = self._graph(AnalyticsService(session), saver, entitlement=entitlement)
             # The weekly digest IS the weekly load review (COACH-R1 #1); flow the athlete's ACTIVE
             # canonical goals into it so the load review is goal-aware (GBO-R38 / API-R32).
-            return await weekly_digest(
+            digest = await weekly_digest(
                 graph,
                 athlete_id,
                 week_end,
                 presentation=self._coach.presentation,
                 active_goals=await active_goals_for(session, athlete_id),
             )
+        # A grounded review joins the stored history the list surface pages (API-R14);
+        # a degraded abstention is not recorded (record_digest no-ops on it).
+        await record_digest(state_db, athlete_id=athlete_id, digest=digest)
+        return digest
 
     async def plan_deliverable(
         self,

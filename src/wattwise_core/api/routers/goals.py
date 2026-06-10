@@ -267,7 +267,7 @@ async def list_goals(
     to: Annotated[_dt.date | None, Query()] = None,
     sort: Annotated[GoalSortKey, Query()] = "created_at",
     order: Annotated[GoalSortOrder, Query()] = "desc",
-    limit: Annotated[int, Query()] = 50,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ) -> GoalList:
     """List the owner's training goals, cursor-paginated + typed-filtered + typed-sorted (API-R35).
@@ -449,3 +449,9 @@ __all__ = [
     "require_write_scope",
     "router",
 ]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_read_scope.required_scopes = ("read",)  # type: ignore[attr-defined]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_write_scope.required_scopes = ("write",)  # type: ignore[attr-defined]

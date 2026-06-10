@@ -37,7 +37,7 @@ import datetime as _dt
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -396,7 +396,7 @@ async def list_signature_history(
     athlete_id: AthleteId,
     key: CursorKey,
     *,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
     cursor: str | None = None,
 ) -> FitnessSignatureHistory:
     """List the owner's effective-dated signatures, newest first, cursor-paged (GBO-R26/R27).
@@ -487,3 +487,9 @@ __all__ = [
     "require_write_scope",
     "router",
 ]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_read_scope.required_scopes = ("read",)  # type: ignore[attr-defined]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_write_scope.required_scopes = ("write",)  # type: ignore[attr-defined]

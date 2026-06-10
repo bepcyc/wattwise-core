@@ -22,8 +22,9 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from wattwise_core.agent.contracts import ChatModel
-from wattwise_core.agent.deliverables import Readiness, readiness_assessment
+from wattwise_core.agent.deliverables import Digest, Readiness, readiness_assessment
 from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, diagnose_coverage
+from wattwise_core.agent.digest_history import digest_history as read_digest_history
 from wattwise_core.agent.engine_memory import (
     delete_memory,
     erase_memory,
@@ -297,6 +298,20 @@ class DeliverableEngineMixin:
                 marker=RESPONSE_LENGTH_PREF_PREFIX,
                 content=f"{RESPONSE_LENGTH_PREF_PREFIX}{value}",
             )
+
+    async def digest_history(
+        self: _EngineSeams, *, athlete_id: str, limit: int = 50, before_week_end: str | None = None
+    ) -> list[Digest]:
+        """The stored weekly-review history, newest first, keyset-paged (API-R14).
+
+        Reads the agent-state store's recorded grounded reviews VERBATIM (GROUND-R7 — no
+        recomputation); ``before_week_end`` is the exclusive keyset bound the router's
+        signed cursor carries (PAGE-R5). Owner-scoped (AGT-SEC-R1).
+        """
+        state_db = await self._agent_state_db()
+        return await read_digest_history(
+            state_db, athlete_id=athlete_id, limit=limit, before_week_end=before_week_end
+        )
 
 
 __all__ = ["DeliverableEngineMixin"]

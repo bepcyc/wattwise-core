@@ -85,10 +85,12 @@ def test_cursor_wrong_key_is_invalid() -> None:
 
 
 def test_limit_is_clamped() -> None:
-    """A requested page size is clamped to [1, 200]; never unbounded (PAGE-R3)."""
+    """limit > 200 is CLAMPED; limit < 1 is REJECTED 422 — never defaulted (PAGE-R3)."""
     assert clamp_limit(10_000) == MAX_PAGE_LIMIT
-    assert clamp_limit(0) == 50
     assert clamp_limit(25) == 25
+    with pytest.raises(ProblemError) as exc:
+        clamp_limit(0)
+    assert exc.value.problem_type.slug == "validation-error"
 
 
 # --- API-R48 / API-R49: extrema-preserving + RDP decimation ----------------------
