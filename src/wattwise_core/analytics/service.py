@@ -30,6 +30,7 @@ from wattwise_core.analytics import np_if_tss as _np
 from wattwise_core.analytics import pmc as _pmc
 from wattwise_core.analytics import trimp as _trimp
 from wattwise_core.analytics import wbal as _wbal
+from wattwise_core.analytics._service_es import _gather_endurance_score
 from wattwise_core.analytics._service_loaders import (
     _activities_in_local_range,
     _activity_local_date,
@@ -410,6 +411,12 @@ class AnalyticsService:  # noqa: size-limits
         curve = await self.power_curve(athlete_id, from_date, to_date, sport=sport)
         points = {d: res.value.mean_power_w for d, res in curve.items() if is_computed(res)}
         return _mmp.cp_wprime(points, sport=sport)
+
+    async def endurance_score(self, athlete_id: str, as_of: _dt.date) -> MetricResult[float]:
+        # Composed of upstream capability results only (CTL / durability / decoupling):
+        # gather lives in ._service_loaders, numeric truth in .endurance_score (ES-R2).
+        """Composed ``[0,100]`` endurance score as-of a local date (ES-R1/R2/R3)."""
+        return await _gather_endurance_score(self, athlete_id, as_of)
 
     async def hrv(
         self, athlete_id: str, local_date: _dt.date

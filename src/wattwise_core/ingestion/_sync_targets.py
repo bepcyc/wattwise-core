@@ -29,7 +29,7 @@ from wattwise_core.domain.enums import (
     GboType,
     Severity,
 )
-from wattwise_core.ingestion.base import AuthError, AuthGapSignal
+from wattwise_core.ingestion.base import AuthError, AuthGapSignal, FetchError, FetchErrorKind
 from wattwise_core.ingestion.watermark import SyncedRange, open_gap
 from wattwise_core.observability.logging import get_logger
 from wattwise_core.persistence.models import Connection, SourceDescriptor
@@ -236,6 +236,62 @@ async def handle_reauth(
     )
 
 
+#: FetchError kind -> the typed gap reason recorded for a degraded source (ING-GAP-R3).
+_REASON_BY_KIND: dict[FetchErrorKind, GapReason] = {
+    FetchErrorKind.SCHEMA_MISMATCH: GapReason.SCHEMA_MISMATCH,
+    FetchErrorKind.RATE_LIMITED: GapReason.RATE_LIMITED,
+    FetchErrorKind.SOURCE_UNAVAILABLE: GapReason.SOURCE_UNAVAILABLE,
+    FetchErrorKind.FETCH_FAILED: GapReason.FETCH_FAILED,
+}
+
+
+async def degrade_with_gap(
+    session_factory: SessionFactory,
+    athlete_id: str,
+    target: _ConnectionTarget,
+    window: SyncWindow,
+    exc: Exception,
+    *,
+    seen_at: _dt.datetime,
+    detail: str,
+) -> SourceSyncResult:
+    """Degrade ONE source AND persist the typed gap fail-closed mandates (ING-R3).
+
+    Un-obtainable data is never swallowed into a result string alone (ING-GAP-R1
+    "never swallowed and never logged-only"): a TRANSIENT typed gap covering the
+    attempted window is opened in its own session — queryable by downstream
+    consumers and self-healed by a later successful sync over the range
+    (ING-GAP-R4). The reason is mapped from the typed ``FetchError`` taxonomy;
+    an untyped failure records ``fetch_failed``.
+    """
+    reason = (
+        _REASON_BY_KIND.get(exc.kind, GapReason.FETCH_FAILED)
+        if isinstance(exc, FetchError)
+        else GapReason.FETCH_FAILED
+    )
+    _log.warning(
+        "sync.source_degraded",
+        source_key=target.source_key,
+        connection_id=target.connection_id,
+        error_type=type(exc).__name__,
+    )
+    covered = synced_range(window, seen_at)
+    async with session_factory() as session:
+        await open_gap(
+            session,
+            _uid(athlete_id),
+            _uid(target.source_descriptor_id),
+            GboType.ACTIVITY,
+            reason=reason,
+            seen_at=seen_at,
+            severity=Severity.WARNING,
+            transient=True,
+            range_start_at=covered.oldest,
+            range_end_at=covered.newest,
+        )
+    return degraded(target, detail)
+
+
 def degraded(target: _ConnectionTarget, detail: str) -> SourceSyncResult:
     return SourceSyncResult.non_ok(target, SyncOutcome.DEGRADED, detail)
 
@@ -267,6 +323,7 @@ __all__ = [
     "SyncWindow",
     "_ConnectionTarget",
     "_uid",
+    "degrade_with_gap",
     "degraded",
     "handle_reauth",
     "resolve_api_key",

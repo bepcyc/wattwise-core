@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import uuid
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
@@ -22,8 +23,16 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import mmp_cp as _mmp
-from wattwise_core.analytics.constants import SIGNATURE_MIN_FIT_R2
-from wattwise_core.analytics.result import Computed, MetricResult, is_computed
+from wattwise_core.analytics.constants import (
+    SIGNATURE_MIN_FIT_R2,
+)
+from wattwise_core.analytics.result import (
+    Computed,
+    MetricResult,
+    Unavailable,
+    UnavailableReason,
+    is_computed,
+)
 from wattwise_core.analytics.series import Stream, resample_to_1hz
 from wattwise_core.domain.enums import SignatureOrigin, StreamChannelName, StreamSetKind
 from wattwise_core.persistence.localdate import (
@@ -39,6 +48,9 @@ from wattwise_core.persistence.models import (
     StreamChannel,
     WellnessStreamSet,
 )
+
+if TYPE_CHECKING:  # the service imports this module; quote-only typing avoids the cycle
+    pass
 
 
 def _uid(value: str | uuid.UUID) -> uuid.UUID:
@@ -351,6 +363,24 @@ def _better_mmp(
     if not is_computed(current):
         return True
     return candidate.value.mean_power_w > current.value.mean_power_w
+
+
+def _curve_point(
+    curve: dict[int, MetricResult[_mmp.MMPWindow]], duration_s: int
+) -> MetricResult[float]:
+    """One MMP curve point's mean power as a scalar result (ES-R1 durability input).
+
+    An absent / non-``Computed`` duration is a typed ``Unavailable`` (fail-closed),
+    never a fabricated point — the ES-R2 missing-component policy decides downstream.
+    """
+    res = curve.get(duration_s)
+    if res is None or not is_computed(res):
+        return Unavailable(
+            UnavailableReason.MISSING_REQUIRED_INPUT,
+            f"no computed MMP point at {duration_s} s in the gather window",
+        )
+    return Computed(value=float(res.value.mean_power_w))
+
 
 
 __all__ = [

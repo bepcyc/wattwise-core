@@ -34,6 +34,7 @@ import pydantic
 
 from wattwise_core.config import Settings
 from wattwise_core.ingestion.base import FetchError, FetchErrorKind
+from wattwise_core.observability import metrics as _metrics
 
 #: The HTTP status the §4.2/§4.4 contract treats specially (transient + Retry-After).
 _TooManyRequests = 429
@@ -194,6 +195,7 @@ class TokenBucket:
         "_capacity",
         "_clock",
         "_lock",
+        "_metrics_source",
         "_min_rate",
         "_rate",
         "_reduce_factor",
@@ -209,7 +211,11 @@ class TokenBucket:
         clock: Callable[[], float] | None = None,
         reduce_factor: float | None = None,
         min_rate: float | None = None,
+        metrics_source: str | None = None,
     ) -> None:
+        # ING-OBS-R2: when a source label is given, limiter waits are recorded as the
+        # per-source rate-limit-utilization metric (an unlabeled bucket records nothing).
+        self._metrics_source = metrics_source
         self._rate = rate_per_s
         self._capacity = capacity
         self._clock = clock or time.monotonic
@@ -277,6 +283,13 @@ class TokenBucket:
             if self._tokens < 1.0:
                 deficit = 1.0 - self._tokens
                 wait = deficit / self._rate if self._rate > 0 else 0.0
+                # ING-OBS-R2 / CLI-R12: rate-limit waits are observable per source.
+                if self._metrics_source is not None:
+                    _metrics.get_registry().observe(
+                        _metrics.INGEST_RATE_LIMIT_WAIT,
+                        wait,
+                        labels={"source_key": self._metrics_source},
+                    )
                 await wait_for(wait)
                 self._refill()
             self._tokens -= 1.0
@@ -309,6 +322,7 @@ def intervals_icu_bucket(settings: Settings) -> TokenBucket:
         settings.adapters__intervals_icu__bucket_capacity,
         reduce_factor=settings.adapters__intervals_icu__bucket_reduce_factor,
         min_rate=settings.adapters__intervals_icu__bucket_min_rate,
+        metrics_source="intervals_icu",
     )
 
 

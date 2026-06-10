@@ -230,6 +230,8 @@ class Settings(BaseSettings):
     adapters__intervals_icu__bucket_reduce_factor: float = Field(gt=0, lt=1)
     adapters__intervals_icu__bucket_min_rate: float = Field(gt=0)
     adapters__intervals_icu__http_timeout_s: float = Field(gt=0)
+    adapters__intervals_icu__discover_page_size: int = Field(ge=1)
+    ingestion__backfill_window_days: int = Field(ge=1)
 
     # --- analytics (doc 40 constants) ---
     analytics__ctl_time_constant_days: float = Field(gt=0)
@@ -240,6 +242,22 @@ class Settings(BaseSettings):
     # GBO-R28 fail-closed floor for a stored MODELED signature's fit quality (R^2);
     # the VALUE lives in defaults.toml (CFG-R1a) — this is schema + range only.
     analytics__signature_min_fit_r2: float = Field(ge=0, le=1)
+    # Endurance-score (ES-R1) declared weighting + normalization; the VALUES live in
+    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraints.
+    # Weights are relative, non-negative; the composition renormalizes over the present
+    # components, so only the SUM must be positive (validated at composition time).
+    analytics__endurance_score_weight_ctl: float = Field(ge=0)
+    analytics__endurance_score_weight_durability: float = Field(ge=0)
+    analytics__endurance_score_weight_decoupling: float = Field(ge=0)
+    analytics__endurance_score_ctl_full_scale: float = Field(gt=0)
+    analytics__endurance_score_durability_floor: float = Field(ge=0)
+    analytics__endurance_score_durability_ceiling: float = Field(gt=0)
+    analytics__endurance_score_decoupling_full_penalty_pct: float = Field(gt=0)
+    analytics__endurance_score_allow_partial: bool
+    analytics__endurance_score_partial_confidence_penalty: float = Field(gt=0, le=1)
+    analytics__endurance_score_window_days: int = Field(ge=1)
+    analytics__endurance_score_long_duration_s: int = Field(ge=1)
+    analytics__endurance_score_short_duration_s: int = Field(ge=1)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str

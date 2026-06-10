@@ -36,12 +36,16 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
+from wattwise_core.domain.enums import GboType
 from wattwise_core.ingestion._canonical import OriginalFile
 from wattwise_core.ingestion._ingest_steps import (
     _land_batch,
     _resolve_activity_id,
     _write_activity_canonical,
     _write_wellness,
+)
+from wattwise_core.ingestion.capability import (
+    require_declared_types,
 )
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
 from wattwise_core.persistence.types import uuid7
@@ -96,6 +100,8 @@ class IngestService:
         ingest_run_id: uuid.UUID | None = None,
         original_files: list[OriginalFile] | None = None,
         synced_range: SyncedRange | None = None,
+        declared_gbo_types: frozenset[GboType] | None = None,
+        source_key: str = "",
     ) -> IngestResult:
         """Land candidates into the canonical store in DURABLE, fault-isolated batches.
 
@@ -113,7 +119,13 @@ class IngestService:
         OPEN transient gap fully inside that range is closed — AFTER all batch data has been
         committed above (SYN-R3 / ING-UPS-R2 / ING-GAP-R4), so store, cursor, and gap state
         stay mutually consistent and a crash mid-run never advances past un-committed data (ING-R6).
+
+        ADP-R3 (fail-closed): BEFORE any write, every candidate's ``gbo_type`` must be in
+        the adapter's ``declared_gbo_types`` (when given) AND in the engine-writable set —
+        an undeclared/unknown type raises :class:`UndeclaredGboTypeError`; the batch is
+        REFUSED, never partially/silently dropped from the canonical store.
         """
+        require_declared_types(candidates, declared_gbo_types, source_key=source_key)
         athlete = _uid(athlete_id)
         descriptor = _uid(source_descriptor_id)
         run_id = ingest_run_id or uuid7()

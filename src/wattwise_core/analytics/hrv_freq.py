@@ -44,6 +44,9 @@ from wattwise_core.analytics.result import (
     UnavailableReason,
 )
 
+# ANL-R11: sport-agnostic — same declaration as the time-domain HRV family (hrv.py).
+APPLICABLE_SPORTS: None = None
+
 
 class SpectralMethod(StrEnum):
     """Spectral estimator recorded in ``hrv_spectral_method`` (HRV-R6).
@@ -369,6 +372,7 @@ def freq_domain_hrv(
 
 
 __all__ = [
+    "APPLICABLE_SPORTS",
     "FreqDomainHrv",
     "SpectralMethod",
     "freq_domain_hrv",

@@ -40,6 +40,7 @@ from wattwise_core.ingestion._mapping import (
     _validate_payload,
     _whole_source_tier_of,
 )
+from wattwise_core.ingestion.capability import UndeclaredGboTypeError
 from wattwise_core.ingestion.trust import load_trust_policy
 from wattwise_core.ingestion.validation import validate_candidate
 from wattwise_core.persistence.localdate import (
@@ -144,6 +145,10 @@ async def _resolve_candidate(
                 result.activities_written.add(str(activity_id))
             elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
                 wellness_dates.add(_parse_date(cand.payload["local_date"]))
+            else:  # unreachable after require_declared_types; refuse, never drop (ADP-R3)
+                raise UndeclaredGboTypeError(str(cand.gbo_type), "")
+    except UndeclaredGboTypeError:
+        raise  # ADP-R3: a typed REFUSAL, never silently counted as a failed record
     except Exception:
         result.candidates_failed += 1  # ING-UPS-R3 record isolation; keep the run
         return

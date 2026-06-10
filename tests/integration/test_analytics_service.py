@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from wattwise_core.analytics.result import is_computed
@@ -138,3 +139,121 @@ async def test_pmc_series_over_range(session: AsyncSession) -> None:
     first = series[0]
     assert is_computed(first)
     assert first.value.ctl > 0  # type: ignore[union-attr]
+
+
+async def _set_current_sport(session: AsyncSession, athlete_id: str, sport: str | None) -> None:
+    """Set the athlete's canonical current_sport (the ES power-component partition key)."""
+    athlete = await session.get(Athlete, uuid.UUID(athlete_id))
+    assert athlete is not None
+    athlete.current_sport = sport
+    await session.commit()
+
+
+@pytest.mark.integration
+async def test_endurance_score_composes_from_canonical_store(session: AsyncSession) -> None:
+    """ES-R1/ES-R2: the score composes CTL + power-curve durability from persisted records.
+
+    The seeded constant-power hour yields a computed CTL and a flat power curve, so
+    the durability ratio MMP(1200)/MMP(300) == 1.0 (present); no HR channel exists,
+    so decoupling is missing and the configured partial policy composes with reduced
+    confidence and the components recorded in QualityReport (ES-R2b).
+    """
+    aid, _ = await _seed_constant_power_ride(session, watts=250.0, seconds=3600, ftp_w=250.0)
+    await _set_current_sport(session, aid, "cycling")
+    svc = AnalyticsService(session)
+    result = await svc.endurance_score(aid, _dt.date(2026, 6, 1))
+    assert is_computed(result)
+    assert 0.0 <= result.value <= 100.0  # type: ignore[union-attr]
+    quality = result.quality  # type: ignore[union-attr]
+    assert quality.extra["components_present"] == ("ctl", "durability")
+    assert quality.extra["components_missing"] == ("decoupling",)
+    assert quality.confidence < 1.0
+    assert result.provenance.sport == "cycling"  # type: ignore[union-attr]
+
+
+@pytest.mark.integration
+async def test_endurance_score_without_current_sport_degrades_to_ctl(
+    session: AsyncSession,
+) -> None:
+    """ES-R2: no canonical current_sport ⇒ power components fail closed; CTL-only partial.
+
+    The power components cannot be sport-partitioned without a sport (never a
+    hardcoded one), so durability AND decoupling are missing and the declared-valid
+    CTL-only subset composes with reduced confidence — never a silent 0 (ANL-R4).
+    """
+    aid, _ = await _seed_constant_power_ride(session, watts=250.0, seconds=3600, ftp_w=250.0)
+    svc = AnalyticsService(session)
+    result = await svc.endurance_score(aid, _dt.date(2026, 6, 1))
+    assert is_computed(result)
+    quality = result.quality  # type: ignore[union-attr]
+    assert quality.extra["components_present"] == ("ctl",)
+    assert quality.extra["components_missing"] == ("decoupling", "durability")
+    assert quality.confidence < 1.0
+
+
+@pytest.mark.integration
+async def test_endurance_score_unknown_athlete_fails_closed(session: AsyncSession) -> None:
+    """ES-R2(a): no athlete/PMC day ⇒ Unavailable(MISSING_REQUIRED_INPUT), never a number."""
+    svc = AnalyticsService(session)
+    result = await svc.endurance_score(str(uuid.uuid4()), _dt.date(2026, 6, 1))
+    assert not is_computed(result)
+
+
+async def _add_hr_channel(session: AsyncSession, activity_id: str, bpm: float) -> None:
+    """Attach a constant-HR channel to the activity's existing stream set."""
+    stmt = select(ActivityStreamSet).where(
+        ActivityStreamSet.activity_id == uuid.UUID(activity_id)
+    )
+    stream_set = (await session.execute(stmt)).scalar_one()
+    session.add(
+        StreamChannel(
+            stream_set_id=stream_set.stream_set_id,
+            set_kind=StreamSetKind.ACTIVITY,
+            channel=StreamChannelName.HR_BPM,
+            sample_basis=SampleBasis.TIME,
+            values=[bpm] * stream_set.sample_count,
+            coverage={},
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.integration
+async def test_endurance_score_all_components_present(session: AsyncSession) -> None:
+    """ES-R1: with power AND HR streams all three components compose at full confidence.
+
+    The constant-power hour gives a flat curve (durability ratio 1.0) and, paired with
+    a constant HR, a 0% aerobic decoupling — so no component is missing and the
+    QualityReport carries full confidence (no ES-R2 degradation).
+    """
+    aid, activity_id = await _seed_constant_power_ride(
+        session, watts=250.0, seconds=3600, ftp_w=250.0
+    )
+    await _add_hr_channel(session, activity_id, bpm=140.0)
+    await _set_current_sport(session, aid, "cycling")
+    svc = AnalyticsService(session)
+    result = await svc.endurance_score(aid, _dt.date(2026, 6, 1))
+    assert is_computed(result)
+    quality = result.quality  # type: ignore[union-attr]
+    assert quality.extra["components_present"] == ("ctl", "decoupling", "durability")
+    assert quality.extra["components_missing"] == ()
+    assert quality.confidence == 1.0
+
+
+@pytest.mark.integration
+async def test_endurance_score_short_ride_lacks_durability_point(
+    session: AsyncSession,
+) -> None:
+    """ES-R2: a curve without the configured long-duration point ⇒ durability missing.
+
+    A 600 s ride yields no MMP(1200 s) point, so the durability ratio fails closed
+    (typed Unavailable from the curve-point read) and the partial policy composes on
+    the remaining declared-valid subset — never a fabricated ratio.
+    """
+    aid, _ = await _seed_constant_power_ride(session, watts=250.0, seconds=600, ftp_w=250.0)
+    await _set_current_sport(session, aid, "cycling")
+    svc = AnalyticsService(session)
+    result = await svc.endurance_score(aid, _dt.date(2026, 6, 1))
+    assert is_computed(result)
+    missing = result.quality.extra["components_missing"]  # type: ignore[union-attr]
+    assert "durability" in missing
