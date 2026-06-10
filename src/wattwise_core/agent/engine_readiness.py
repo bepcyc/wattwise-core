@@ -20,8 +20,13 @@ from __future__ import annotations
 
 import datetime as _dt
 import math
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.agent.contracts import ChatModel
 from wattwise_core.agent.readiness_deliverable import (
@@ -29,9 +34,16 @@ from wattwise_core.agent.readiness_deliverable import (
     _ReadinessNarration,
 )
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
-from wattwise_core.analytics.constants import READINESS_MIN_FITNESS_CTL
+from wattwise_core.analytics.constants import (
+    READINESS_FRESH_STALENESS_DAYS,
+    READINESS_MAX_STALENESS_DAYS,
+    READINESS_MIN_FITNESS_CTL,
+)
 from wattwise_core.analytics.result import is_computed
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.analytics.sufficiency import RecordSufficiency, assess_record_sufficiency
+from wattwise_core.domain.enums import ConnectionStatus, Fidelity
+from wattwise_core.persistence.models import Connection
 from wattwise_core.persistence.types import utcnow
 
 # The trailing window the readiness gather scans for the latest canonical TSB (form) and
@@ -41,32 +53,145 @@ from wattwise_core.persistence.types import utcnow
 _READINESS_WINDOW_DAYS = 14
 
 
+@dataclass(frozen=True, slots=True)
+class ReadinessInputs:
+    """The deterministically-gathered readiness inputs + the record's sufficiency (QA-EVAL-R2.4).
+
+    ``form``/``as_of``/``hrv_rmssd``/``hrv_baseline`` are the canonical metric reads (any
+    unavailable input is ``None``, fail-closed). ``sufficiency`` is the typed record-freshness +
+    load-fidelity envelope (GROUND-R6 / DEGR-R2) the deliverable applies its asymmetric fail-closed
+    policy against, so a current-state verdict is never asserted on a record whose observed data has
+    gone stale behind a silently-withdrawn connector.
+    """
+
+    form: float | None
+    as_of: str | None
+    hrv_rmssd: float | None
+    hrv_baseline: float | None
+    sufficiency: RecordSufficiency
+
+
+def connection_is_suspect(
+    status: ConnectionStatus,
+    last_synced_at: _dt.datetime | None,
+    *,
+    reference_date: _dt.date,
+    sync_stale_after_days: int,
+) -> bool:
+    """True iff this connector should be delivering data but is broken or silently stalled.
+
+    Pure predicate (the MNAR disambiguator behind the readiness freshness gate). A connector in
+    ``REAUTH_REQUIRED``/``ERROR`` is overtly broken — it cannot deliver, so a data gap behind it is
+    likely MISSING data, not rest. A ``CONNECTED`` source that has never synced, or whose last
+    successful sync is itself older than ``sync_stale_after_days``, is silently stalled (the failure
+    mode an expired credential leaves when the status flag lags). A ``DISCONNECTED`` source is an
+    INTENTIONAL athlete action — no data is expected, so its gap is never suspect (fail-open: we do
+    not manufacture a sync alarm from a deliberate disconnect).
+    """
+    if status in (ConnectionStatus.REAUTH_REQUIRED, ConnectionStatus.ERROR):
+        return True
+    if status is ConnectionStatus.CONNECTED:
+        if last_synced_at is None:
+            return True
+        gap = (reference_date - last_synced_at.date()).days
+        return gap > sync_stale_after_days
+    return False
+
+
+async def connection_sync_suspect(
+    session: AsyncSession,
+    athlete_id: str,
+    *,
+    reference_date: _dt.date,
+    sync_stale_after_days: int,
+) -> bool:
+    """True iff ANY of the athlete's connectors is broken or silently stalled (issue #12 signal).
+
+    Reads the canonical :class:`Connection` rows for the server-derived athlete (AGT-SEC-R1,
+    athlete-scoped) and classifies each with :func:`connection_is_suspect`. An athlete with NO
+    connectors (a pure manual-file-upload account) has no pipeline that could silently fail, so the
+    gap is never "suspect" here — the freshness gate then trusts the record, as for a healthy
+    sync. A malformed athlete id yields ``False`` (fail-soft for an input signal, never fail-open
+    identity), so the deliverable still runs without the freshness corroboration.
+    """
+    try:
+        aid = uuid.UUID(athlete_id)
+    except (ValueError, AttributeError):  # pragma: no cover - athlete_id is server-derived/valid
+        return False
+    rows = (
+        (await session.execute(select(Connection).where(Connection.athlete_id == aid)))
+        .scalars()
+        .all()
+    )
+    return any(
+        connection_is_suspect(
+            row.status,
+            row.last_synced_at,
+            reference_date=reference_date,
+            sync_stale_after_days=sync_stale_after_days,
+        )
+        for row in rows
+    )
+
+
 async def gather_readiness_inputs(
-    svc: AnalyticsService, athlete_id: str
-) -> tuple[float | None, str | None, float | None, float | None]:
+    svc: AnalyticsService, athlete_id: str, *, sync_suspect: bool = False
+) -> ReadinessInputs:
     """Deterministically fetch the readiness inputs from canonical analytics (QA-EVAL-R2.4).
 
-    Returns ``(form, as_of, hrv_rmssd, hrv_baseline)``. ``form`` is the latest computed
-    canonical TSB over a trailing window and ``as_of`` its date (the most-recent
-    :class:`Computed` PMC day); ``hrv_rmssd`` is the latest computed HRV (RMSSD, ms) for
-    that day and ``hrv_baseline`` the athlete's HRV baseline for that SAME day (the midpoint
-    of the source-reported ``hrv_baseline_low/high_ms`` band, read via
-    :meth:`AnalyticsService.hrv_baseline`). When BOTH the RMSSD and the baseline are present
-    the oracle's HRV-suppression nudge can fire (COACH-R1 #2); when the baseline is missing it
-    fails closed to ``None`` and the verdict reads from form alone. Any unavailable input
-    fails closed to ``None`` (mirroring the analytics Computed/Unavailable envelope) so the
-    oracle abstains/degrades truthfully rather than guessing. This bypasses the retrieval
-    planner by design — the readiness JTBD is fixed.
+    Returns a :class:`ReadinessInputs`. ``form`` is the latest computed canonical TSB over a
+    trailing window and ``as_of`` its date (the most-recent :class:`Computed` PMC day);
+    ``hrv_rmssd`` is the latest computed HRV (RMSSD, ms) for that day and ``hrv_baseline`` the
+    athlete's HRV baseline for that SAME day (the midpoint of the source-reported
+    ``hrv_baseline_low/high_ms`` band, read via :meth:`AnalyticsService.hrv_baseline`). When BOTH
+    the RMSSD and the baseline are present the oracle's HRV-suppression nudge can fire (COACH-R1);
+    when the baseline is missing it fails closed to ``None`` and the verdict reads from form alone.
+    Any unavailable input fails closed to ``None`` (mirroring the analytics Computed/Unavailable
+    envelope) so the oracle abstains/degrades truthfully rather than guessing.
+
+    Crucially it ALSO measures record SUFFICIENCY (GROUND-R6): the latest PMC grid day is always
+    filled to today (PMC-R6), so ``as_of`` alone cannot reveal that a connector silently stopped
+    delivering — the EWMA simply decayed the unobserved tail as assumed-rest and form drifted up.
+    So freshness is anchored on the most recent OBSERVED activity day, corroborated by
+    ``sync_suspect`` (whether a connector that should be delivering is broken/stalled — the signal
+    that keeps a legitimate taper's fresh-form ``go`` from being false-abstained), and any recent
+    SUBSTITUTED (HR-modeled) load is flagged (DEGR-R2); the deliverable consumes that envelope. This
+    bypasses the retrieval planner by design — the readiness JTBD is fixed.
     """
     today = utcnow().date()
     start = today - _dt.timedelta(days=_READINESS_WINDOW_DAYS)
     series = await svc.pmc(athlete_id, start, today)
     form, as_of = _latest_form(series, start)
+    last_observed = await svc.latest_activity_date(athlete_id)
+    sufficiency = assess_record_sufficiency(
+        reference_date=today,
+        last_observed_date=last_observed,
+        fresh_within_days=READINESS_FRESH_STALENESS_DAYS,
+        max_staleness_days=READINESS_MAX_STALENESS_DAYS,
+        substituted=_recent_load_substituted(series),
+        sync_suspect=sync_suspect,
+    )
     if as_of is None:
-        return form, as_of, None, None
+        return ReadinessInputs(form, as_of, None, None, sufficiency)
     rmssd = await _latest_hrv_rmssd(svc, athlete_id, as_of)
     baseline = await svc.hrv_baseline(athlete_id, _dt.date.fromisoformat(as_of))
-    return form, as_of, rmssd, baseline
+    return ReadinessInputs(form, as_of, rmssd, baseline, sufficiency)
+
+
+def _recent_load_substituted(series: Sequence[Any]) -> bool:
+    """True iff any computed day in the window used a SUBSTITUTED lower-fidelity load (DEGR-R2).
+
+    A day whose load came from the HR-modeled member (the power source withdrawn) carries
+    ``Fidelity.SUBSTITUTED`` load coverage. Surfacing it lets the deliverable disclose reduced
+    fidelity rather than presenting a substituted-load form as full raw-stream truth.
+    """
+    for day in series:
+        if not is_computed(day):
+            continue
+        coverage = getattr(day.value, "load_coverage", None)
+        if coverage is not None and coverage.fidelity is Fidelity.SUBSTITUTED:
+            return True
+    return False
 
 
 def _latest_form(series: Sequence[Any], start: _dt.date) -> tuple[float | None, str | None]:
@@ -138,6 +263,9 @@ def readiness_narrator(
 
 
 __all__ = [
+    "ReadinessInputs",
+    "connection_is_suspect",
+    "connection_sync_suspect",
     "gather_readiness_inputs",
     "readiness_narrator",
 ]

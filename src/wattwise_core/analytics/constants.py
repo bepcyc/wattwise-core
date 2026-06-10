@@ -188,5 +188,26 @@ READINESS_HRV_SUPPRESSION_FRAC: Final = 0.10  # hrv >=10% below baseline => one 
 # form as UNAVAILABLE so the deliverable abstains rather than guessing.
 READINESS_MIN_FITNESS_CTL: Final = 1.0  # GROUND-R6 / PMC-R3/R5
 
+# --- readiness/form record-freshness floors (sufficiency axis, GROUND-R6) ---
+# The verdict reads canonical form (TSB) "as of today", but that value is only as trustworthy as
+# how recently real data was OBSERVED: a silently-withdrawn connector leaves an UNOBSERVED tail the
+# load pipeline cannot distinguish from rest, so the EWMA decays ATL toward zero and form drifts UP
+# — manufacturing freshness exactly when data stopped. These edges (in days) bound that tail. They
+# are keyed to the ATL time constant (tau_ATL = 7 d), since ATL is the EWMA that corrupts fastest:
+#   * within FRESH days     => data is current; read the verdict with no freshness caveat.
+#   * FRESH < gap <= MAX     => disclose staleness (DEGRADED + caveat); never emit the most
+#                              aggressive GO on a record that cannot see the last several days.
+#   * gap > MAX (= 2*tau_ATL) => the assumed-rest tail now dominates ATL; the current-state read
+#                              is untrustworthy => abstain (fail-closed, GROUND-R6).
+# The gap is inherently MISSING-NOT-AT-RANDOM (sync breaks during travel/illness), so we widen
+# caution rather than impute the gap into a confident number. Overridable like the bands above.
+READINESS_FRESH_STALENESS_DAYS: Final = 2  # gap <= this => data current, no freshness caveat
+READINESS_MAX_STALENESS_DAYS: Final = 14  # gap > this (= 2*tau_ATL) => abstain on stale record
+# A connector that should auto-deliver but whose last successful sync is older than this is treated
+# as silently failing — the corroboration that turns an observed-data gap from "legitimate taper"
+# into "data likely MISSING". Pull connectors typically sync at least daily; a few days of silence
+# on a still-"connected" source is the soft signal a withdrawn/expired credential leaves behind.
+READINESS_SYNC_STALE_AFTER_DAYS: Final = 3
+
 # --- generic numeric tolerance ---
 DEFAULT_CLOSED_FORM_ABS_TOL: Final = 1e-9  # ANL-R31 (× max(1,|x|))  # noqa: RUF003 - math notation

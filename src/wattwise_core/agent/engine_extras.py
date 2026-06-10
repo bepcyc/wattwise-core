@@ -32,6 +32,7 @@ from wattwise_core.agent.engine_memory import (
     list_memory,
 )
 from wattwise_core.agent.engine_readiness import (
+    connection_sync_suspect,
     gather_readiness_inputs,
     readiness_narrator,
 )
@@ -46,7 +47,9 @@ from wattwise_core.agent.memory import (
     response_length_from_items,
 )
 from wattwise_core.agent.state_db import AgentStateDatabase
+from wattwise_core.analytics.constants import READINESS_SYNC_STALE_AFTER_DAYS
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.persistence.types import utcnow
 from wattwise_core.seams import SessionProvider
 
 # The persisted-default verbosity preference (MEM-R1, VOICE-R8 §382) lives in the AGENT-STATE store
@@ -135,13 +138,22 @@ class DeliverableEngineMixin:
         """
         async with self._sessions.session(subject=athlete_id) as session:
             svc = AnalyticsService(session)
-            form, as_of, rmssd, baseline = await gather_readiness_inputs(svc, athlete_id)
+            # The MNAR disambiguator (issue #12): read whether a connector that should be
+            # delivering is broken/stalled, so the freshness gate fires on missing data, not rest.
+            sync_suspect = await connection_sync_suspect(
+                session,
+                athlete_id,
+                reference_date=utcnow().date(),
+                sync_stale_after_days=READINESS_SYNC_STALE_AFTER_DAYS,
+            )
+            inputs = await gather_readiness_inputs(svc, athlete_id, sync_suspect=sync_suspect)
             return await readiness_assessment(
                 athlete_id,
-                form=form,
-                as_of=as_of,
-                hrv_rmssd=rmssd,
-                hrv_baseline=baseline,
+                form=inputs.form,
+                as_of=inputs.as_of,
+                hrv_rmssd=inputs.hrv_rmssd,
+                hrv_baseline=inputs.hrv_baseline,
+                sufficiency=inputs.sufficiency,
                 narrate=readiness_narrator(self._model, system=self._coach.readiness_system),
                 grounder=self._coach.grounder(self._model, svc),
                 response_length=response_length,  # type: ignore[arg-type]
