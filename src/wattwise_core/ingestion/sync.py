@@ -31,6 +31,7 @@ Layer: L3 ingestion/sync — the ONLY writer to the store (ARCH-R3, via
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 from typing import Any
 
@@ -100,12 +101,25 @@ class SyncOrchestrator:
         registry: AdapterRegistry,
         credential_store: CredentialStore | None = None,
         now: Any = None,
+        concurrency: int = 1,
+        store_raw_gps: bool = True,
     ) -> None:
         self._sessions = sessions
         self._registry = registry
         self._credentials = credential_store
         self._now = now or utcnow
-        self._ctx = RunContext(sessions=sessions, credentials=credential_store, now=self._now)
+        # PERF-R2: independent source syncs run CONCURRENTLY bounded by this limit
+        # (loaded config, ``ingestion__sync_concurrency``; per-provider pacing is the
+        # adapter token-bucket, CLI-R10). The wiring clamps it to 1 on SQLite — the
+        # single-writer backend degrades gracefully to serialized syncs (PERF-R2 caveat)
+        # with no correctness loss. Never below 1 (fail-closed against a 0/negative knob).
+        self._concurrency = max(1, concurrency)
+        self._ctx = RunContext(
+            sessions=sessions,
+            credentials=credential_store,
+            now=self._now,
+            store_raw_gps=store_raw_gps,
+        )
 
     def _factory_for(self, athlete_id: str) -> SessionFactory:
         """A zero-arg :class:`SessionFactory` over the provider seam, subject-bound (SEAM-R11)."""
@@ -135,11 +149,30 @@ class SyncOrchestrator:
         )
         explicit_window = window is not None
         connections = await self._select_connections(athlete_id, connection_id, source)
-        for conn in connections:
-            result = await self._sync_one(
-                athlete_id, conn, win, fetched_at, run.sync_run_id, explicit_window
-            )
-            run.results.append(result)
+        if self._concurrency <= 1 or len(connections) <= 1:
+            for conn in connections:
+                result = await self._sync_one(
+                    athlete_id, conn, win, fetched_at, run.sync_run_id, explicit_window
+                )
+                run.results.append(result)
+            return run
+        # PERF-R2: independent sources run CONCURRENTLY, bounded by the configured
+        # limit. Each source still lands in its OWN transaction/session (CON-R3), and
+        # ``_sync_one`` never raises past itself, so one failure degrades only its own
+        # result. Results are collected in connection order (deterministic output).
+        semaphore = asyncio.Semaphore(self._concurrency)
+        ordered: list[SourceSyncResult | None] = [None] * len(connections)
+
+        async def _bounded(index: int, conn: _ConnectionTarget) -> None:
+            async with semaphore:
+                ordered[index] = await self._sync_one(
+                    athlete_id, conn, win, fetched_at, run.sync_run_id, explicit_window
+                )
+
+        async with asyncio.TaskGroup() as group:
+            for index, conn in enumerate(connections):
+                group.create_task(_bounded(index, conn))
+        run.results.extend(result for result in ordered if result is not None)
         return run
 
     async def _select_connections(

@@ -78,9 +78,17 @@ class IngestService:
         object_store: ObjectStore | None = None,
         batch_size: int | None = None,
         resolver: ConflictResolver | None = None,
+        store_raw_gps: bool = True,
     ) -> None:
         self._session = session
         self._object_store = object_store
+        # PRIV-R2: when the athlete opts out of storing raw GPS coordinates
+        # (``privacy__store_raw_gps = false``), the raw ``latlng`` channel is dropped
+        # before canonical landing while every derived non-locating metric still lands,
+        # AND the verbatim original file is WITHHELD for GPS-bearing formats (the raw
+        # ``.fit``/``.gpx``/``.tcx`` bytes embed the track) — disclosed via the
+        # ``raw_file_withheld`` audit event; see ``_ingest_steps._capture_original``.
+        self._store_raw_gps = store_raw_gps
         # PERF-R1 / ING-UPS-R1/R3: candidates are landed in bounded batches. The size is
         # configuration (CFG-R1a), supplied by the caller; ``None`` lands the whole list as
         # one batch (the fault-isolation savepoint per row is what bounds blast radius).

@@ -39,6 +39,7 @@ from sqlalchemy import create_engine as _create_sync_engine
 from sqlalchemy import func, select
 from starlette.testclient import TestClient
 
+from tests.integration._schema import provision_app_schema
 from wattwise_core.agent.deliverables import AgentAnswer, Citation, Observation
 from wattwise_core.agent.graph import DEFAULT_NODE_VISIT_CEILING
 from wattwise_core.agent.memory import MemoryItem, MemoryItemKind
@@ -130,6 +131,7 @@ def _app_with_fake_engine(tmp_path: Path, **overrides: Any) -> tuple[TestClient,
     settings = _settings(tmp_path, **overrides)
     _create_canonical_schema(tmp_path / "cluster_a.db")
     app = create_app(settings)
+    provision_app_schema(app)  # real schema + stamped head (the readiness gate, RUN-R6)
     engine = _FakeAnswerEngine()
     # Replace ONLY the engine seam; the entitlement gate stays the real wired one.
     app.dependency_overrides[agent_routes.agent_engine] = lambda: engine

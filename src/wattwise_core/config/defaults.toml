@@ -28,10 +28,27 @@ rate_limit_per_minute = 60
 request_max_bytes = 33554432   # 32 MiB upload ceiling for FIT/GPX/TCX imports
 
 [auth]
+# SEC-R2.3: access-token lifetime (seconds). MUST be <= 3600 (60 minutes); a 0/negative
+# or over-an-hour value is rejected at config load, never read as "never expires".
+access_ttl_seconds = 3600
 # Rotating refresh-token family lifetime + single-use account-link challenge lifetime
 # (API-R23 / AUTH-R8). Loaded content (CFG-R1a) — never a code literal.
 refresh_ttl_seconds = 1209600   # 14 days
 link_ttl_seconds = 600          # 10 minutes
+
+[privacy]
+# PRIV-R2: set false to opt out of storing raw GPS coordinates (the ``latlng`` channel);
+# derived non-locating metrics still land. In single-athlete OSS the layered config is
+# the athlete/operator surface.
+store_raw_gps = true
+
+[database]
+# PERF-R4: bounded pool sizing for the server backends (PostgreSQL/MariaDB); SQLite keeps
+# its small non-pooled footprint. Exhaustion surfaces as a bounded wait of pool_timeout_s.
+pool_size = 5
+max_overflow = 10
+pool_timeout_s = 30.0
+pool_recycle_s = 1800
 
 [exports]
 # Signed export-download URL lifetime (API-R34: short-lived, single-use, owner-bound;
@@ -108,6 +125,10 @@ batch_size = 500
 # historical range oldest-first in bounded windows of this many days, committing + advancing
 # the resume cursor per window (SYN-R6). Loaded here (CFG-R1a), never a code literal.
 backfill_window_days = 90
+# PERF-R2: independent source syncs run concurrently bounded by this limit (per-provider
+# pacing is the adapter token-bucket, CLI-R10). The runner clamps to 1 on SQLite
+# (single-writer graceful degradation — PERF-R2 backend caveat).
+sync_concurrency = 4
 
 [adapters.intervals_icu]
 # Intervals.icu outbound-client resilience values (CLI-R6/R10/R11, CFG-R1a). The typed

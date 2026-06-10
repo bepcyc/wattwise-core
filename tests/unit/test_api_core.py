@@ -21,7 +21,9 @@ connection is opened — the routes under test never touch persistence).
 
 from __future__ import annotations
 
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any
 
 import jwt
@@ -30,6 +32,7 @@ from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from tests.integration._schema import provision_app_schema
 from wattwise_core.api.app import API_PREFIX, create_app
 from wattwise_core.api.auth import (
     TOKEN_ALGORITHM,
@@ -49,10 +52,16 @@ _SIGNING_KEY = "unit-test-signing-key-not-a-real-secret"
 
 
 def _settings() -> Settings:
-    """Build dev settings with an in-memory DSN + a deterministic signing key."""
+    """Build dev settings on a throwaway FILE DB + a deterministic signing key.
+
+    A file-backed SQLite (never ``:memory:``) so every pooled connection sees the SAME
+    database — the token-issuance route persists the revocable refresh credential
+    (SEC-R2.3) on a different connection than the one that created the schema.
+    """
+    db_path = Path(tempfile.mkdtemp(prefix="wattwise-test-")) / "api_core.db"
     return load_settings(
         app__environment="development",
-        database_dsn="sqlite+aiosqlite:///:memory:",
+        database_dsn=f"sqlite+aiosqlite:///{db_path}",
         token_signing_key=_SIGNING_KEY,
     )
 
@@ -85,6 +94,7 @@ _WritePrincipal = Annotated[Principal, Depends(require_scope(Scope.READ, Scope.W
 def _app_with_probe_routes() -> TestClient:
     """Build the app and attach read/write probe routes guarded by the scope gate."""
     app = create_app(_settings())
+    provision_app_schema(app)  # the token route persists the refresh credential (SEC-R2.3)
     router = APIRouter(prefix=API_PREFIX, tags=["test"])
 
     @router.get("/_probe/read", operation_id="probeRead")

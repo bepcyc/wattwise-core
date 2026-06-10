@@ -15,6 +15,7 @@ provenance.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 from collections import defaultdict
 from dataclasses import dataclass
@@ -386,7 +387,11 @@ class AnalyticsService:  # noqa: size-limits
         series = [loads[d] for d in ordered]
         # Thread per-day load coverage: a day fed by a substituted member carries
         # SUBSTITUTED + reduced confidence (DEGR-R2), never presented as raw power-TSS.
-        full = _pmc.pmc(series, seed=seed, day_load_coverage=[day_cov[d] for d in ordered])
+        # PERF-R3: the PMC series computation is CPU-bound numpy work; run it on a
+        # worker thread so a long-history request never blocks the event loop.
+        full = await asyncio.to_thread(
+            _pmc.pmc, series, seed=seed, day_load_coverage=[day_cov[d] for d in ordered]
+        )
         start_index = (from_date - origin).days
         return full[start_index:]
 
@@ -410,7 +415,11 @@ class AnalyticsService:  # noqa: size-limits
             if power is None:
                 continue
             aid, day = str(act.activity_id), act.start_time.date()
-            _fold_curve_point(best, power, activity_id=aid, local_date=day, sport=sport)
+            # PERF-R3: the per-activity mean-maximal window scan is CPU-bound; offload it
+            # so a season-long curve build never blocks the event loop.
+            await asyncio.to_thread(
+                _fold_curve_point, best, power, activity_id=aid, local_date=day, sport=sport
+            )
         return best
 
     async def critical_power(
@@ -419,7 +428,8 @@ class AnalyticsService:  # noqa: size-limits
         """Fit CP/W' from the sport-partitioned aggregate power curve (CP-R1, ANL-R13)."""
         curve = await self.power_curve(athlete_id, from_date, to_date, sport=sport)
         points = {d: res.value.mean_power_w for d, res in curve.items() if is_computed(res)}
-        return _mmp.cp_wprime(points, sport=sport)
+        # PERF-R3: the CP/W' curve fit is CPU-bound; offload it off the event loop.
+        return await asyncio.to_thread(_mmp.cp_wprime, points, sport=sport)
 
     async def endurance_score(self, athlete_id: str, as_of: _dt.date) -> MetricResult[float]:
         # Composed of upstream capability results only (CTL / durability / decoupling):

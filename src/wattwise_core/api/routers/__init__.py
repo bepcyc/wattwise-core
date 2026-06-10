@@ -20,6 +20,7 @@ from wattwise_core.api.routers import (
     connections_management,
     dashboard,
     data_health,
+    export,
     exports,
     goals,
     help,
@@ -37,6 +38,7 @@ from wattwise_core.api.routers import (
 #: prefix, so the factory includes them verbatim (no extra prefix).
 ROUTERS: list[APIRouter] = [
     auth_flows.router,
+    export.router,
     performance.router,
     performance_history.router,
     activities.router,

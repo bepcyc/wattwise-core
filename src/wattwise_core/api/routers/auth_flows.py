@@ -52,6 +52,7 @@ from wattwise_core.api.deps import AppSettings, PublicRateLimit, get_agent_state
 from wattwise_core.api.errors import ProblemError
 from wattwise_core.config import Settings
 from wattwise_core.identity import OWNER_SUBJECT
+from wattwise_core.observability.audit import audit_event
 
 #: The WWW-Authenticate challenge returned with an invalid sign-in (AUTH-R1/API-R23).
 _BEARER_CHALLENGE: Final = {"WWW-Authenticate": "Bearer"}
@@ -176,6 +177,8 @@ async def issue_token(
         scopes=tuple(s.value for s in OWNER_SCOPES),
         ttl_seconds=settings.auth__refresh_ttl_seconds,
     )
+    # LOG-R6.2: authentication events ride the tamper-evident audit stream.
+    audit_event("auth_token_issued", athlete_id=OWNER_SUBJECT)
     payload = tokens.to_dict()
     payload["refresh_token"] = refresh
     return payload
@@ -196,6 +199,9 @@ async def refresh_token(
         session, presented=body.refresh_token, ttl_seconds=settings.auth__refresh_ttl_seconds
     )
     if outcome.status != "ok" or outcome.subject is None or outcome.new_secret is None:
+        # LOG-R6.2: a replayed (reuse-detected) refresh revokes its whole family —
+        # an auditable authentication event; a plain invalid token is audited too.
+        audit_event("auth_refresh_rejected", reason=outcome.status)
         raise ProblemError("unauthenticated", headers=_BEARER_CHALLENGE)
     scopes = tuple(Scope(value) for value in outcome.scopes)
     # Re-mint the family's client claim (AUTH-R8a): a delegated (bot-link) family
@@ -205,6 +211,7 @@ async def refresh_token(
     tokens = issue_access_token(
         settings, subject=outcome.subject, scopes=scopes, client=outcome.client
     )
+    audit_event("auth_token_refreshed", athlete_id=outcome.subject)
     payload = tokens.to_dict()
     payload["refresh_token"] = outcome.new_secret
     return payload
@@ -221,6 +228,7 @@ async def revoke_token(body: RefreshRequest, session: StateSession) -> None:
     if row is None:
         raise ProblemError("unauthenticated", headers=_BEARER_CHALLENGE)
     await revoke_family(session, family_id=row.family_id)
+    audit_event("auth_family_revoked", athlete_id=row.subject)  # LOG-R6.2
 
 
 @router.post("/link/start", response_model=LinkChallenge, operation_id="startAccountLink")

@@ -41,7 +41,12 @@ from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.api.auth import Principal, Scope, authenticate, require_scopes
 from wattwise_core.api.deps import AppSettings, get_db, get_master_data_db, get_rate_limiter
 from wattwise_core.api.errors import ProblemError, install_error_handlers
-from wattwise_core.api.middleware import EndpointMetricsMiddleware, JSONBodySizeLimitMiddleware
+from wattwise_core.api.lifecycle import build_lifespan
+from wattwise_core.api.middleware import (
+    EndpointMetricsMiddleware,
+    JSONBodySizeLimitMiddleware,
+    RequestContextMiddleware,
+)
 from wattwise_core.api.openapi import install_openapi
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers import activities as activities_router
@@ -98,6 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=_OPENAPI_PATH,
         docs_url=_DOCS_PATH,
         redoc_url=None,
+        lifespan=build_lifespan(),  # RUN-R11: drain-marked shutdown + clean pool close
     )
     app.state.settings = resolved
     app.state.database = Database(resolved)
@@ -131,6 +137,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     install_security_middleware(app, resolved)
     app.add_middleware(JSONBodySizeLimitMiddleware)
+    # LOG-R3: bind/clear the per-request correlation context (request_id) around every
+    # request so each log line emitted while serving it carries the correlation ids.
+    app.add_middleware(RequestContextMiddleware)
     # Added LAST so it is the OUTERMOST middleware: it times the WHOLE request (including a
     # body-size rejection or a security-middleware short-circuit) and reads the matched route the
     # router binds into the shared scope, recording the OBS-R5 per-endpoint request/latency/error

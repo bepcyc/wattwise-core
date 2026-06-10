@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine as _create_sync_engine
 from starlette.testclient import TestClient
 
+from tests.integration._schema import provision_app_schema
 from wattwise_core.agent.contracts import (
     AgentState,
     Claim,
@@ -523,6 +524,7 @@ def test_med2_request_resolved_entitlement_threads_into_engine(tmp_path: Path) -
     settings = _settings(tmp_path)
     _create_canonical_schema(tmp_path / "ent_bounds.db")
     app = create_app(settings)
+    provision_app_schema(app)  # the token route persists the refresh credential (SEC-R2.3)
     engine = _RecordingEngine()
     app.dependency_overrides[agent_routes.agent_engine] = lambda: engine  # only the engine is faked
     client = TestClient(app, raise_server_exceptions=False)

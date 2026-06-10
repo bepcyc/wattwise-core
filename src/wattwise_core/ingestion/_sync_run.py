@@ -101,6 +101,9 @@ class RunContext:
     sessions: SessionProvider
     credentials: CredentialStore | None
     now: Any
+    # PRIV-R2: the athlete's raw-GPS storage choice, threaded to the landing transaction
+    # so a sync-landed activity honours the opt-out exactly like a file upload.
+    store_raw_gps: bool = True
 
     def factory_for(self, athlete_id: str) -> SessionFactory:
         """A zero-arg session factory over the provider seam, subject-bound (SEAM-R11)."""
@@ -280,7 +283,7 @@ async def _ingest_batch(
     synced = synced_range(window, ctx.now())
     run_uuid: uuid.UUID = _uid(sync_run_id)
     async with ctx.sessions.session(subject=athlete_id) as session:
-        outcome = await IngestService(session).ingest(
+        outcome = await IngestService(session, store_raw_gps=ctx.store_raw_gps).ingest(
             athlete_id,
             target.source_descriptor_id,
             batch.candidates,

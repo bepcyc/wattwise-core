@@ -72,14 +72,25 @@ def create_engine_from_settings(
         dsn = settings.database_dsn.get_secret_value()
     dsn = normalize_dsn(dsn)
     is_sqlite = dsn.startswith("sqlite")
-    engine = create_async_engine(
-        dsn,
-        echo=False,
-        future=True,
-        # SQLite (esp. in-memory/file dev) wants a small, non-pooled footprint; the
-        # server backends use a real pool with pre-ping for liveness.
-        pool_pre_ping=not is_sqlite,
-    )
+    # PERF-R4: the server backends get a BOUNDED pool with explicit min/max sizes, a
+    # bounded acquisition timeout (exhaustion surfaces as a bounded-wait error, never an
+    # unbounded hang), and recycling — all CONFIG, not hardcoded (CFG-R1a). SQLite (esp.
+    # in-memory/file dev) keeps a small, non-pooled footprint where these do not apply.
+    pool_kwargs: dict[str, object] = {}
+    if not is_sqlite:
+        pool_kwargs = {"pool_pre_ping": True}
+        try:
+            pool_settings = settings or get_settings()
+        except Exception:  # a bare-DSN caller (tests/tools) keeps the driver pool defaults
+            pool_settings = None
+        if pool_settings is not None:
+            pool_kwargs.update(
+                pool_size=pool_settings.database__pool_size,
+                max_overflow=pool_settings.database__max_overflow,
+                pool_timeout=pool_settings.database__pool_timeout_s,
+                pool_recycle=pool_settings.database__pool_recycle_s,
+            )
+    engine = create_async_engine(dsn, echo=False, future=True, **pool_kwargs)
     if is_sqlite:
         enable_sqlite_foreign_keys(engine)
     return engine

@@ -39,8 +39,10 @@ from wattwise_core.entitlement import (
     plan_bounds_summary,
     validate_plan,
 )
+from wattwise_core.observability.audit import audit_event, record_erasure_hook
 from wattwise_core.observability.logging import get_logger
 from wattwise_core.persistence import Database
+from wattwise_core.persistence.migrations_state import migrations_applied
 from wattwise_core.privacy.erasure import erase_athlete
 from wattwise_core.seams import SYSTEM_SUBJECT, EngineSessionProvider
 from wattwise_core.storage import create_object_store
@@ -202,13 +204,25 @@ def mount_readiness(app: FastAPI) -> None:
     """
 
     async def _payload(request: Request, response: Response) -> dict[str, Any]:
-        """Run the readiness checks; set ``503`` until the resolver+plan AND DB are ready."""
+        """Run the readiness checks; set ``503`` until every dimension passes (OBS-R6.2).
+
+        Dimensions: database reachable, MIGRATIONS APPLIED (RUN-R6 — never serve an
+        unmigrated schema), configuration resolved + validated, entitlement resolver
+        ready with the validated default plan (ENT-R6), and not draining (RUN-R11:
+        a SIGTERM-marked instance reports 503 so the orchestrator drains it). The OSS
+        engine runs no separate workers/secret-store process, so those OBS-R6.2
+        dimensions are covered by the config check (secrets are env-resolved into the
+        validated settings at boot) and have no live probe to fail.
+        """
         resolver = getattr(request.app.state, "entitlement_resolver", None)
         plan = getattr(request.app.state, "entitlement_plan", None)
         checks: dict[str, bool] = {
             "entitlement_resolver": isinstance(resolver, OssEntitlementResolver),
             "default_plan_loaded": _plan_is_valid(plan),
             "database": await _database_reachable(request.app),
+            "migrations_applied": await _migrations_at_head(request.app),
+            "configuration": isinstance(getattr(request.app.state, "settings", None), Settings),
+            "not_draining": not getattr(request.app.state, "draining", False),
         }
         ready = all(checks.values())
         if not ready:
@@ -261,6 +275,23 @@ async def _database_reachable(app: FastAPI) -> bool:
             await session.execute(select(literal(1)))
         return True
     except Exception:  # an unreachable DB is not-ready, never a 500 (OBS-R6.2)
+        return False
+
+
+async def _migrations_at_head(app: FastAPI) -> bool:
+    """True iff the stamped migration revision matches the expected head (RUN-R6).
+
+    The readiness probe gates on the versioned-migration state so a reachable but
+    UNMIGRATED database reports not-ready and the instance never serves traffic against
+    an unmigrated schema. Any probe error reports ``False`` (not-ready, never a 500).
+    """
+    database = getattr(app.state, "database", None)
+    if not isinstance(database, Database):
+        return False
+    try:
+        async with EngineSessionProvider(database).session(subject=SYSTEM_SUBJECT) as session:
+            return await migrations_applied(session)
+    except Exception:  # an unprobeable schema state is not-ready (OBS-R6.2)
         return False
 
 
@@ -317,6 +348,16 @@ def build_deletion_requester(app: FastAPI) -> DeletionRequester:
             objects_deleted=receipt.total_objects_deleted,
             status="erased",
         )
+        # LOG-R6.2: the erasure completion is an audit-stream event (tamper-evident,
+        # longer retention); LOG-R8: the per-athlete log-PII erasure hook notifies the
+        # platform retention layer to purge the athlete's log-borne identifiers.
+        audit_event(
+            "erasure_completed",
+            athlete_id=athlete_id,
+            rows_deleted=receipt.total_rows_deleted,
+            objects_deleted=receipt.total_objects_deleted,
+        )
+        record_erasure_hook(athlete_id)
 
     return _erase
 
