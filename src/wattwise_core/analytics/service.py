@@ -19,7 +19,6 @@ import datetime as _dt
 from collections import defaultdict
 from dataclasses import dataclass
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import decoupling as _dec
@@ -31,20 +30,23 @@ from wattwise_core.analytics import np_if_tss as _np
 from wattwise_core.analytics import pmc as _pmc
 from wattwise_core.analytics import trimp as _trimp
 from wattwise_core.analytics import wbal as _wbal
+from wattwise_core.analytics._service_es import _gather_endurance_score
 from wattwise_core.analytics._service_loaders import (
     _activities_in_local_range,
     _activity_local_date,
-    _channel_to_stream,
     _f,
     _fold_curve_point,
+    _load_activity_channels,
     _load_athlete,
     _load_athlete_or_fail,
     _load_athlete_sex,
     _load_earliest_activity_date,
+    _load_effective_signature,
     _load_threshold_history,
     _load_wellness_hrv_baseline,
     _load_wellness_hrv_summary,
     _load_wellness_rr,
+    _signature_fit_acceptable,
     _uid,
 )
 from wattwise_core.analytics.result import (
@@ -56,14 +58,8 @@ from wattwise_core.analytics.result import (
 )
 from wattwise_core.analytics.series import Stream, resample_to_1hz
 from wattwise_core.domain.coverage import Coverage
-from wattwise_core.domain.enums import Fidelity, StreamChannelName, StreamSetKind
-from wattwise_core.persistence.models import (
-    Activity,
-    ActivityStreamSet,
-    Athlete,
-    FitnessSignature,
-    StreamChannel,
-)
+from wattwise_core.domain.enums import Fidelity, StreamChannelName
+from wattwise_core.persistence.models import Activity, Athlete, FitnessSignature
 
 ENGINE_VERSION = "analytics-1"
 
@@ -102,19 +98,7 @@ class AnalyticsService:  # noqa: size-limits
 
     async def _activity_channels(self, activity_id: str) -> dict[StreamChannelName, Stream]:
         """Load the activity's stream channels as analytic streams, keyed by channel."""
-        stmt = select(ActivityStreamSet).where(
-            ActivityStreamSet.activity_id == _uid(activity_id)
-        )
-        stream_set = (await self._session.execute(stmt)).scalar_one_or_none()
-        if stream_set is None:
-            return {}
-        cstmt = select(StreamChannel).where(
-            StreamChannel.stream_set_id == stream_set.stream_set_id,
-            StreamChannel.set_kind == StreamSetKind.ACTIVITY,
-        )
-        channels = (await self._session.execute(cstmt)).scalars().all()
-        rate = float(stream_set.sample_rate_hz) if stream_set.sample_rate_hz else 1.0
-        return {c.channel: _channel_to_stream(c, rate) for c in channels}
+        return await _load_activity_channels(self._session, activity_id)
 
     async def current_sport(self, athlete_id: str) -> str | None:
         """The athlete's current primary sport code from the canonical profile, else ``None``.
@@ -155,19 +139,18 @@ class AnalyticsService:  # noqa: size-limits
     async def resolve_signature(
         self, athlete_id: str, signature_type: str, as_of: _dt.date
     ) -> SignatureParams:
-        """Resolve the effective signature params as-of ``as_of`` (ANL-R9, GBO-R26/R27)."""
-        stmt = (
-            select(FitnessSignature)
-            .where(
-                FitnessSignature.athlete_id == _uid(athlete_id),
-                FitnessSignature.signature_type == signature_type,
-                FitnessSignature.effective_date <= as_of,
-            )
-            .order_by(FitnessSignature.effective_date.desc())
-            .limit(1)
-        )
-        sig = (await self._session.execute(stmt)).scalar_one_or_none()
-        if sig is None:
+        """Resolve the effective signature params as-of ``as_of`` (ANL-R9, GBO-R26/R27/R28).
+
+        Honors the effective-dated interval ``[effective_date, effective_to)``
+        (GBO-R27): a row whose interval was CLOSED at or before ``as_of`` never
+        resolves, so a superseded signature cannot shadow its successor. A MODELED
+        signature whose stored ``fit_quality`` R-squared is below the stated
+        configurable floor — or that carries none at all — is REFUSED (GBO-R28
+        fail-closed): the empty :class:`SignatureParams` surfaces downstream as a
+        typed gap, never thresholds derived from a bad fit.
+        """
+        sig = await _load_effective_signature(self._session, athlete_id, signature_type, as_of)
+        if sig is None or not _signature_fit_acceptable(sig):
             return SignatureParams()
         return SignatureParams(
             ftp_w=_f(sig.ftp_w),
@@ -428,6 +411,12 @@ class AnalyticsService:  # noqa: size-limits
         curve = await self.power_curve(athlete_id, from_date, to_date, sport=sport)
         points = {d: res.value.mean_power_w for d, res in curve.items() if is_computed(res)}
         return _mmp.cp_wprime(points, sport=sport)
+
+    async def endurance_score(self, athlete_id: str, as_of: _dt.date) -> MetricResult[float]:
+        # Composed of upstream capability results only (CTL / durability / decoupling):
+        # gather lives in ._service_loaders, numeric truth in .endurance_score (ES-R2).
+        """Composed ``[0,100]`` endurance score as-of a local date (ES-R1/R2/R3)."""
+        return await _gather_endurance_score(self, athlete_id, as_of)
 
     async def hrv(
         self, athlete_id: str, local_date: _dt.date

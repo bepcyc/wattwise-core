@@ -26,6 +26,7 @@ from wattwise_core.agent.contracts import AgentState, CoverageCaveat, RunStatus
 from wattwise_core.agent.deliverables import AgentAnswer, answer_from_state
 from wattwise_core.agent.graph import DEFAULT_NODE_VISIT_CEILING
 from wattwise_core.agent.graph_state import limitation_text, plan_requires_approval
+from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.projection import (
     conversation_id_of,
     idempotent_conversation_id,
@@ -123,7 +124,7 @@ async def resolve_existing_answer(
     return answer_from_state(cast(AgentState, tuple_.checkpoint.get("channel_values", {})))
 
 
-def wall_clock_degraded(state: AgentState) -> AgentState:
+def wall_clock_degraded(state: AgentState, locales: LocalePolicy | None = None) -> AgentState:
     """Graceful DEGRADED terminal state for a run past its wall-clock budget (AGT-ENT-R4).
 
     The fail-closed result of the per-run wall-clock deadline (the entitlement's non-monetary
@@ -136,7 +137,7 @@ def wall_clock_degraded(state: AgentState) -> AgentState:
     can resume the SAME conversation. The localized limitation copy is carried as the body for any
     surface that renders the text verbatim (it is the jargon-free "couldn't finish" floor).
     """
-    limitation = limitation_text(state)
+    limitation = limitation_text(state, locales)
     caveat = CoverageCaveat(fidelity="degraded").model_dump()
     return AgentState(
         athlete_id=state.get("athlete_id", ""),
@@ -183,8 +184,17 @@ class CompiledCoachGraph:
     (``plan_requires_approval``).
     """
 
-    def __init__(self, compiled: _CompiledGraph, *, wall_clock_seconds: float | None) -> None:
+    def __init__(
+        self,
+        compiled: _CompiledGraph,
+        *,
+        wall_clock_seconds: float | None,
+        locales: LocalePolicy | None = None,
+    ) -> None:
         self._compiled = compiled
+        # The loaded language packs (LANG-R1/-R4): the wall-clock degraded body resolves its
+        # localized limitation copy through them; ``None`` -> the in-code floor (a bare caller).
+        self._locales = locales
         # A non-positive / absent bound (an isolated caller with a bare all-permissive grant and no
         # config) means NO wall-clock deadline — ``asyncio.wait_for(timeout=None)`` preserves the
         # exact pre-deadline behavior. Production carries a positive config-loaded bound (CFG-R1a),
@@ -234,7 +244,7 @@ class CompiledCoachGraph:
                 # budget, so project a degraded terminal answer instead of bubbling the timeout. The
                 # durable checkpoint is untouched (the cancelled ainvoke wrote no terminal state); a
                 # follow-up may resume the same thread.
-                return wall_clock_degraded(state)
+                return wall_clock_degraded(state, self._locales)
             return cast(AgentState, result)
 
     async def resume(self, command: Command[Any], config: RunnableConfig) -> AgentState:

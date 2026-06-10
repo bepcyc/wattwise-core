@@ -151,16 +151,18 @@ class WorkoutStepOut(BaseModel):
     """One prescribed workout step: its target zones/durations (GBO-R29).
 
     Projected source-agnostically from the canonical typed step (the ``Workout.steps`` JSON array);
-    every field is optional because a step may prescribe by duration OR by target zone/power, and a
-    rest step carries neither. Unknown extra keys on a step are dropped so no source-shaped field
-    leaks (AUTH-R15).
+    every field is optional because a step may prescribe by duration OR by distance, and a rest
+    step carries neither target bound. ``target_type`` is the GBO-R29 enum token (including the
+    signature-relative ``power_pct_cp`` / ``hr_pct_threshold``). Unknown extra keys on a step are
+    dropped so no source-shaped field leaks (AUTH-R15).
     """
 
+    target_type: str | None = None
     intent: str | None = None
     duration_s: int | None = None
+    distance_m: float | None = None
     target_low: float | None = None
     target_high: float | None = None
-    target_unit: str | None = None
 
 
 class PrescribedWorkout(BaseModel):
@@ -209,11 +211,12 @@ def _step_out(step: object) -> WorkoutStepOut:
     """Project one canonical step JSON object into the typed wire step (GBO-R29)."""
     s = step if isinstance(step, dict) else {}
     return WorkoutStepOut(
+        target_type=_opt_str(s.get("target_type")),
         intent=_opt_str(s.get("intent")),
         duration_s=_opt_int(s.get("duration_s")),
+        distance_m=_opt_float(s.get("distance_m")),
         target_low=_opt_float(s.get("target_low")),
         target_high=_opt_float(s.get("target_high")),
-        target_unit=_opt_str(s.get("target_unit")),
     )
 
 

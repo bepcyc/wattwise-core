@@ -135,6 +135,7 @@ def build_inputs(
     follow_up: Mapping[str, Any] | None = None,
     active_goals: Sequence[Mapping[str, Any]] | None = None,
     recalled_memory: Sequence[Mapping[str, Any]] | None = None,
+    briefing_screen: str | None = None,
 ) -> AgentState:
     """Assemble the write-once immutable graph inputs for a run (STATE-R2/-R4, CKPT-R5).
 
@@ -167,6 +168,10 @@ def build_inputs(
     so the agent personalizes its answer (stated goals/constraints/preferences in the athlete's own
     words, MEM-R1/-R2). Like ``active_goals`` they are personalization context, never an analytic
     number (MEM-R1) — they steer the compose prompt context, not grounding. Carried when present.
+
+    ``briefing_screen`` is the ONE screen a ``scheduled_briefing`` run briefs (GRAPH-R2.1 /
+    STATE-R2(a): supplied by the scheduler, part of the immutable inputs) — the deliverable is
+    fully determined by ``(trigger, briefing_screen)``. Carried only on that trigger.
     """
     if thread_id is None:
         convo = conversation_id or new_conversation_id()
@@ -181,6 +186,8 @@ def build_inputs(
         "response_length": response_length,
         "turn_id": uuid.uuid4().hex,
     }
+    if briefing_screen is not None:
+        state["briefing_screen"] = briefing_screen
     if follow_up is not None:
         state["messages"] = [{"role": "user", "kind": "follow_up", **dict(follow_up)}]
     if active_goals:

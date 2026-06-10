@@ -37,6 +37,8 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from wattwise_core.agent.contracts import GroundingResult, RunStatus
+from wattwise_core.agent.observations import build_observations
+from wattwise_core.agent.projection import project_observations
 from wattwise_core.agent.voice import (
     Citation,
     Observation,
@@ -258,7 +260,9 @@ async def _narrate_readiness(
     # delivered narration is coherent with the canonical verdict (COACH-R3, mirrors GROUND-R3).
     lead_narration = None if override else narration
     draft = _state_first_draft(lead_narration, verdict, assessment.inputs_unavailable)
-    text, html, citations = await _ground_readiness(athlete_id, draft, grounder, response_length)
+    text, html, citations, observations = await _ground_readiness(
+        athlete_id, draft, grounder, response_length
+    )
     hrv_missing = "hrv" in assessment.inputs_unavailable
     return Readiness(
         verdict=verdict,
@@ -266,7 +270,7 @@ async def _narrate_readiness(
         as_of=as_of,
         summary_html=html,
         summary_text=text,
-        observations=(),
+        observations=observations,
         citations=citations,
         coverage=_coverage_map(assessment, override=override),
         suggested_followups=_readiness_followups(citations),
@@ -365,24 +369,27 @@ async def _ground_readiness(
     draft: str,
     grounder: ReadinessGrounder | None,
     response_length: ResponseLength,
-) -> tuple[str, str, tuple[Citation, ...]]:
-    """Ground the narration text and return ``(text, html, citations)`` (GROUND-R5/R7).
+) -> tuple[str, str, tuple[Citation, ...], tuple[Observation, ...]]:
+    """Ground the narration and return ``(text, html, citations, observations)`` (GROUND-R5/R7).
 
     Numbers in the draft are verified verbatim against canonical analytics and surface ONLY
     as grounded citations; an unverifiable number is scrubbed (GROUND-R3). With no grounder
     wired the draft is number-light by construction (the state lead), so it is held to the
     number cap directly. The HTML wraps the grounded text in a paragraph for the API to
-    sanitize.
+    sanitize. Each grounded, citable survivor ALSO projects to a STABLE-id observation
+    (COACH-R8: every deliverable's distinct observations carry a stable id) — the
+    drill/reveal-numbers handle behind which the demoted form/HRV numbers live (COACH-R7).
     """
     cap = number_cap(response_length)
     if grounder is None:
         text = _demote_numbers(draft, cap) if count_foregrounded_numbers(draft) > cap else draft
-        return text, f"<p>{text}</p>", ()
+        return text, f"<p>{text}</p>", (), ()
     result = await grounder.ground(athlete_id=athlete_id, draft=draft, retrieved={})
     text = result.scrubbed_text
     text, _ = _enforce_number_cap(text, text, cap)
     citations = _readiness_citations(result)
-    return text, f"<p>{text}</p>", citations
+    observations = project_observations(build_observations(result.survivors))
+    return text, f"<p>{text}</p>", citations, observations
 
 
 def _readiness_citations(result: GroundingResult) -> tuple[Citation, ...]:

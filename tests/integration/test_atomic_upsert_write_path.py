@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import Fidelity
-from wattwise_core.ingestion import ingest as ingest_mod
+from wattwise_core.ingestion import _ingest_steps as ingest_steps_mod
 from wattwise_core.ingestion.ingest import IngestService
 from wattwise_core.persistence.models import (
     Activity,
@@ -285,7 +285,7 @@ async def test_committed_batch_survives_a_later_batch_failure(
     second = _ride("ride-second", start=_START + _dt.timedelta(hours=6))
 
     # Fail the SECOND batch's candidate write — a non-savepointed error that aborts the run.
-    real_bulk = ingest_mod.persist_candidates_bulk
+    real_bulk = ingest_steps_mod.persist_candidates_bulk
     calls = {"n": 0}
 
     async def _bulk_fail_second(*args: object, **kwargs: object) -> object:
@@ -294,7 +294,7 @@ async def test_committed_batch_survives_a_later_batch_failure(
             raise RuntimeError("injected later-batch failure")
         return await real_bulk(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(ingest_mod, "persist_candidates_bulk", _bulk_fail_second)
+    monkeypatch.setattr(ingest_steps_mod, "persist_candidates_bulk", _bulk_fail_second)
 
     with pytest.raises(RuntimeError, match="injected later-batch failure"):
         async with pool() as session:

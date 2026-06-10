@@ -1,86 +1,155 @@
+<div align="center">
+
 # wattwise-core
 
-> Self-hostable endurance-training analytics engine with a trustworthy AI coaching agent.
+### Self-hosted endurance-training analytics — with an AI coach that refuses to make things up.
 
+Your power meter never lies. Your analytics platform shouldn't either.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/bepcyc/wattwise-core/ci.yml?branch=main&logo=github&label=CI)](https://github.com/bepcyc/wattwise-core/actions)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Code style: Ruff](https://img.shields.io/badge/code%20style-Ruff-261230?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff)
-[![Typed: mypy](https://img.shields.io/badge/typed-mypy-2A6DB2.svg)](https://mypy-lang.org/)
+[![Typed: mypy --strict](https://img.shields.io/badge/typed-mypy%20--strict-2A6DB2.svg)](https://mypy-lang.org/)
 
-Connect your training-data sources and wattwise-core unifies everything into **one canonical record of truth**, then computes **sports-science-correct analytics** — PMC, NP/IF/TSS, CP/W', W'bal, aerobic decoupling, HRV, TRIMP. On top of that sits a **LangGraph coaching agent** that answers questions and reviews your training load, **grounded fail-closed** against your real data: if it can't back a number with your canonical record, it won't say it. Self-hostable, single-athlete, Apache-2.0.
+**[Quickstart](#quickstart)** · **[Why](#why-wattwise)** · **[Features](#features)** · **[API](#api)** · **[FAQ](#faq)** · **[Roadmap](#roadmap)**
+
+</div>
+
+---
+
+An illustration of the design goal — the coach answers from *your* data or not at all:
+
+```text
+You   ▸ How fried am I? Can I race on Sunday?
+
+Coach ▸ Your CTL climbed 58 → 71 over the last six weeks; TSB is −4 today.
+        That ramp is aggressive, but you absorbed it — no monotony spikes,
+        HRV trend stable.
+
+        Whether you can *race* Sunday, I won't answer: there is no event,
+        taper, or race priority anywhere in your canonical record, and I
+        don't guess. Tell me about the race and I'll do the math.
+```
+
+That refusal is the point. The agent runs behind a **fail-closed grounding gate**: every
+number it wants to say is verified against your canonical training record by deterministic
+code, and anything unverifiable is scrubbed before you see it. Refusing beats inventing.
+
+## Why wattwise?
+
+- **Your data lives in someone else's silo.** Years of FIT files behind a login you don't
+  control, an API whose terms can change any season, a subscription that quietly creeps up.
+  wattwise-core unifies your sources into **one canonical record of truth** on **your**
+  server, under an Apache-2.0 license.
+- **Most "AI coaches" hallucinate.** A language model will happily invent a CTL value with
+  total confidence. Here the model never self-certifies: it proposes claims, and
+  deterministic code verifies each one against canonical data before it reaches you.
+  Unverifiable numbers are scrubbed — when in doubt, the agent abstains.
+- **Sports-science metrics done carefully.** PMC, NP/IF/TSS, CP/W′, W′bal, aerobic
+  decoupling, HRV, TRIMP — computed from the canonical record, with an offline evaluation
+  suite guarding the agent's grounding and abstention behavior.
 
 ## Features
 
-- **Source-agnostic canonical model** — every source flows through pluggable adapters into one unified record.
-- **Performance analytics** — PMC (Chronic Training Load), NP (Normalized Power), IF (Intensity Factor), TSS (Training Stress Score), CP (Critical Power), W' (W-prime), W'bal (W-prime balance), aerobic decoupling, and HRV (time- and frequency-domain metrics).
-- **TRIMP** — Training Impulse for load quantification.
-- **Trustworthy coaching agent** — LangGraph-based, with **fail-closed grounding** and no fabrication.
-- **Direct typed ingestion** — direct API clients for data sources; **MCP only for agent tool-use**.
-- **REST API** — OpenAPI specification plus a generated typed client.
+- **Source-agnostic canonical model** — every source flows through pluggable adapters into
+  one unified record; cross-source duplicates and field conflicts are resolved by an
+  explicit, configurable trust policy.
+- **Performance analytics** — PMC (CTL/ATL/TSB), Normalized Power, Intensity Factor, TSS,
+  Critical Power and W′, W′bal, aerobic decoupling, HRV (time- and frequency-domain), TRIMP.
+- **Trustworthy coaching agent** — LangGraph-based, with **fail-closed grounding**: claims
+  are verified against canonical data in deterministic code; no fabrication, explicit
+  abstention.
+- **Multi-format upload** — FIT, FIT.GZ, GPX, TCX, PWX (including Strava bulk exports).
+- **intervals.icu connector** — direct sync over HTTP Basic auth (API key).
+- **REST API** — a single versioned `/v1` surface, OpenAPI 3.1, SSE streaming for agent
+  answers.
 - **Bearer auth** — token authentication with scope-based authorization.
-- **Database portability** — **SQLite** (default), **PostgreSQL**, or **MariaDB** by DSN only.
-- **Multi-format upload** — FIT, FIT.GZ, GPX, TCX (including Strava exports).
-- **Intervals.icu connector** — direct, over HTTP Basic auth.
-- **Hardened by design** — prompt-injection isolation and an offline agent eval suite.
+- **Database portability** — **SQLite** (default), **PostgreSQL**, or **MariaDB**, switched
+  by DSN only; no code changes, no vendor-specific SQL outside one audited seam.
+- **Hardened by design** — prompt-injection isolation, server-derived identity end to end,
+  fail-closed boot, and an offline agent eval suite.
+- **Self-hosted, single-athlete** — one instance per human; a radically simpler trust and
+  data model.
 
 ## Quickstart
 
 ```sh
-git clone https://github.com/wattwise/wattwise-core.git
+git clone https://github.com/bepcyc/wattwise-core.git
 cd wattwise-core
-just bootstrap
-just lint type test
-just test-db-portable
+just bootstrap          # uv sync + database migration
+just lint type test     # fast dev loop (full CI-parity gate: just gate)
 ```
+
+Then point your LLM provider (any OpenAI-compatible endpoint) via configuration and start
+the API. See [Configuration](#configuration).
 
 ## Configuration
 
-Configuration is **layered**: packaged defaults (`defaults.toml`) → optional operator file (`WATTWISE_CONFIG_FILE`) → environment variables (`WATTWISE_*`). Nest per-section values with the `__` delimiter (e.g. `WATTWISE_API__PORT`).
+Configuration is **layered**: packaged defaults (`defaults.toml`) → optional operator file
+(`WATTWISE_CONFIG_FILE`) → environment variables (`WATTWISE_*`). Nest per-section values
+with the `__` delimiter (e.g. `WATTWISE_API__PORT`).
 
 **Secrets come from the environment only** — there is no `.env` reading at runtime:
 
 - `WATTWISE_DATABASE_DSN`
 - `WATTWISE_ENCRYPTION_ROOT_KEY`
 - `WATTWISE_TOKEN_SIGNING_KEY`
-- `WATTWISE_LLM_API_KEY`
+- `WATTWISE_LLM_API_KEY` *(optional at boot — needed for the coaching agent)*
 
 Boot is **fail-closed**: a missing required secret aborts startup in staging and production.
 
 Tunable without code changes:
 
 - Analytics time constants (`CTL=42d`, `ATL=7d` defaults).
-- LLM provider (`base_url`, `model`, `temperature`, `max_output_tokens`, `grounding_min_coverage`).
-- Rate limiting (default **60 req/min**) and upload ceiling (default **32 MiB**).
-- Object store (local filesystem or S3-compatible) and retention window (days or indefinite).
+- LLM provider (`base_url`, `model`, `temperature`, `max_output_tokens`,
+  `grounding_min_coverage`) — any OpenAI-compatible endpoint, including local ones.
+- Rate limiting (defaults: **120 read · 30 mutating · 20 agent req/min**) and upload
+  ceiling (default **32 MiB**).
+- Object store (local filesystem or S3-compatible) and retention window (days or
+  indefinite).
 
 ## Import sources
 
 | Source | Format / Auth | Notes |
 | --- | --- | --- |
-| File upload | FIT | Garmin native format |
-| File upload | FIT.GZ | Compressed FIT |
+| File upload | FIT / FIT.GZ | Garmin native format (also gzip-compressed) |
 | File upload | GPX | GPS exchange format |
 | File upload | TCX | Training Center XML |
+| File upload | PWX | TrainingPeaks / PeaksWare XML |
 | Strava export | FIT / GPX / TCX | Uploaded as exported files |
-| Intervals.icu | HTTP Basic (API key) | Direct connector |
+| intervals.icu | HTTP Basic (API key) | Direct connector with on-demand sync |
 
 ## API
 
 A single, versioned **`/v1`** surface — no scattered prefixes.
 
 - **OpenAPI 3.1** at `GET /v1/openapi.json`; human-readable docs at `GET /v1/docs`.
-- **Bearer auth** via `POST /v1/auth/token`, with scope-based access control: `read`, `write`, `agent`, `sync`, `export`, `admin`.
-- **Analytics** — endpoints for PMC, Critical Power, W'balance, aerobic decoupling, HRV, and TRIMP.
+- **Bearer auth** via `POST /v1/auth/token`, with scope-based access control: `read`,
+  `write`, `agent`, `sync`, `export`, `admin`.
+- **Analytics** — endpoints for PMC, Critical Power, W′bal, aerobic decoupling, HRV, TRIMP.
 - **Agent** — `POST /v1/agent/ask` with SSE streaming (`text/event-stream`).
 - **Activities** — history and per-activity detail.
 - **Imports** — file uploads via `POST /v1/imports`.
-- **Connections** — credential management.
+- **Connections** — credential management for external sources.
 - **Sync** — on-demand data synchronization.
-- **Ops** — `GET /v1/system/status` for system status; `GET /healthz` liveness probe (process health only, no external dependencies).
+- **Ops** — `GET /v1/system/status` for system status; `GET /healthz` liveness probe
+  (process health only, no external dependencies).
+
+## Architecture
+
+![wattwise-core high-level architecture](./assets/img/wattwise-high-level-architecture.png)
+
+Every data source flows through a pluggable adapter into one canonical record; analytics
+are computed from that record; the coaching agent answers on top of it through the
+fail-closed grounding gate. Storage is a single DSN — SQLite, PostgreSQL, or MariaDB.
 
 ## Tech stack
 
-`Python 3.13` · `FastAPI` · `Uvicorn` · `SQLAlchemy 2.0+ (async)` · `Alembic` · `Pydantic + Pydantic Settings` · `LangGraph` · `OpenAI-compatible provider interface` · `NumPy + SciPy` · `Garmin FIT SDK + fitdecode + gpxpy + lxml` · `httpx` · `structlog` · `Docker (multi-stage hardened image)` · `uv`
+`Python 3.13` · `FastAPI` · `Uvicorn` · `SQLAlchemy 2.0+ (async)` · `Alembic` ·
+`Pydantic + Pydantic Settings` · `LangGraph` · `OpenAI-compatible provider interface` ·
+`NumPy + SciPy` · `Garmin FIT SDK + fitdecode + gpxpy + lxml` · `httpx` · `structlog` ·
+`Docker (multi-stage hardened image)` · `uv`
 
 ## Data safety
 
@@ -89,15 +158,58 @@ wattwise-core is deliberately careful with your database:
 - Creates and targets **only its own isolated schema**.
 - **Never** connects to, reads, or modifies any pre-existing database.
 - **Never** destroys or manages data volumes outside its schema.
-- **Single-athlete scope** — one canonical store per deployment instance (no multi-tenant isolation; single-owner model).
-- Encryption root key and signing keys live **in the environment only** — never in code or images.
+- **Single-athlete scope** — one canonical store per deployment instance.
+- Encryption root key and signing keys live **in the environment only** — never in code or
+  images.
 - **No PII on disk** except in the configured object store (original file retention).
-- **Structured logging to stdout/stderr only** — never to log files — with central log redaction enforced.
+- **Structured logging to stdout/stderr only** — never to log files — with central log
+  redaction enforced.
+
+## FAQ
+
+**Can I keep my data 100% local — including the LLM?**
+Yes. The agent talks to any OpenAI-compatible endpoint: point `base_url` at Ollama, vLLM,
+llama.cpp-server, whatever you run. Your watts never have to leave your LAN.
+
+**Why single-athlete? I want to host my whole club.**
+Scope is a feature. Single-athlete means a radically simpler trust and data model — no
+tenant-isolation bugs, no "oops, you saw my FTP". Instances are cheap; run one per human.
+
+**Garmin Connect / Wahoo direct sync?**
+Not yet — file uploads and intervals.icu cover most flows today, and direct connectors are
+on the [roadmap](#roadmap). Adapters are pluggable; PRs welcome.
+
+**Is this medical or coaching advice?**
+No. wattwise computes and explains *your* numbers. Decisions about training, health, and
+racing belong to you (and your human coach).
+
+## Roadmap
+
+- [x] Canonical model + FIT / FIT.GZ / GPX / TCX / PWX ingestion
+- [x] PMC, NP/IF/TSS, CP/W′, W′bal, aerobic decoupling, HRV, TRIMP
+- [x] Fail-closed grounded coaching agent (LangGraph, SSE streaming)
+- [x] intervals.icu direct connector
+- [x] Database portability: SQLite / PostgreSQL / MariaDB
+- [ ] More direct connectors (Garmin Connect, Wahoo)
+- [ ] Deeper running & swimming metrics
+- [ ] Structured plan review & taper analysis in the agent
+- [ ] First-party web UI
+
+Vote with 👍 on issues — popularity genuinely moves things up the list.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) to get started.
+The dev loop is `just bootstrap` → `just lint type test` (`just gate` for the full
+pre-merge gate CI runs). Sports scientists, Python engineers, and people who are personally offended by
+wrong TSS implementations are all equally welcome. Found a bug in the math? That's a
+**high-priority issue** — open it. Start at [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
-[Apache-2.0](./LICENSE).
+[Apache-2.0](./LICENSE) — self-host it, fork it, build on it. Just keep the notices.
+
+---
+
+<div align="center">
+<sub>Built by athletes who read the papers. <b>Your watts. Your server. Your truth.</b></sub>
+</div>

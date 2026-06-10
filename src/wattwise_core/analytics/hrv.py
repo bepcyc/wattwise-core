@@ -64,6 +64,11 @@ from wattwise_core.analytics.result import (
     UnavailableReason,
 )
 
+# ANL-R11: sport-agnostic — HRV is computed from canonical RR/NN (or summary) data for
+# a recording, independent of any particular sport; ``None`` is the declared
+# sport-agnostic marker (never NOT_APPLICABLE_FOR_SPORT; only HRV-R0 fidelity paths).
+APPLICABLE_SPORTS: None = None
+
 # DSP capability is detected ONCE at import (ANL-R34 / DEP-R3): if scipy.signal is
 # importable the engine has the freq-domain capability; otherwise freq-domain
 # metrics fail closed with MISSING_DEPENDENCY (HRV-R5), never zero-filled bands.
@@ -296,6 +301,7 @@ from wattwise_core.analytics.hrv_freq import (  # noqa: E402
 )
 
 __all__ = [
+    "APPLICABLE_SPORTS",
     "FreqDomainHrv",
     "HrvFidelity",
     "SpectralMethod",

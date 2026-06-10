@@ -104,6 +104,10 @@ local_root = "/var/lib/wattwise/objects"
 # watermark/gap model (ING-UPS-R2). Strictly positive; loaded here (CFG-R1a), never a code
 # literal — operator-tunable.
 batch_size = 500
+# Backfill chunk size in days (SYN-R5): the on-demand backfill iterates the requested
+# historical range oldest-first in bounded windows of this many days, committing + advancing
+# the resume cursor per window (SYN-R6). Loaded here (CFG-R1a), never a code literal.
+backfill_window_days = 90
 
 [adapters.intervals_icu]
 # Intervals.icu outbound-client resilience values (CLI-R6/R10/R11, CFG-R1a). The typed
@@ -124,6 +128,8 @@ bucket_reduce_factor = 0.5
 bucket_min_rate = 0.5
 # --- request timeout (CLI-R4: connect + total read ceiling, seconds) ---
 http_timeout_s = 30.0
+# --- discover pagination (ADP-R7: page size for the discover phase's cursor pages) ---
+discover_page_size = 200
 
 [analytics]
 # PMC time constants (doc 40 PMC-R*): CTL=42d, ATL=7d exponential decay.
@@ -133,6 +139,41 @@ atl_time_constant_days = 7
 # from a LOWER-fidelity equivalence-class member (substituted), so the day is never presented
 # at full fidelity. A factor in (0,1]; lives here (CFG-R1a), never baked into code.
 training_load_confidence_penalty = 0.7
+# GBO-R28: a stored MODELED fitness signature whose fit quality (R^2) is below this
+# threshold is REFUSED by signature resolution (fail-closed: a typed gap surfaces
+# instead of thresholds derived from a bad fit). A modeled signature carrying NO
+# fit_quality is refused outright.
+signature_min_fit_r2 = 0.85
+# --- endurance-score (ES-R1): declared, documented weighting + normalization ---
+# The score is 100 x the weight-renormalized mean of three [0,1] component scores
+# (the engine embeds NO hidden constants — every knob lives here, CFG-R1a):
+#   f_ctl        = clamp(CTL / ctl_full_scale, 0, 1)                        (higher CTL -> higher)
+#   f_durability = clamp((ratio - floor) / (ceiling - floor), 0, 1)         (higher ratio -> higher)
+#   f_decoupling = clamp(1 - drift_pct / decoupling_full_penalty_pct, 0, 1) (higher drift -> lower)
+# Weights are relative (renormalized over the present components); each >= 0, sum > 0.
+endurance_score_weight_ctl = 0.4
+endurance_score_weight_durability = 0.3
+endurance_score_weight_decoupling = 0.3
+# CTL at (or above) which the chronic-load component saturates at 1.0.
+endurance_score_ctl_full_scale = 100.0
+# Durability ratio MMP(long_s)/MMP(short_s) normalization band: floor -> 0, ceiling -> 1.
+endurance_score_durability_floor = 0.5
+endurance_score_durability_ceiling = 1.0
+# Aerobic-decoupling drift (%) at (or above) which the decoupling component bottoms at 0.
+endurance_score_decoupling_full_penalty_pct = 10.0
+# ES-R2 scoring policy: when true, a subset containing CTL (the non-substitutable
+# component) is a DECLARED-valid composition basis — the score composes on the available
+# components with reduced confidence recorded in QualityReport. When false, any missing
+# component fails closed to Unavailable(MISSING_REQUIRED_INPUT). Never a silent 0.
+endurance_score_allow_partial = true
+# Confidence multiplier applied when composing on a declared-valid partial subset (ES-R2b).
+endurance_score_partial_confidence_penalty = 0.7
+# Service gather window (days back from as_of) for the power-curve durability ratio and
+# the most-recent aerobic-decoupling sample.
+endurance_score_window_days = 90
+# Power-curve durations for the durability ratio MMP(long)/MMP(short) (ES-R1: 20 vs 5 min).
+endurance_score_long_duration_s = 1200
+endurance_score_short_duration_s = 300
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.
@@ -149,6 +190,12 @@ temperature = 0.0
 # budget and emitted BEFORE the answer, so a small allowance yields an empty answer
 # (MODEL-R5a). Must comfortably hold reasoning trace + visible answer.
 max_output_tokens = 8192
+# The target model's context window (tokens), for the MODEL-R3 input budget: the engine
+# assembles the compose context within ``context_window_tokens`` minus the reserved OUTPUT
+# headroom (the resolved output-token budget above), trimming lowest-relevance records first.
+# Loaded content (CFG-R1a) — set per the deployed model; the 2026 default model carries a
+# large window, sized here conservatively so a swapped smaller model is not silently overrun.
+context_window_tokens = 131072
 # Fail-closed grounding (GROUND-R*): the agent abstains unless every claim is
 # grounded in retrieved canonical data at/above this coverage.
 grounding_min_coverage = 1.0
@@ -230,6 +277,33 @@ plain language, and briefly note that a single six-week total isn't something tr
 system verifies every number against the canonical data and quietly removes anything it cannot \
 confirm, so describing the athlete's real state in plain coach language is exactly what reaches \
 them — a metrics dump is not."""
+
+# The per-language surface packs (LANG-R1/-R3/-R4): the SUPPORTED language set IS the keys of
+# this table (EN/DE/RU out of the box), and ADDING a language is editing THIS config — never an
+# engine code change (LANG-R1). Each pack carries the localized prompt VARIANT layered into the
+# compose system prompt at composition time (``compose_directive``, written IN the target
+# language so the coach answers in it end-to-end; LANG-R3 — surface only, grounding/verdicts
+# unchanged) and the localized fail-closed abstain copy (``limitation``, GROUND-R6). A requested
+# language with no pack here falls back to the bundle manifest's ``default_language`` and the
+# fallback is recorded for observability (LANG-R4); languages are never mixed in one deliverable.
+[agent.coach.languages.en]
+compose_directive = """Reply entirely in English — every sentence of your answer, including \
+caveats and any note about missing data."""
+limitation = """I don't have enough confirmed data to answer that reliably yet. Sync your \
+sources and I'll take another look."""
+
+[agent.coach.languages.de]
+compose_directive = """Antworte vollständig auf Deutsch — jeder Satz deiner Antwort, auch \
+Einschränkungen und Hinweise auf fehlende Daten. Sprich die Athletin oder den Athleten \
+persönlich mit "du" an und bleib warm und konkret."""
+limitation = """Mir fehlen noch genug gesicherte Daten, um das verlaesslich zu beantworten. \
+Synchronisiere deine Quellen und ich schaue noch einmal."""
+
+[agent.coach.languages.ru]
+compose_directive = """Отвечай полностью по-русски — каждое предложение ответа, включая \
+оговорки и замечания о недостающих данных. Обращайся к спортсмену на "ты", тепло и конкретно."""
+limitation = """Пока недостаточно подтверждённых данных, чтобы ответить надёжно. \
+Синхронизируй источники, и я посмотрю снова."""
 
 [agent.coach.prompts]
 # The externalized system/agent prompt FRAGMENTS (SKILL-R1/-R3, CFG-R3): EVERY system prompt the
@@ -373,3 +447,31 @@ raw_file_days = 0
 # writes/interrupts older than this are expired by the retention sweeper. 0 = retain
 # indefinitely (no sweep), mirroring raw_file_days.
 agent_state_days = 0
+
+# ----------------------------------------------------------------------------
+# Metric-equivalence classes (doc 20 §7.5 DM-SUB-R1): the declared, ORDERED sets
+# of provider-metrics that may satisfy each canonical channel/metric. They are
+# EXTERNALIZED configuration, not inline engine constants; every member carries
+# a fidelity tier from the single ranked GAP-R2 enum, a documented semantic-
+# equivalence note, and the fidelity penalty applied when it substitutes for the
+# top member. Channels with no declared class resolve as their own degenerate
+# single-member class (no substitution badge is ever fabricated for them).
+# The shipped declaration is the DM-SUB-R1 worked example (training_load), the
+# class the analytics LOAD-R3 fallback + DEGR-R2 substitution consume.
+[[canonical.equivalence_class]]
+channel = "training_load"
+[[canonical.equivalence_class.members]]
+metric = "power_tss"
+tier = "raw_stream"
+note = "power-based TSS from power_w + CP/FTP: direct mechanical work vs threshold"
+penalty = "none"
+[[canonical.equivalence_class.members]]
+metric = "platform_load"
+tier = "platform_computed"
+note = "vendor's own load score (e.g. XSS); calibrated differently from TSS"
+penalty = "moderate"
+[[canonical.equivalence_class.members]]
+metric = "hr_trimp"
+tier = "modeled"
+note = "HR-derived proxy estimate of load (Banister TRIMP); weather/drift sensitive"
+penalty = "high"

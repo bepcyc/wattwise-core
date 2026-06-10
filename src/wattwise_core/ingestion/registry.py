@@ -29,6 +29,7 @@ from importlib.metadata import EntryPoint, entry_points
 from typing import Final
 
 from wattwise_core.ingestion.base import SourceAdapter
+from wattwise_core.ingestion.capability import CapabilityError, validate_capability
 
 #: The entry-point group every pluggable source registers under (ROAD-R6).
 ADAPTER_ENTRY_POINT_GROUP: Final = "wattwise_core.adapters"
@@ -100,6 +101,22 @@ def _instantiate(entry_point: EntryPoint) -> SourceAdapter:
         raise AdapterRegistryError(
             f"adapter entry point {entry_point.name!r} does not satisfy SourceAdapter"
         )
+    _validated(adapter)
+    return adapter
+
+
+def _validated(adapter: SourceAdapter) -> SourceAdapter:
+    """Validate the adapter's capability descriptor at registration (ADP-R2 / ONB-R2).
+
+    Registration REJECTS (fail-closed) an adapter whose descriptor is absent/invalid,
+    declares unsupported GBO types, or omits a phase its declared sync modes require —
+    the descriptor is load-bearing for engine planning (ADP-R2) and for the ADP-R3
+    declared-type upsert refusal, so an unvalidated one must never enter the registry.
+    """
+    try:
+        validate_capability(adapter)
+    except CapabilityError as exc:
+        raise AdapterRegistryError(str(exc)) from exc
     return adapter
 
 
@@ -139,6 +156,7 @@ def registry_from_adapters(adapters: Iterable[object]) -> AdapterRegistry:
     for adapter in adapters:
         if not isinstance(adapter, SourceAdapter):
             raise AdapterRegistryError("object does not satisfy SourceAdapter")
+        _validated(adapter)
         key = adapter.source_key
         if key in by_key:
             raise AdapterRegistryError(f"duplicate adapter source_key {key!r}")

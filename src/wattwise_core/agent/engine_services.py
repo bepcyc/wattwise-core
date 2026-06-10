@@ -45,6 +45,7 @@ from wattwise_core.agent.grounding_evidence import (
     _resolve_snapshots,
     _SnapshotEvidence,
 )
+from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.seams import AgentServices
 from wattwise_core.agent.skills import CoachManifest, load_manifest
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
@@ -283,18 +284,9 @@ class CoachBundle:
     """
 
     __slots__ = (
-        "allowed_hosts",
-        "claim_system",
-        "equivalence",
-        "lookback_days",
-        "manifest",
-        "plan_system",
-        "presentation",
-        "readiness_system",
-        "reflect_system",
-        "shared_preamble",
-        "system_prompt",
-        "tolerance",
+        "allowed_hosts", "claim_system", "equivalence", "locales", "lookback_days",
+        "manifest", "plan_system", "presentation", "readiness_system", "reflect_system",
+        "shared_preamble", "system_prompt", "tolerance",
     )
 
     def __init__(
@@ -312,6 +304,7 @@ class CoachBundle:
         readiness_system: str = "",
         shared_preamble: str = "",
         manifest: CoachManifest | None = None,
+        locales: LocalePolicy | None = None,
     ) -> None:
         self.system_prompt = system_prompt
         self.equivalence = equivalence if equivalence is not None else MetricEquivalence({})
@@ -341,6 +334,11 @@ class CoachBundle:
         self.shared_preamble = shared_preamble
         # The loaded, validated skill manifest (SKILL-R2/-R4); empty default => no skills.
         self.manifest = manifest
+        # The loaded per-language surface packs + config-driven default-language fallback
+        # (LANG-R1/-R4): the compose-time localized prompt variant and the localized abstain
+        # copy resolve through this. The empty default (no packs) preserves the prior
+        # English-prompt behaviour for any seam that injects no coach-config.
+        self.locales = locales if locales is not None else LocalePolicy()
 
     @property
     def compose_system(self) -> str:
@@ -396,6 +394,12 @@ class CoachBundle:
             readiness_system=settings.agent__coach__prompts["readiness_system"],
             shared_preamble=settings.agent__coach__prompts["shared_preamble"],
             manifest=manifest,
+            # The per-language packs + the bundle manifest's default_language (LANG-R1/-R4):
+            # the supported set and its fallback are CONFIG, never engine code.
+            locales=LocalePolicy.from_config(
+                settings.agent__coach__languages,
+                settings.agent__coach__manifest["default_language"],
+            ),
         )
 
     def services(

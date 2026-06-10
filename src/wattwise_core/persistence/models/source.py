@@ -75,6 +75,10 @@ class SourceDescriptor(Base, TimestampMixin):
     # default_fidelity (LIN-R1). Stored as portable JSON config.
     trust_profile: Mapped[dict[str, object]] = json_column(nullable=False, default=dict)
     default_fidelity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # EVOL-R2: disabling a source is a CONFIGURATION action — flip this flag (via
+    # ``wattwise_core.ingestion.reresolve.deactivate_source``). Inactive descriptors'
+    # candidates stop contributing; retained rows make the action reversible (DM-SUB-R5).
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     @validates("default_fidelity")
     def _validate_default_fidelity(self, _key: str, value: object) -> str | None:
@@ -180,6 +184,13 @@ class SourceCandidate(Base, TimestampMixin):
         ),
         Index("ix_source_candidate_resolved_signature_id", "resolved_signature_id"),
         Index("ix_source_candidate_content_hash", "content_hash"),
+        # Cross-window strong-fingerprint identity lookup (MAP-R10): the typed shared
+        # device/file fingerprint matches REGARDLESS of the start-time window.
+        Index(
+            "ix_source_candidate_strong_fingerprint",
+            "athlete_id",
+            "strong_fingerprint",
+        ),
     )
 
     source_candidate_id: Mapped[uuid.UUID] = pk_column()
@@ -207,6 +218,21 @@ class SourceCandidate(Base, TimestampMixin):
     ingest_run_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     untrusted_content: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_superseded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # UPS-R5: a source-side DELETION is modeled as a typed tombstone candidate — it
+    # removes that source's contribution on re-resolution; the canonical record persists
+    # while other sources still contribute (never a cascade delete).
+    is_tombstone: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # MAP-R10: the TYPED strong fingerprint (FIT file_id / shared device-file UUID) —
+    # distinct from the per-source ``source_native_id`` dedup key. NULL when the source
+    # exposes no immutable shared fingerprint.
+    strong_fingerprint: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # MAP-R6: non-NULL = the candidate FAILED canonical schema/invariant validation and
+    # is QUARANTINED with the failing rule id — retained with its lineage, excluded from
+    # every resolution set, never partially written into the canonical store.
+    quarantine_rule_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # MAP-R12: the recorded identity-resolution decision (rule that fired, match score,
+    # matched candidate/activity ids) so a merge can be explained and split later.
+    identity_resolution: Mapped[dict[str, object] | None] = json_column(nullable=True)
     # nullable canonical back-pointers (no hard FK: the candidate may be unresolved
     # or quarantined, and which canonical type it resolves to depends on gbo_type).
     resolved_activity_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)

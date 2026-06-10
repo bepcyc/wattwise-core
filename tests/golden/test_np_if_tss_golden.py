@@ -190,3 +190,74 @@ def test_lm_golden_internal_consistency() -> None:
     expected_tss = duration * np_w * np_w / (ftp * ftp * 3600.0) * 100.0
     assert bundle.if_.value == pytest.approx(expected_if, abs=1e-9)
     assert bundle.tss.value == pytest.approx(expected_tss, abs=1e-9)
+
+
+def _gapped_power_values(power_w: float, seconds: int, gap: range) -> list[float | None]:
+    """Constant-power sample list with a genuine recording gap (``None``) over ``gap``."""
+    return [None if i in gap else power_w for i in range(seconds)]
+
+
+@pytest.mark.golden
+def test_tss_t3_genuine_non_moving_seconds_reduce_duration_and_tss() -> None:
+    """TSS-T3: an hour of wall-clock time with genuine non-moving seconds ⇒ TSS < 100.
+
+    Hand derivation (TEST-R4): c=250 W over a 3600 s wall-clock hour with a single
+    600 s stop — a long (> max_interp_gap_s) typed-null gap per GBO-R22, seconds
+    1800..2399. Valid moving seconds = 3600 - 600 = 3000 (TSS-R1: stops/pauses/long
+    gaps are NOT exercise time). NP over its own valid windows of a constant series
+    is exactly c, so at FTP=c:
+        TSS = duration_valid_s * NP^2 / (FTP^2 * 3600) * 100
+            = 3000 * c^2 / (c^2 * 3600) * 100 = 250/3 = 83.333333...
+    This is the intended valid-moving-time semantics, not a defect (TSS-R2).
+    """
+    values = _gapped_power_values(CONST_POWER_W, RIDE_SECONDS, range(1800, 2400))
+    np_result = normalized_power(Stream.from_values(values))
+    assert isinstance(np_result, Computed)
+    assert np_result.value.np_w == pytest.approx(CONST_POWER_W, abs=NP_TOL)
+
+    duration_valid_s = int(np_result.quality.extra["duration_valid_s"])
+    assert duration_valid_s == 3000  # < 3600: only the genuine stop reduces it
+
+    tss_result = power_tss(np_result, ftp_w=CONST_POWER_W, duration_valid_s=duration_valid_s)
+    assert isinstance(tss_result, Computed)
+    assert tss_result.value == pytest.approx(250.0 / 3.0, abs=TSS_TOL)
+    assert tss_result.value < 100.0
+
+
+@pytest.mark.golden
+def test_tss_t3_np_warmup_exclusion_alone_does_not_reduce_duration() -> None:
+    """TSS-T3 control: NP's 29 s rolling-window warmup drop NEVER reduces duration_valid_s.
+
+    The same gap-free hour whose NP analysis window is 3571 s (the first 29 s are
+    rolling-window warmup, NP-R2) still counts all 3600 s as valid moving time
+    (TSS-R1/TSS-R2): duration_valid_s < 3600 may arise ONLY from genuine non-moving
+    seconds, never from the NP analysis-window exclusion.
+    """
+    np_result = normalized_power(_constant_power_stream(CONST_POWER_W, RIDE_SECONDS))
+    assert isinstance(np_result, Computed)
+    assert np_result.value.analysis_window_s == RIDE_SECONDS - 29  # NP window IS clipped
+    assert int(np_result.quality.extra["duration_valid_s"]) == RIDE_SECONDS  # duration is NOT
+
+
+@pytest.mark.golden
+def test_tss_t3_zero_watt_coast_seconds_count_as_moving() -> None:
+    """TSS-T3 boundary: VALID 0 W samples are coasting — exercise time, not a stop.
+
+    Canonical grounding (TSS-R1 + data-model GBO-R22): stops/pauses arrive as typed
+    null samples, so a present, valid ``0 W`` sample is a recorded coasting second
+    (descending / soft-pedalling) and MUST count in duration_valid_s. 100 contiguous
+    0 W seconds in an otherwise constant-power hour leave duration_valid_s == 3600;
+    only the NP value (and hence TSS) drops below the at-threshold 100.
+    """
+    values: list[float | None] = [
+        0.0 if 1000 <= i < 1100 else CONST_POWER_W for i in range(RIDE_SECONDS)
+    ]
+    np_result = normalized_power(Stream.from_values(values))
+    assert isinstance(np_result, Computed)
+
+    duration_valid_s = int(np_result.quality.extra["duration_valid_s"])
+    assert duration_valid_s == RIDE_SECONDS  # coasting is moving time
+
+    tss_result = power_tss(np_result, ftp_w=CONST_POWER_W, duration_valid_s=duration_valid_s)
+    assert isinstance(tss_result, Computed)
+    assert tss_result.value < 100.0  # NP-driven, not duration-driven

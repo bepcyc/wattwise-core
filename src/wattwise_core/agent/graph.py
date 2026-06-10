@@ -45,6 +45,7 @@ from langgraph.types import interrupt
 from wattwise_core.agent import graph_observability as obs
 from wattwise_core.agent import graph_routing as routing
 from wattwise_core.agent import graph_state as gs
+from wattwise_core.agent import tiering
 from wattwise_core.agent.contracts import (
     AgentState,
     ChatModel,
@@ -53,13 +54,14 @@ from wattwise_core.agent.contracts import (
     stamp_coverage_gaps,
     stamp_retrieved,
 )
+from wattwise_core.agent.graph_model_nodes import make_compose, make_reflect
+from wattwise_core.agent.locale import EMPTY_LOCALE_POLICY, LocalePolicy
 from wattwise_core.agent.seams import (
     AgentServices,
     GraphNode,
     entitlement_max_tool_iterations,
     entitlement_node_visit_ceiling,
 )
-from wattwise_core.observability import metrics as obs_metrics
 
 # Bounded recovery budgets (REFLECT-R4), re-exported from :mod:`graph_state` so the cycle
 # bounds are auditable in one place; both are small and strictly enforced.
@@ -205,61 +207,6 @@ def _make_assess_coverage(svc: AgentServices) -> GraphNode:
     return assess_coverage
 
 
-def _make_reflect(model: ChatModel, reflect_system: str) -> GraphNode:
-    async def reflect(state: AgentState) -> dict[str, Any]:
-        """Emit a structured §6 reflect verdict over the closed enum (REFLECT-R2).
-
-        Spends one unit of the bounded reflection budget (REFLECT-R4) and obtains a
-        provider-enforced ``ReflectDecision`` via ``run_structured`` (STRUCT-R1) using the
-        externalized reflection system prompt (§16 / SKILL-R1, CFG-R3 — not inline, ARCH-R29); the
-        routing function reads the verdict.
-        """
-        gs.athlete_id(state)
-        count = state.get("reflection_count", 0) + 1
-        # OBS-R4: count this self-correction iteration on the production metrics surface so the
-        # reflection rate / reflection-exhaustion rate are observable in production (AGT-OBS-R7).
-        obs_metrics.get_registry().increment(obs_metrics.REFLECTIONS)
-        decision = await gs.reflect_decision(model, state, system=reflect_system)
-        note = {
-            "role": "system",
-            "kind": "reflect",
-            "reflection_count": count,
-            "verdict": decision.verdict.value,
-            "add_requests": list(decision.add_requests),
-        }
-        return gs.tick_visit(state, {"reflection_count": count, "messages": [note]})
-
-    return reflect
-
-
-def _make_compose(svc: AgentServices, model: ChatModel, coach_system: str) -> GraphNode:
-    async def compose(state: AgentState) -> dict[str, Any]:
-        """Draft prose from canonical evidence within a token budget (DELIV-R*, MODEL-R3).
-
-        Untrusted content is wrapped in delimited data envelopes (INJECT-R1); on a context
-        overflow the lowest-relevance records are trimmed and the trim is recorded in
-        coverage_gaps. The redraft counter is already spent by the router upstream.
-        """
-        gs.athlete_id(state)
-        retrieved = gs.read_retrieved(state)
-        context, trimmed = gs.render_context(
-            state.get("request_text"),
-            retrieved,
-            active_goals=state.get("active_goals"),
-            recalled_memory=state.get("recalled_memory"),
-        )
-        draft = await model.compose(system=coach_system, context=context)
-        update: dict[str, Any] = {
-            "draft": draft,
-            "messages": [{"role": "assistant", "kind": "draft"}],
-        }
-        if trimmed:
-            update["coverage_gaps"] = stamp_coverage_gaps(gs.turn_id(state), {"context_trimmed"})
-        return gs.tick_visit(state, update)
-
-    return compose
-
-
 def _make_ground(svc: AgentServices) -> GraphNode:
     async def ground(state: AgentState) -> dict[str, Any]:
         """Deterministically verify the draft and decide recovery (GROUND-R*, COACH-R8).
@@ -352,7 +299,7 @@ def _make_interrupt_gate(recorder: gs.InterruptRecorder | None) -> GraphNode:
     return interrupt_gate
 
 
-def _make_finalize(svc: AgentServices, ceiling: int) -> GraphNode:
+def _make_finalize(svc: AgentServices, ceiling: int, locales: LocalePolicy) -> GraphNode:
     async def finalize(state: AgentState) -> dict[str, Any]:
         """The single sink: emit completed|degraded|budget_exceeded only (OUTCOME-R1).
 
@@ -378,7 +325,7 @@ def _make_finalize(svc: AgentServices, ceiling: int) -> GraphNode:
         # limitation — never the last scrubbed draft (a partial non-answer). Replace the
         # body so the projected deliverable states the limitation, not a stale draft.
         if decision is GroundDecision.ABSTAIN:
-            limitation = gs.limitation_text(state)
+            limitation = gs.limitation_text(state, locales)
             update["grounded_text"] = limitation
             update["grounded_html"] = gs.safe_html(limitation)
             update["citations"] = []
@@ -397,6 +344,9 @@ def _spine_nodes(
     reflect_system: str,
     recorder: gs.InterruptRecorder | None,
     ceiling: int,
+    model_routing: tiering.ModelRoutingPolicy,
+    locales: LocalePolicy,
+    context_token_budget: int | None,
 ) -> dict[str, GraphNode]:
     """Construct every spine node implementation, keyed by node name (GRAPH-R2/R4)."""
     return {
@@ -404,12 +354,14 @@ def _spine_nodes(
         "plan_retrieval": _make_plan_retrieval(svc),
         "gather": _make_gather(svc),
         "assess_coverage": _make_assess_coverage(svc),
-        "reflect": _make_reflect(model, reflect_system),
+        "reflect": make_reflect(model, reflect_system, model_routing),
         "redraft_tick": routing.make_redraft_tick(),
-        "compose": _make_compose(svc, model, coach_system),
+        "compose": make_compose(
+            svc, model, coach_system, model_routing, locales, context_token_budget
+        ),
         "ground": _make_ground(svc),
         "interrupt_gate": _make_interrupt_gate(recorder),
-        "finalize": _make_finalize(svc, ceiling),
+        "finalize": _make_finalize(svc, ceiling, locales),
     }
 
 
@@ -422,6 +374,9 @@ def build_graph(
     reflect_system: str = "",
     node_visit_ceiling: int = DEFAULT_NODE_VISIT_CEILING,
     max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
+    model_routing: tiering.ModelRoutingPolicy | None = None,
+    locales: LocalePolicy | None = None,
+    context_token_budget: int | None = None,
 ) -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
     """Assemble and compile the agent graph (GRAPH-R1/R2/R3/R5).
 
@@ -438,6 +393,12 @@ def build_graph(
     ``max_tool_iterations`` bounds the gather/tool loop independently — a breach STOPS re-planning
     and routes to ``compose`` (AGT-ENT-R4) so the run still composes a grounded answer from what it
     has. Both degrade GRACEFULLY, never raise.
+
+    ``model_routing`` is the typed model-routing-policy seam (MODEL-R1/-R2/-R2b; ``None`` ->
+    the OSS single-model default policy: every node, every tier resolves to the one configured
+    ``model``); ``locales`` the loaded language packs + config-driven default-language fallback
+    (LANG-R1/-R4; ``None`` -> the empty no-bundle policy); ``context_token_budget`` the
+    engine-computed MODEL-R3 input budget (``None`` -> the module fallback).
     """
     builder: StateGraph[AgentState, Any, AgentState, AgentState] = StateGraph(AgentState)
     # Read the non-monetary local guards FROM the resolved entitlement carried on the cost gate
@@ -457,7 +418,12 @@ def build_graph(
     # the ``(AgentState) -> partial`` node signatures (GRAPH-R4); :func:`obs.traced` wraps each so
     # every node execution emits a span under the run trace (AGT-OBS-R1: start/end + status +
     # parent linkage), with model/tool spans nesting inside.
-    nodes = _spine_nodes(svc, model, coach_system, reflect_system, recorder, ceiling)
+    policy = model_routing if model_routing is not None else tiering.SingleModelRoutingPolicy()
+    packs = locales if locales is not None else EMPTY_LOCALE_POLICY
+    nodes = _spine_nodes(
+        svc, model, coach_system, reflect_system, recorder, ceiling, policy, packs,
+        context_token_budget,
+    )
     for node_name, node_fn in nodes.items():
         builder.add_node(node_name, obs.traced(node_name, node_fn), input_schema=AgentState)
 

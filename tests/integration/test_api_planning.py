@@ -352,9 +352,9 @@ async def _seed(session: AsyncSession) -> str:
             name="Sweet Spot 2x20",
             sport="cycling",
             steps=[
-                {"intent": "warmup", "duration_s": 600},
-                {"intent": "work", "duration_s": 1200, "target_low": 0.88,
-                 "target_high": 0.94, "target_unit": "ftp"},
+                {"target_type": "open", "intent": "warmup", "duration_s": 600},
+                {"target_type": "power_pct_cp", "intent": "work", "duration_s": 1200,
+                 "target_low": 88.0, "target_high": 94.0},
             ],
         )
     )
@@ -364,7 +364,7 @@ async def _seed(session: AsyncSession) -> str:
             athlete_id=None,  # NULL-athlete shared library template (TEN-R1)
             name="Library Endurance Ride",
             sport="cycling",
-            steps=[{"intent": "steady", "duration_s": 3600}],
+            steps=[{"target_type": "open", "intent": "steady", "duration_s": 3600}],
         )
     )
     plan_id = uuid.uuid4()
@@ -417,7 +417,8 @@ async def test_get_workouts_lists_owned_and_shared_templates(seeded: _ReadEnv) -
     assert shared["Sweet Spot 2x20"] is False
     sweet = next(w for w in body["data"] if w["name"] == "Sweet Spot 2x20")
     work = next(s for s in sweet["steps"] if s["intent"] == "work")
-    assert work["target_low"] == 0.88 and work["target_unit"] == "ftp"  # target zones surfaced
+    # Target zones surfaced in the canonical GBO-R29 step shape (signature-relative).
+    assert work["target_low"] == 88.0 and work["target_type"] == "power_pct_cp"
     flat = json.dumps(body)
     for field in FORBIDDEN_FIELDS:
         assert f'"{field}"' not in flat

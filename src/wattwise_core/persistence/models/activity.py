@@ -101,6 +101,14 @@ class Activity(Base, TimestampMixin):
     has_gps: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     has_cadence: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     coverage: Mapped[dict[str, object]] = json_column(nullable=False, default=dict)
+    # The version of the conflict-resolution policy that produced the resolved values
+    # (CONF-R6): recorded on every canonical write so a re-resolution under a changed
+    # trust profile is auditable. NULL only for rows written before the column existed.
+    policy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Per-field resolution record (LIN-R3): winner/considered candidate POINTERS into
+    # the tier-2 ``source_candidate`` store + the CONF-R2 rule that decided, keyed by
+    # canonical field name. Lineage-only — NEVER exposed through consumer reads (LIN-R4).
+    field_resolution: Mapped[dict[str, object] | None] = json_column(nullable=True)
 
 
 class ActivityLap(Base, TimestampMixin):

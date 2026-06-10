@@ -342,9 +342,10 @@ async def test_ingest_service_uses_injected_resolver() -> None:
     cand = _StubCandidate(
         {"start_time": "2026-06-01T08:00:00+00:00", "elapsed_time_s": 3600, "sport": "cycling"}
     )
-    resolved = await service._resolve_activity_id(uuid.uuid4(), cand)  # type: ignore[arg-type]
+    resolved, decision = await service._resolve_activity_id(uuid.uuid4(), cand)  # type: ignore[arg-type]
     assert calls, "the injected resolver MUST be the identity-resolution authority"
     assert resolved != existing.activity_id  # spy forced a new id, not the windowed match
+    assert decision["rule"] == "no_match_new_record"  # the MAP-R12 decision is recorded
 
 
 class _StubActivity:
@@ -364,6 +365,7 @@ class _StubCandidate:
 
     def __init__(self, payload: dict[str, object]) -> None:
         self.payload = payload
+        self.strong_fingerprint: str | None = None  # no typed fingerprint on the stub
 
 
 class _StubResult:

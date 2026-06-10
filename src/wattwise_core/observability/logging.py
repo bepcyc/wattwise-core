@@ -89,6 +89,17 @@ _ALLOWED_KEYS: frozenset[str] = frozenset(
         "connection_id",
         "schema",
         "requested_at",
+        # AGT-OBS-R5 / MODEL-R2: a tier-escalation decision is logged explicitly with its
+        # node, the chosen tier/effort labels, and the policy-recorded reason. LANG-R4: a
+        # language-fallback event is logged with the requested + resolved language tags.
+        # All are bounded operational descriptors (enum labels / policy-authored reason /
+        # BCP-47-ish tags) — never athlete content or PII.
+        "node",
+        "tier",
+        "reasoning_effort",
+        "reason",
+        "requested_language",
+        "resolved_language",
     }
 )
 
@@ -104,6 +115,26 @@ _ALLOWED_NUMERIC_KEYS: frozenset[str] = frozenset(
         "attempt",
         "max_attempts",
         "status_code",
+        # doc 30 ING-OBS-R1 per-run sync trace: per-phase timings + record counts
+        # (bounded operational integers/floats; no health values, no PII).
+        "authorize_ms",
+        "discover_ms",
+        "fetch_ms",
+        "map_ms",
+        "upsert_ms",
+        "refs_discovered",
+        "refs_skipped",
+        "records_fetched",
+        "records_failed",
+        "candidates_mapped",
+        "activities_written",
+        "wellness_written",
+        "gaps_opened",
+        "gaps_closed",
+        "watermarks_advanced",
+        "retries",
+        "rate_limit_wait_ms",
+        "untrusted_content",
     }
 )
 _ALLOWED_KEYS = _ALLOWED_KEYS | _ALLOWED_NUMERIC_KEYS

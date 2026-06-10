@@ -11,14 +11,19 @@ transaction (UPS-R6); re-ingesting unchanged content is a value-level no-op (UPS
 Ingestion (L3) is the ONLY writer to the canonical store (L4, ARCH-R3); it imports
 persistence inward toward the canonical core.
 
-Identity resolution here is WINDOWED-ONLY (conservative, DEDUP-R7): a NEW candidate is
-matched against existing activities whose ``start_time`` is within ``_IDENTITY_WINDOW``
-(±2h) via the fuzzy start/duration/sport path. Genuine cross-source strong-fingerprint
-matching REGARDLESS of the window (MAP-R10) requires a TYPED ``strong_fingerprint``
-distinct from ``source_native_id`` — a real shared device/file UUID, not the per-source
-dedup key (two unrelated sessions, or two stripped FITs yielding a degenerate file_id,
-can collide on ``source_native_id`` and must NOT merge). That typed cross-window
-fingerprint match is DEFERRED and is NOT implemented via the per-source native id.
+Identity resolution runs in two legs (MAP-R10): a TYPED ``strong_fingerprint`` (a real
+shared device/file UUID carried on the candidate — never the per-source
+``source_native_id`` dedup key, which can falsely collide across unrelated sessions)
+matches retained candidates REGARDLESS of the time window, still gated on sport
+compatibility; otherwise the conservative WINDOWED fuzzy path (DEDUP-R7) matches
+existing activities whose ``start_time`` is within ``_IDENTITY_WINDOW`` (±2h) on
+start/duration/sport. Every identity decision is recorded on the candidate row
+(rule fired, match score, matched ids — MAP-R12) so a merge is explainable and can be
+split later by the explicit ``reresolve.split_activity`` operation.
+
+The cohesive sub-steps (batch landing, identity resolution, canonical writes, local-day
+projection, file capture) live in the sibling :mod:`._ingest_steps`; this module owns
+the facade and its orchestration only.
 """
 
 from __future__ import annotations
@@ -26,44 +31,26 @@ from __future__ import annotations
 import datetime as _dt
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
-from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import GboType
-from wattwise_core.ingestion import _canonical as _cw
-from wattwise_core.ingestion._candidate_store import (
-    persist_candidates_bulk,
-    prepare_batch,
-)
 from wattwise_core.ingestion._canonical import OriginalFile
-from wattwise_core.ingestion._mapping import (
-    _ACTIVITY_SCALARS,
-    _LAP_SCALARS,
-    _activity_values,
-    _highest_trust,
-    _parse_date,
-    _parse_start_time,
-    _resolve_scalars,
-    _validate_payload,
-    _whole_source_tier_of,
+from wattwise_core.ingestion._ingest_steps import (
+    _land_batch,
+    _resolve_activity_id,
+    _write_activity_canonical,
+    _write_wellness,
 )
-from wattwise_core.ingestion.trust import load_trust_policy
+from wattwise_core.ingestion.capability import (
+    require_declared_types,
+)
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
-from wattwise_core.persistence.localdate import (
-    MissingReferenceTimezone,
-    project_local_date,
-    project_local_wall_clock,
-)
-from wattwise_core.persistence.models import Activity, Athlete, SourceCandidate
 from wattwise_core.persistence.types import uuid7
-from wattwise_core.persistence.upsert import upsert
 from wattwise_core.seams import ConflictResolver, DefaultConflictResolver
-from wattwise_core.storage import ObjectStore, create_object_store
-
-_IDENTITY_WINDOW = _dt.timedelta(hours=2)
+from wattwise_core.storage import ObjectStore
 
 
 @dataclass(slots=True)
@@ -74,6 +61,9 @@ class IngestResult:
     wellness_written: int = 0
     candidates_persisted: int = 0
     candidates_failed: int = 0
+    # MAP-R6: candidates persisted to quarantine (failed validation, retained with the
+    # failing rule id, excluded from resolution) — distinct from hard failures.
+    candidates_quarantined: int = 0
     watermarks_advanced: int = 0
     gaps_closed: int = 0
 
@@ -110,6 +100,8 @@ class IngestService:
         ingest_run_id: uuid.UUID | None = None,
         original_files: list[OriginalFile] | None = None,
         synced_range: SyncedRange | None = None,
+        declared_gbo_types: frozenset[GboType] | None = None,
+        source_key: str = "",
     ) -> IngestResult:
         """Land candidates into the canonical store in DURABLE, fault-isolated batches.
 
@@ -127,7 +119,13 @@ class IngestService:
         OPEN transient gap fully inside that range is closed — AFTER all batch data has been
         committed above (SYN-R3 / ING-UPS-R2 / ING-GAP-R4), so store, cursor, and gap state
         stay mutually consistent and a crash mid-run never advances past un-committed data (ING-R6).
+
+        ADP-R3 (fail-closed): BEFORE any write, every candidate's ``gbo_type`` must be in
+        the adapter's ``declared_gbo_types`` (when given) AND in the engine-writable set —
+        an undeclared/unknown type raises :class:`UndeclaredGboTypeError`; the batch is
+        REFUSED, never partially/silently dropped from the canonical store.
         """
+        require_declared_types(candidates, declared_gbo_types, source_key=source_key)
         athlete = _uid(athlete_id)
         descriptor = _uid(source_descriptor_id)
         run_id = ingest_run_id or uuid7()
@@ -158,158 +156,33 @@ class IngestService:
         await self._session.commit()
         return result
 
-    async def _resolve_and_write_activity(
-        self, athlete: uuid.UUID, row: SourceCandidate, cand: GboCandidate
-    ) -> uuid.UUID:
-        """Resolve identity (reusing the row's prior id) and write the canonical activity."""
-        if row.resolved_activity_id is not None:
-            activity_id = row.resolved_activity_id  # ING-R6: reuse the resolved identity
-        else:
-            activity_id = await self._resolve_activity_id(athlete, cand)
-            row.resolved_activity_id = activity_id
-            await self._session.flush()
-        await self._write_activity_canonical(athlete, activity_id)
-        return activity_id
-
-    async def _resolve_activity_id(self, athlete: uuid.UUID, cand: GboCandidate) -> uuid.UUID:
+    async def _resolve_activity_id(
+        self, athlete: uuid.UUID, cand: GboCandidate
+    ) -> tuple[uuid.UUID, dict[str, Any]]:
         """Resolve a NEW candidate to a canonical activity id (MAP-R9..R12, DEDUP-R7).
 
-        WINDOWED-ONLY (conservative): considers only existing activities whose
-        ``start_time`` is within ``_IDENTITY_WINDOW`` (±2h) of the candidate, in a stable
-        order (start_time, then activity_id), and runs the fuzzy start/duration/sport
-        matcher per windowed candidate; reuses the first match, else mints a new id.
-
-        A cross-source strong-fingerprint match REGARDLESS of the window (MAP-R10) is
-        DEFERRED: it needs a TYPED ``strong_fingerprint`` (a real shared device/file UUID),
-        NOT the per-source ``source_native_id`` dedup key (which can falsely collide across
-        unrelated sessions). Same-source re-ingest is already handled upstream by
-        candidate-key id reuse (``resolved_activity_id``, ING-R6) BEFORE this runs.
+        Delegates to :func:`._ingest_steps._resolve_activity_id` (the two-leg
+        strong-fingerprint / windowed-fuzzy resolution); kept as a method seam.
         """
-        start = _parse_start_time(cand.payload["start_time"])
-        duration = float(cast("float", cand.payload.get("elapsed_time_s") or 0))
-        sport = str(cand.payload.get("sport") or "other")
-        for act in await self._windowed_activities(athlete, start):
-            # SQLite returns tz-naive datetimes; coerce to UTC for the matcher (GBO-R32).
-            act_start = _parse_start_time(act.start_time)
-            if self._resolver.resolve_activity_identity(
-                start, duration, sport, None,
-                act_start, float(act.elapsed_time_s or 0), act.sport, None,
-            ):
-                return act.activity_id
-        return uuid7()
-
-    async def _windowed_activities(
-        self, athlete: uuid.UUID, start: _dt.datetime
-    ) -> list[Activity]:
-        """Existing activities whose ``start_time`` falls within ±2h of ``start``.
-
-        Returns them in a stable order (start_time, then activity_id) so identity
-        resolution is deterministic (CONF-R4). The fuzzy start/duration/sport matcher
-        is run per candidate; nothing outside the window is considered (DEDUP-R7).
-        """
-        lo, hi = start - _IDENTITY_WINDOW, start + _IDENTITY_WINDOW
-        stmt = (
-            select(Activity)
-            .where(
-                Activity.athlete_id == athlete,
-                Activity.start_time >= lo,
-                Activity.start_time <= hi,
-            )
-            .order_by(Activity.start_time, Activity.activity_id)
-        )
-        return list((await self._session.execute(stmt)).scalars().all())
+        return await _resolve_activity_id(self, athlete, cand)
 
     async def _write_activity_canonical(
         self, athlete: uuid.UUID, activity_id: uuid.UUID
     ) -> None:
         """Resolve every field across candidates and write the canonical activity (UPS-R2).
 
-        The canonical row is persisted through the atomic upsert seam keyed on the
-        resolved canonical key ``activity_id`` — a single insert-or-update, never a
-        ``session.get`` then add/setattr check-then-write, so two sync runs landing the
-        same resolved activity cannot race (UPS-R2). Only the resolved columns are
-        supplied, so unresolved fields keep their prior canonical value when the key exists.
+        Delegates to :func:`._ingest_steps._write_activity_canonical`; kept as a
+        method seam (the re-resolution path calls it on the service).
         """
-        candidates = await _activity_candidates(self._session, athlete, activity_id)
-        if not candidates:
-            return
-        policy = await load_trust_policy(self._session, athlete, candidates)
-        scalars, coverage = _resolve_scalars(
-            candidates, _ACTIVITY_SCALARS, policy, self._resolver
-        )
-        local_projection = await self._project_local(athlete, activity_id, scalars)
-        values, update_columns = _activity_values(
-            activity_id, athlete, scalars, coverage, local_projection
-        )
-        await upsert(
-            self._session,
-            cast("Table", Activity.__table__),
-            values,
-            conflict_keys=["activity_id"],
-            update_columns=update_columns,
-        )
-        await self._session.flush()
-        # Streams resolve PER CHANNEL under each channel's effective tier (CONF-R3/SF-3);
-        # an empty policy makes this the candidate's adapter tier (the prior behaviour).
-        streams = _cw.resolve_streams(candidates, policy)
-        best = _highest_trust(candidates)
-        laps = cast("list[dict[str, Any]]", best.payload.get("laps") or [])
-        if streams:
-            await _cw.upsert_stream_set(self._session, activity_id, streams)
-        await _cw.upsert_laps(self._session, activity_id, laps, _LAP_SCALARS)
-
-    async def _project_local(
-        self, athlete: uuid.UUID, activity_id: uuid.UUID, scalars: dict[str, Any]
-    ) -> tuple[_dt.datetime, _dt.date] | None:
-        """Project the resolved UTC ``start_time`` into the athlete's local day (GBO-R33/R35).
-
-        Returns ``(start_time_local, local_date)`` — the display wall-clock and the reproducible
-        day-attribution bucket — or ``None`` when ``start_time`` did not resolve (nothing to
-        project). The athlete's reference timezone is effective-dated (GBO-R34): a re-ingest of
-        an instant predating a later relocation keeps the ``local_date`` it already carries
-        (passed as ``prior_local_date``), so a relocation never retroactively re-buckets prior
-        days. A missing/unresolvable reference timezone raises
-        :class:`~wattwise_core.persistence.localdate.MissingReferenceTimezone`, isolating the
-        record (fail-closed, CFG-R1a/R6) — never a silent UTC default.
-        """
-        raw_start = scalars.get("start_time")
-        if raw_start is None:
-            return None  # no instant resolved → nothing to bucket
-        start = _parse_start_time(raw_start)
-        owner = await self._session.get(Athlete, athlete)
-        if owner is None:
-            raise MissingReferenceTimezone("athlete row missing for local-date projection")
-        existing = await self._session.get(Activity, activity_id)
-        prior = existing.local_date if existing is not None else None
-        local_date = project_local_date(start, owner, prior_local_date=prior)
-        return project_local_wall_clock(start, owner), local_date
+        await _write_activity_canonical(self, athlete, activity_id)
 
     async def _write_wellness(self, athlete: uuid.UUID, local_date: _dt.date) -> None:
-        """Resolve daily wellness across ALL candidates for the date (CONF-R2/ING-UPS-R5)."""
-        candidates = await _wellness_candidates(self._session, athlete, local_date)
-        policy = await load_trust_policy(self._session, athlete, candidates)
-        # Wellness fields resolve under the whole-source effective tier; an empty policy
-        # makes this the candidate's adapter tier (byte-identical to the prior behaviour).
-        await _cw.write_wellness_canonical(
-            self._session, athlete, local_date, candidates, _whole_source_tier_of(policy)
-        )
+        """Resolve daily wellness across ALL candidates for the date (CONF-R2/ING-UPS-R5).
 
-    async def _capture_original(
-        self,
-        athlete: uuid.UUID,
-        descriptor: uuid.UUID,
-        activity_id: uuid.UUID,
-        original: OriginalFile | None,
-        fetched_at: _dt.datetime | None,
-    ) -> None:
-        """Store the verbatim original file + its activity_file reference (ING-R8/FIL-R1)."""
-        if original is None:
-            return  # a direct-API source has no original recording file -> no ActivityFile
-        store = self._object_store or create_object_store()
-        await _cw.create_activity_file(
-            self._session, store, athlete=athlete, activity_id=activity_id,
-            source_descriptor_id=descriptor, original=original, fetched_at=fetched_at,
-        )
+        Delegates to :func:`._ingest_steps._write_wellness`; kept as a method seam
+        (the re-resolution path calls it on the service).
+        """
+        await _write_wellness(self, athlete, local_date)
 
 
 def _batched(candidates: list[GboCandidate], size: int | None) -> list[list[GboCandidate]]:
@@ -317,99 +190,6 @@ def _batched(candidates: list[GboCandidate], size: int | None) -> list[list[GboC
     if size is None or size >= len(candidates):
         return [candidates] if candidates else []
     return [candidates[i : i + size] for i in range(0, len(candidates), size)]
-
-
-async def _land_batch(
-    svc: IngestService,
-    athlete: uuid.UUID,
-    descriptor: uuid.UUID,
-    batch: list[GboCandidate],
-    connection_id: str | uuid.UUID | None,
-    run_id: uuid.UUID,
-    files_by_native: dict[str, OriginalFile],
-    wellness_dates: set[_dt.date],
-    result: IngestResult,
-) -> None:
-    """Land ONE batch: validate+prepare per record, bulk-insert, then resolve per record.
-
-    Each candidate is validated+prepared in its own ``SAVEPOINT`` so a malformed record
-    rolls back only itself (ING-UPS-R3 record isolation); the surviving rows land in a
-    SINGLE multi-row upsert round-trip (ING-UPS-R1 / PERF-R1), then each is resolved +
-    canonical-written in its own ``SAVEPOINT`` so a resolution failure likewise isolates.
-    """
-    prepared, failed = await prepare_batch(
-        svc._session, athlete, descriptor, batch, connection_id, run_id,
-        validate=_validate_payload,
-    )
-    result.candidates_failed += failed
-    if not prepared:
-        return
-    rows = await persist_candidates_bulk(svc._session, athlete, descriptor, prepared)
-    for prep in prepared:
-        await _resolve_candidate(
-            svc, athlete, descriptor, prep.cand, rows[prep.cand.source_native_id],
-            files_by_native, wellness_dates, result,
-        )
-
-
-async def _resolve_candidate(
-    svc: IngestService,
-    athlete: uuid.UUID,
-    descriptor: uuid.UUID,
-    cand: GboCandidate,
-    row: SourceCandidate,
-    files_by_native: dict[str, OriginalFile],
-    wellness_dates: set[_dt.date],
-    result: IngestResult,
-) -> None:
-    """Resolve + canonical-write ONE already-persisted candidate inside its own SAVEPOINT.
-
-    The candidate row is already durable from the batch's bulk insert; a resolution failure
-    rolls back only this savepoint and is counted, never aborting the batch (ING-UPS-R3
-    record isolation). ING-UPS-R3's range-precise gap (ING-GAP-R5) for the failed record is
-    DEFERRED to the watermark/gap model (ING-UPS-R2).
-    """
-    try:
-        async with svc._session.begin_nested():
-            if cand.gbo_type == GboType.ACTIVITY.value:
-                activity_id = await svc._resolve_and_write_activity(athlete, row, cand)
-                await svc._capture_original(
-                    athlete, descriptor, activity_id,
-                    files_by_native.get(cand.source_native_id), cand.fetched_at,
-                )
-                result.activities_written.add(str(activity_id))
-            elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
-                wellness_dates.add(_parse_date(cand.payload["local_date"]))
-    except Exception:
-        result.candidates_failed += 1  # ING-UPS-R3 record isolation; keep the run
-        return
-    result.candidates_persisted += 1
-
-
-async def _activity_candidates(
-    session: AsyncSession, athlete: uuid.UUID, activity_id: uuid.UUID
-) -> list[SourceCandidate]:
-    """All non-superseded activity candidates resolved to ``activity_id`` (the resolution set)."""
-    stmt = select(SourceCandidate).where(
-        SourceCandidate.athlete_id == athlete,
-        SourceCandidate.gbo_type == GboType.ACTIVITY,
-        SourceCandidate.resolved_activity_id == activity_id,
-        SourceCandidate.is_superseded.is_(False),
-    )
-    return list((await session.execute(stmt)).scalars().all())
-
-
-async def _wellness_candidates(
-    session: AsyncSession, athlete: uuid.UUID, local_date: _dt.date
-) -> list[SourceCandidate]:
-    """All non-superseded daily-wellness candidates for ``local_date`` (the resolution set)."""
-    stmt = select(SourceCandidate).where(
-        SourceCandidate.athlete_id == athlete,
-        SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
-        SourceCandidate.is_superseded.is_(False),
-    )
-    rows = (await session.execute(stmt)).scalars().all()
-    return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
 
 
 def _uid(value: str | uuid.UUID) -> uuid.UUID:

@@ -37,11 +37,26 @@ REFLECTIONS = "wattwise_agent_reflections_total"
 REFLECTION_EXHAUSTIONS = "wattwise_agent_reflection_exhaustions_total"
 REFUSALS = "wattwise_agent_refusals_total"
 INJECTION_ANOMALIES = "wattwise_agent_injection_anomalies_total"
+TIER_ESCALATIONS = "wattwise_agent_tier_escalations_total"  # labelled by node+tier (MODEL-R2)
+LANGUAGE_FALLBACKS = "wattwise_agent_language_fallbacks_total"  # labelled by requested (LANG-R4)
 RUN_TERMINAL = "wattwise_agent_run_terminal_total"  # labelled by terminal status
 RUN_COST_USD = "wattwise_agent_run_cost_usd"  # summary (per-run cost)
 RUN_LATENCY_SECONDS = "wattwise_agent_run_latency_seconds"  # summary (per-run latency)
 ENDPOINT_REQUESTS = "wattwise_http_requests_total"  # labelled by endpoint+outcome (OBS-R5)
 ENDPOINT_LATENCY_SECONDS = "wattwise_http_request_latency_seconds"  # OBS-R5 per-endpoint
+# --- ingestion operational metrics (doc 30 ING-OBS-R2; internal/admin surface only) ---
+# Per-source success/failure rate, per-phase latency, record throughput, open/closed gap
+# counts by reason, outbound request counts (cost), rate-limit waits, and freshness lag.
+# The OSS engine serves the single implicit owner (ING-SEC-R2), so "per athlete" is the
+# instance itself; labels carry the source_key, never athlete PII.
+INGEST_SOURCE_RUNS = "wattwise_ingest_source_runs_total"  # labels: source_key, outcome
+INGEST_PHASE_LATENCY = "wattwise_ingest_phase_latency_seconds"  # labels: source_key, phase
+INGEST_RECORDS = "wattwise_ingest_records_total"  # labels: source_key, stage
+INGEST_GAPS_OPENED = "wattwise_ingest_gaps_opened_total"  # labels: reason
+INGEST_GAPS_CLOSED = "wattwise_ingest_gaps_closed_total"  # (transient self-heal, ING-GAP-R4)
+INGEST_OUTBOUND_REQUESTS = "wattwise_ingest_outbound_requests_total"  # labels: source_key
+INGEST_RATE_LIMIT_WAIT = "wattwise_ingest_rate_limit_wait_seconds"  # summary, per source
+INGEST_FRESHNESS_LAG = "wattwise_ingest_freshness_lag_seconds"  # summary: now - watermark
 
 _LabelKey = tuple[tuple[str, str], ...]
 
@@ -188,12 +203,14 @@ __all__ = [
     "GROUNDING_RUNS",
     "GROUNDING_SCRUBS",
     "INJECTION_ANOMALIES",
+    "LANGUAGE_FALLBACKS",
     "REFLECTIONS",
     "REFLECTION_EXHAUSTIONS",
     "REFUSALS",
     "RUN_COST_USD",
     "RUN_LATENCY_SECONDS",
     "RUN_TERMINAL",
+    "TIER_ESCALATIONS",
     "VALIDATION_FAILURES",
     "MetricsRegistry",
     "get_registry",

@@ -27,6 +27,7 @@ from wattwise_core.domain.enums import (
     GapReason,
     SourceKind,
 )
+from wattwise_core.ingestion.capability import CapabilityDescriptor
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,9 @@ class SourceAdapter(Protocol):
     kind: SourceKind
     adapter_version: str
     mapping_version: str
+    #: The static machine-readable capability declaration (ADP-R1); validated at
+    #: registration (ADP-R2/ONB-R2) and the ONLY input the engine plans runs from.
+    capability: CapabilityDescriptor
 
     def map(
         self,
