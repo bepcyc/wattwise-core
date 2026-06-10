@@ -217,30 +217,6 @@ def _engine(
     return GraphAgentEngine(canonical, model, state_db=state_db)  # type: ignore[arg-type]
 
 
-def _xfail_mariadb_ensure_thread_race(state_db: AgentStateDatabase) -> None:
-    """xfail the engine-driven graph legs on MariaDB pending a saver fix (cross-slice, Core-B).
-
-    Driving the compiled graph runs the langgraph supersteps' checkpoint ``aput`` / ``aput_writes``
-    (and, on a PLAN, the interrupt-gate's ``record_interrupt``) CONCURRENTLY on a FRESH durable
-    thread — the benign concurrent first-touch race ``checkpoint.py:_ensure_thread`` exists to
-    absorb. On sqlite + PostgreSQL that race surfaces as the ``IntegrityError`` the handler catches
-    and re-resolves; on MariaDB it surfaces as ``OperationalError(1020) "Record has changed since
-    last read"``, which the handler does NOT yet catch — so the run dies on the otherwise-benign
-    race. This is a saver-level robustness gap in ``_ensure_thread`` (it must also absorb MariaDB's
-    1020 for the concurrent-create race), NOT an engine defect: sqlite + PG prove the durable-resume
-    behaviour end to end. Tracked as a Core-B ``checkpoint.py`` dependency (reproduced directly:
-    concurrent ``record_interrupt`` + ``aput_writes`` on a fresh thread raises 1020 on MariaDB).
-    """
-    if state_db.engine.dialect.name in ("mysql", "mariadb"):
-        pytest.xfail(
-            "MariaDB _ensure_thread does not catch OperationalError(1020) for the concurrent "
-            "thread-create race during a graph run (Core-B checkpoint.py dependency)"
-        )
-
-
-# --- F-FOLLOWUP --------------------------------------------------------------------------
-
-
 async def test_followup_expand_resumes_same_durable_thread(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
 ) -> None:
@@ -252,7 +228,6 @@ async def test_followup_expand_resumes_same_durable_thread(
     fixes). Both turns COMPLETE on the durable saver, proving the run-scoped reset across the turn
     boundary works through the real pool.
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _answer_model())
     first = await engine.answer(
         athlete_id=ATHLETE_A,
@@ -287,7 +262,6 @@ async def test_followup_reveal_numbers_runs_on_same_thread(
     grounded (the reveal merges grounded citations, never invents one). Here the answer carries no
     grounded number, so the reveal simply completes on the same thread without fabricating one.
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _answer_model())
     first = await engine.answer(
         athlete_id=ATHLETE_A,
@@ -346,7 +320,6 @@ async def test_run_recalls_durable_memory_into_compose_and_writes_an_episode(
     captured compose context (recall wired), and a NEW memory episode exists after the run (write
     wired). Memory is personalization only — it never supplies a canonical number (MEM-R1).
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
 
     async with state_db.session() as session:
         store = OssMemoryStore(session)
@@ -402,7 +375,6 @@ async def test_plan_pauses_then_approve_resumes_durably(
     decision drives ``Command(resume)`` through the DURABLE saver and finalizes COMPLETED — no
     recompute of the pre-interrupt head node (CKPT-R2/-R5).
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _plan_model())
     plan = await engine.plan_deliverable(athlete_id=ATHLETE_A, request="give me a week plan")
     assert plan.status is RunStatus.AWAITING_APPROVAL
@@ -426,7 +398,6 @@ async def test_plan_reject_resumes_durably(
     Reject is still a resume (the run finalizes), but un-approved — it must not raise/recompute and
     must consume the live interrupt so it cannot be acted on twice (CKPT-R9).
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _plan_model())
     plan = await engine.plan_deliverable(athlete_id=ATHLETE_A, request="week plan")
     assert plan.status is RunStatus.AWAITING_APPROVAL and plan.interrupt_id is not None
@@ -459,7 +430,6 @@ async def test_plan_edit_with_invented_name_is_rejected_degraded(
     the run resolves to ``DEGRADED`` and the delivered body is the already-grounded PRE-EDIT plan,
     NOT the partial/untrusted edit. The invented name never reaches the athlete (GROUND-R3 / H3).
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _plan_model())
     plan = await engine.plan_deliverable(athlete_id=ATHLETE_A, request="week plan")
     assert plan.status is RunStatus.AWAITING_APPROVAL and plan.interrupt_id is not None
@@ -498,7 +468,6 @@ async def test_plan_edit_fully_canonical_grounds_and_completes(
     The edited plan names ONLY canonical workouts, so re-grounding decides ``PROCEED`` with
     non-empty grounded text — the edit is accepted and its body becomes the delivered plan (R3).
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _plan_model())
     plan = await engine.plan_deliverable(athlete_id=ATHLETE_A, request="week plan")
     assert plan.status is RunStatus.AWAITING_APPROVAL and plan.interrupt_id is not None
@@ -531,7 +500,6 @@ async def test_double_decision_is_refused(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
 ) -> None:
     """F-409: a second decision on a consumed interrupt is refused (no double-resume, CKPT-R9)."""
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _plan_model())
     plan = await engine.plan_deliverable(athlete_id=ATHLETE_A, request="week plan")
     assert plan.interrupt_id is not None
@@ -554,7 +522,6 @@ async def test_unknown_interrupt_is_refused(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
 ) -> None:
     """F-404: a decision against an interrupt id that was never recorded is refused (CKPT-R9)."""
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _plan_model())
     plan = await engine.plan_deliverable(athlete_id=ATHLETE_A, request="week plan")
     with pytest.raises(DecisionRefused):
@@ -574,7 +541,6 @@ async def test_cross_athlete_decision_is_refused(
     The consume guard is athlete-scoped, so B's decision matches no row and is refused — never
     resuming A's run. A can still legitimately approve its own plan afterwards.
     """
-    _xfail_mariadb_ensure_thread_race(state_db)
     engine = _engine(canonical, state_db, _plan_model())
     plan = await engine.plan_deliverable(athlete_id=ATHLETE_A, request="week plan")
     assert plan.interrupt_id is not None

@@ -32,6 +32,7 @@ from wattwise_core.analytics.constants import (
     CP_DURATION_RATIO_MIN,
     CP_LONG_DURATION_BIAS_S,
     CP_MIN_POINTS,
+    CP_POWER_SPREAD_EPSILON,
     CP_R2_MIN,
 )
 from wattwise_core.analytics.result import (
@@ -98,13 +99,17 @@ def _select_cp_domain_points(
     domain_max_s: int,
     min_points: int,
     duration_ratio_min: float,
+    power_spread_epsilon: float,
 ) -> tuple[list[int], dict[int, float]] | Unavailable:
     """Select in-domain distinct durations and apply the pre-fit gates (CP-R2/R3/R4).
 
     Keeps only finite-power points whose duration is in ``[domain_min_s, domain_max_s]``
     (CP-R2; a NaN/Inf power never enters the fit — ANL-R32). Fails closed with
-    ``INSUFFICIENT_DATA`` if fewer than ``min_points`` distinct durations remain, or if
-    the durations are too clustered (``max/min < duration_ratio_min``). Returns
+    ``INSUFFICIENT_DATA`` if fewer than ``min_points`` distinct durations remain, if
+    the durations are too clustered (``max/min < duration_ratio_min``), or if the
+    powers are (near-)constant (relative spread below ``power_spread_epsilon`` — a
+    degenerate, underdetermined point set whose verdict must be decided HERE, before
+    any regression, never by platform-dependent fit numerics). Returns
     ``(distinct_durations, in_domain)`` on success.
     """
     in_domain: dict[int, float] = {}
@@ -137,6 +142,26 @@ def _select_cp_domain_points(
             reason=UnavailableReason.INSUFFICIENT_DATA,
             detail=(
                 f"durations too clustered: max/min = {max_dur / min_dur:.3f} < {duration_ratio_min}"
+            ),
+        )
+
+    # Gate: powers must not be (near-)constant (CP-R3/R4 -> INSUFFICIENT_DATA). A
+    # constant-power MMP curve makes W = P*t exactly linear THROUGH THE ORIGIN, so CP
+    # and W' are underdetermined: the regression's intercept is pure floating-point
+    # noise whose sign varies by platform/BLAS build. The refusal is decided by this
+    # declared PRE-FIT gate, never left to whether the downstream fit happens to
+    # "converge" (CP-R4: no fabricated CP/W' from degenerate input).
+    powers = [in_domain[d] for d in distinct_durations]
+    p_min = min(powers)
+    p_max = max(powers)
+    scale = max(abs(p_min), abs(p_max))
+    if scale <= 0.0 or (p_max - p_min) / scale < power_spread_epsilon:
+        return Unavailable(
+            reason=UnavailableReason.INSUFFICIENT_DATA,
+            detail=(
+                "MMP powers are (near-)constant across durations: relative spread "
+                f"{0.0 if scale <= 0.0 else (p_max - p_min) / scale:.3e} < "
+                f"{power_spread_epsilon:.3e}; CP/W' underdetermined"
             ),
         )
     return distinct_durations, in_domain
@@ -276,6 +301,7 @@ def cp_wprime(
     domain_max_s: int = CP_DOMAIN_MAX_S,
     min_points: int = CP_MIN_POINTS,
     duration_ratio_min: float = CP_DURATION_RATIO_MIN,
+    power_spread_epsilon: float = CP_POWER_SPREAD_EPSILON,
     r2_min: float = CP_R2_MIN,
     long_duration_bias_s: int = CP_LONG_DURATION_BIAS_S,
     sport: str = "cycling",
@@ -293,6 +319,9 @@ def cp_wprime(
 
     * ``< min_points`` distinct in-domain durations → ``INSUFFICIENT_DATA``.
     * ``max_dur / min_dur < duration_ratio_min`` (too clustered) → ``INSUFFICIENT_DATA``.
+    * (near-)constant power (relative spread ``< power_spread_epsilon``) →
+      ``INSUFFICIENT_DATA`` *before* any regression (the degenerate-input verdict is
+      declared, never platform-dependent fit numerics).
     * ``R² < r2_min`` → ``POOR_FIT``.
     * ``CP ≤ 0`` or ``W-prime ≤ 0`` (wrong sign) → ``POOR_FIT``.
 
@@ -321,6 +350,7 @@ def cp_wprime(
         domain_max_s=domain_max_s,
         min_points=min_points,
         duration_ratio_min=duration_ratio_min,
+        power_spread_epsilon=power_spread_epsilon,
     )
     if isinstance(selection, Unavailable):
         return selection
