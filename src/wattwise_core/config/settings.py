@@ -276,10 +276,68 @@ class Settings(BaseSettings):
     retention__raw_file_days: int = Field(ge=0)
 
     # --- SECRETS (env / secret-manager only; BOOT-R4) ---
+    # ``database_dsn`` is the CANONICAL-WRITE credential (the Ingestion/Sync role against the
+    # source-derived canonical tables, ARCH-R3a). The three DSNs below let a deployment give
+    # each consuming layer its OWN per-write-domain role (DEPLOY-R4) so the four-role
+    # separation is a data-access-credential guarantee, not merely an import convention:
+    #   * ``database_master_data_dsn`` — the MASTER-DATA-WRITE role bound to the API's
+    #     master-data endpoints (profile/signature, zones/language/default-load-model
+    #     user-settings, goals — ARCH-R3b): the ONLY write surface for athlete-authored
+    #     master-data; it MUST NOT write the source-derived canonical tables or agent state;
+    #   * ``database_read_dsn`` — the READ-ONLY role for the Domain/Analytics services (used by
+    #     both the REST API and the MCP/agent) against the canonical store (both partitions);
+    #   * ``agent_state_dsn`` — the AGENT-STATE-WRITE role for the Agent Orchestrator against
+    #     the agent-state store ONLY (it MUST NOT write the canonical store).
+    # All three are OPTIONAL: when a single-operator self-host leaves them unset, the engine
+    # resolves them to ``database_dsn`` (one credential; the structural role split is opt-in at
+    # deploy — mirroring how the agent-state engine already falls back to the canonical DSN).
+    # They are the CFG-R2 secret exception (env / secret-manager only), so — like
+    # ``database_dsn`` — they carry NO value in ``defaults.toml`` and the ``None`` sentinel
+    # models "not configured".
     database_dsn: SecretStr | None = None
+    database_master_data_dsn: SecretStr | None = None
+    database_read_dsn: SecretStr | None = None
+    agent_state_dsn: SecretStr | None = None
     encryption_root_key: SecretStr | None = None
     token_signing_key: SecretStr | None = None
     llm_api_key: SecretStr | None = None
+
+    def canonical_write_dsn(self) -> str | None:
+        """The canonical-WRITE DSN (Ingestion/Sync role, ARCH-R3); ``None`` if unset."""
+        return None if self.database_dsn is None else self.database_dsn.get_secret_value()
+
+    def master_data_write_dsn(self) -> str | None:
+        """The MASTER-DATA-WRITE DSN (the API's master-data role, ARCH-R3b/DEPLOY-R4).
+
+        Resolves the distinct master-data-write role's DSN when configured, else falls back
+        to the canonical DSN (single-operator self-host: one credential; the per-role split is
+        an opt-in deploy choice). ``None`` only when no DSN is configured at all (fail-closed).
+        """
+        if self.database_master_data_dsn is not None:
+            return self.database_master_data_dsn.get_secret_value()
+        return self.canonical_write_dsn()
+
+    def read_only_dsn(self) -> str | None:
+        """The READ-ONLY DSN for L5-L7 canonical reads (DEPLOY-R4).
+
+        Resolves the distinct read-only role's DSN when configured, else falls back to the
+        canonical DSN (single-operator self-host: one credential; the per-layer role split is
+        an opt-in deploy choice). ``None`` only when no DSN is configured at all (fail-closed).
+        """
+        if self.database_read_dsn is not None:
+            return self.database_read_dsn.get_secret_value()
+        return self.canonical_write_dsn()
+
+    def agent_state_write_dsn(self) -> str | None:
+        """The AGENT-STATE-WRITE DSN (Orchestrator role against the agent-state store, DEPLOY-R4).
+
+        Resolves the distinct agent-state-write role's DSN when configured, else falls back to
+        the canonical DSN (one credential on a single-operator self-host). ``None`` only when no
+        DSN is configured at all.
+        """
+        if self.agent_state_dsn is not None:
+            return self.agent_state_dsn.get_secret_value()
+        return self.canonical_write_dsn()
 
     @model_validator(mode="after")
     def _fail_closed(self) -> Settings:
@@ -291,6 +349,14 @@ class Settings(BaseSettings):
         guard (SEC-R10-AC) is enforced in EVERY environment — a wildcard origin combined
         with credentials is always rejected.
         """
+        # A BLANK optional per-layer DSN secret means "not configured" (the compose env map
+        # cannot omit a key, so an unset deploy var arrives as ""). Coerce it to ``None`` so the
+        # role helpers fall back to the canonical DSN instead of building an empty, invalid DSN
+        # (fail-closed: absence is a fallback, never a degenerate credential — DEPLOY-R4).
+        for field in ("database_master_data_dsn", "database_read_dsn", "agent_state_dsn"):
+            secret: SecretStr | None = getattr(self, field)
+            if secret is not None and not secret.get_secret_value():
+                setattr(self, field, None)
         strict = self.app__environment is not Environment.DEVELOPMENT
         missing: list[str] = []
         if self.database_dsn is None:

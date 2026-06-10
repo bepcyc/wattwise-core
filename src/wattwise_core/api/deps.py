@@ -57,6 +57,23 @@ def get_database(request: Request) -> Database:
     return database
 
 
+def get_master_data_database(request: Request) -> Database:
+    """Return the :class:`Database` bound to the MASTER-DATA-WRITE role (DEPLOY-R4).
+
+    ARCH-R3(b): athlete-authored master-data (profile/signature, zones/language/
+    default-load-model user-settings, goals) is written ONLY through the API's distinct
+    master-data-write role. The factory binds this Database at startup — to its own
+    engine/pool when the deployment configures the distinct role DSN, else to the shared
+    canonical Database (single-operator self-host: one credential; the structural role
+    split is an opt-in deploy choice). Its absence means the app was assembled
+    incorrectly and surfaces fail-closed as a generic internal error.
+    """
+    database = getattr(request.app.state, "master_data_database", None)
+    if not isinstance(database, Database):
+        raise ProblemError("internal-error")
+    return database
+
+
 def request_subject(
     principal: Annotated[Principal, Depends(authenticate)],
 ) -> str:
@@ -84,6 +101,24 @@ async def get_db(
     subject but is NOT itself coupled to the auth mechanism. The OSS default provider applies NO
     tenant scoping (single-athlete) but IS the single attach point the commercial tenant-scoped
     overlay mounts on. Routes receive an :class:`AsyncSession` and never open the store around it.
+    """
+    provider = EngineSessionProvider(database)
+    async with provider.session(subject=subject) as session:
+        yield session
+
+
+async def get_master_data_db(
+    database: Annotated[Database, Depends(get_master_data_database)],
+    subject: Annotated[str, Depends(request_subject)],
+) -> AsyncIterator[AsyncSession]:
+    """Yield one transactional MASTER-DATA session for the request (ARCH-R3b / DEPLOY-R4).
+
+    Identical to :func:`get_db` (the ONE engine-owned ``SessionProvider`` seam, keyed on the
+    server-derived subject) except it opens on the master-data-write role's Database — the
+    only write surface for athlete-authored master-data. Under a per-role deployment this
+    credential cannot write the source-derived canonical tables or the agent-state store
+    (reciprocal denial, DEPLOY-R4); on a single-credential self-host it is the shared
+    canonical Database (the split is structural-by-config, opt-in at deploy).
     """
     provider = EngineSessionProvider(database)
     async with provider.session(subject=subject) as session:
@@ -153,6 +188,8 @@ __all__ = [
     "enforce_rate_limit",
     "get_database",
     "get_db",
+    "get_master_data_database",
+    "get_master_data_db",
     "get_rate_limiter",
     "get_settings",
     "request_subject",

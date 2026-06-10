@@ -55,15 +55,24 @@ def normalize_dsn(dsn: str) -> str:
     return dsn
 
 
-def create_engine_from_settings(settings: Settings | None = None) -> AsyncEngine:
+def create_engine_from_settings(
+    settings: Settings | None = None, *, dsn: str | None = None
+) -> AsyncEngine:
     """Create an :class:`AsyncEngine` from resolved settings.
 
     Raises if the DSN is absent (fail-closed; the config layer already enforces it).
+    ``dsn`` overrides the settings-resolved canonical DSN so a deployment can hand a layer
+    its OWN per-write-domain role credential (DEPLOY-R4) while reusing the same engine
+    construction (DSN-only backend selection, SQLite FK pragma, pooling).
     """
-    settings = settings or get_settings()
-    if settings.database_dsn is None:
-        raise RuntimeError("fail-closed: WATTWISE_DATABASE_DSN is required to create an engine")
-    dsn = normalize_dsn(settings.database_dsn.get_secret_value())
+    if dsn is None:
+        settings = settings or get_settings()
+        if settings.database_dsn is None:
+            raise RuntimeError(
+                "fail-closed: WATTWISE_DATABASE_DSN is required to create an engine"
+            )
+        dsn = settings.database_dsn.get_secret_value()
+    dsn = normalize_dsn(dsn)
     is_sqlite = dsn.startswith("sqlite")
     engine = create_async_engine(
         dsn,
@@ -84,10 +93,15 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
 
 
 class Database:
-    """Owns the engine + session factory for the process lifetime."""
+    """Owns the engine + session factory for the process lifetime.
 
-    def __init__(self, settings: Settings | None = None) -> None:
-        self._engine = create_engine_from_settings(settings)
+    ``dsn`` (optional) binds this Database to a specific per-write-domain role credential
+    (DEPLOY-R4) instead of the settings-resolved canonical DSN — e.g. the API's
+    master-data-write role (ARCH-R3b). Construction is otherwise identical (DSN-only).
+    """
+
+    def __init__(self, settings: Settings | None = None, *, dsn: str | None = None) -> None:
+        self._engine = create_engine_from_settings(settings, dsn=dsn)
         self._session_factory = create_session_factory(self._engine)
 
     @property

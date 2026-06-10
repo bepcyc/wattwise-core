@@ -151,12 +151,13 @@ def test_missing_dsn_fails_closed() -> None:
 
     The config layer normally guarantees ``database_dsn`` (it raises ConfigError if it is
     absent), so we exercise the engine builder's own defensive guard with a stub Settings
-    whose ``database_dsn`` is ``None``: it MUST refuse rather than build an engine on a
-    missing DSN.
+    whose agent-state-write DSN resolves to ``None`` (no canonical, no distinct agent-state
+    role): it MUST refuse rather than build an engine on a missing DSN.
     """
 
     class _NoDsnSettings:
-        database_dsn = None
+        def agent_state_write_dsn(self) -> None:
+            return None
 
     with pytest.raises(RuntimeError):
         create_agent_state_engine(_NoDsnSettings())  # type: ignore[arg-type]
