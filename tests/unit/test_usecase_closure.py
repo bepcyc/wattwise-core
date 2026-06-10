@@ -232,11 +232,17 @@ def test_default_config_ships_the_aggregate_aliases() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _covered_span(text: str, token: str) -> list[tuple[int, int]]:
+    """The positional coverage range of ``token``'s first occurrence (issue #4 semantics)."""
+    start = text.index(token)
+    return [(start, start + len(token))]
+
+
 def test_sweeping_an_uncovered_range_leaves_no_dangling_dash() -> None:
     """The live artifact: scrubbing an en-dash range must not leave the dash behind."""
     dash = "\u2013"
     text = f"тренируйся 5{dash}7 часов в неделю"
-    cleaned, removed = scrub_uncovered_numbers(text, set())
+    cleaned, removed = scrub_uncovered_numbers(text, [])
     assert removed == 1
     assert "5" not in cleaned and "7" not in cleaned
     assert dash not in cleaned and "\u2014" not in cleaned  # no dangling en/em dash
@@ -245,7 +251,7 @@ def test_sweeping_an_uncovered_range_leaves_no_dangling_dash() -> None:
 
 def test_sweeping_swallows_an_orphan_leading_dash_and_spaced_unit() -> None:
     """A dash before the number and a now-empty spaced unit go with the phrase."""
-    cleaned, removed = scrub_uncovered_numbers("ride easy \u2013 5-7 h on flat roads", set())
+    cleaned, removed = scrub_uncovered_numbers("ride easy \u2013 5-7 h on flat roads", [])
     assert removed == 1
     assert "\u2013" not in cleaned and "-" not in cleaned
     assert " h " not in f" {cleaned} "  # the spaced unit token did not survive empty
@@ -254,7 +260,8 @@ def test_sweeping_swallows_an_orphan_leading_dash_and_spaced_unit() -> None:
 
 def test_mixed_coverage_range_is_removed_whole_fail_closed() -> None:
     """A range with ANY unverified member is removed whole — never half a range."""
-    cleaned, removed = scrub_uncovered_numbers("hold 60-999 next week", {"60"})
+    text = "hold 60-999 next week"
+    cleaned, removed = scrub_uncovered_numbers(text, _covered_span(text, "60"))
     assert removed == 1
     assert "60" not in cleaned and "999" not in cleaned and "-" not in cleaned
 
@@ -262,9 +269,17 @@ def test_mixed_coverage_range_is_removed_whole_fail_closed() -> None:
 def test_safe_structures_and_covered_numbers_still_survive_the_sweep() -> None:
     """Dates, NxM structures, structural ordinal ranges, units, and covered values stay."""
     text = "Week 1-4: on 2026-06-08 do 3x12 at 45m total, fitness 60"
-    cleaned, removed = scrub_uncovered_numbers(text, {"60"})
+    cleaned, removed = scrub_uncovered_numbers(text, _covered_span(text, "60"))
     assert removed == 0
     assert cleaned == text
+
+
+def test_string_equal_token_outside_the_covered_range_is_still_swept() -> None:
+    """Coverage is POSITIONAL (issue #4): string equality with a covered value excuses nothing."""
+    text = "fitness 60 today, push 60 watts more"
+    cleaned, removed = scrub_uncovered_numbers(text, _covered_span(text, "60"))
+    assert removed == 1
+    assert cleaned == "fitness 60 today, push watts more"
 
 
 def test_claim_level_scrub_removes_the_whole_numeric_phrase() -> None:

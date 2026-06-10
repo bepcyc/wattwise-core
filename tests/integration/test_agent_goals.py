@@ -202,12 +202,6 @@ async def state_db(tmp_path: Path) -> AsyncIterator[AgentStateDatabase]:
         await db.dispose()
 
 
-def _xfail_mariadb(state_db: AgentStateDatabase) -> None:
-    """xfail the graph-driven legs on MariaDB pending the saver's 1020 fix (Core-B), like others."""
-    if state_db.engine.dialect.name in ("mysql", "mariadb"):  # pragma: no cover - sqlite default
-        pytest.xfail("MariaDB _ensure_thread 1020 race (Core-B checkpoint.py dependency)")
-
-
 @pytest.mark.asyncio
 async def test_plan_consumes_active_goal_into_compose_context(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
@@ -219,7 +213,6 @@ async def test_plan_consumes_active_goal_into_compose_context(
     prose context the model drafts from. Mutation-proof: if the engine does not read active goals
     into the inputs, the goal text never reaches the context and this assertion fails.
     """
-    _xfail_mariadb(state_db)
     model = _plan_model()
     engine = GraphAgentEngine(canonical, model, state_db=state_db)  # type: ignore[arg-type]
     await engine.plan_deliverable(athlete_id=ATHLETE_A, request="give me a week plan")
@@ -233,7 +226,6 @@ async def test_plan_does_not_consume_terminal_goal(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
 ) -> None:
     """Only ACTIVE goals flow; a terminal (abandoned) goal is NOT surfaced (GBO-R39 active-only)."""
-    _xfail_mariadb(state_db)
     model = _plan_model()
     engine = GraphAgentEngine(canonical, model, state_db=state_db)  # type: ignore[arg-type]
     await engine.plan_deliverable(athlete_id=ATHLETE_A, request="give me a week plan")
@@ -246,7 +238,6 @@ async def test_plan_does_not_consume_foreign_goal(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
 ) -> None:
     """A foreign athlete's active goal never leaks into this athlete's plan (AGT-SEC-R1)."""
-    _xfail_mariadb(state_db)
     model = _plan_model()
     engine = GraphAgentEngine(canonical, model, state_db=state_db)  # type: ignore[arg-type]
     await engine.plan_deliverable(athlete_id=ATHLETE_A, request="give me a week plan")

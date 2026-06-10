@@ -258,6 +258,10 @@ class Settings(BaseSettings):
     analytics__endurance_score_window_days: int = Field(ge=1)
     analytics__endurance_score_long_duration_s: int = Field(ge=1)
     analytics__endurance_score_short_duration_s: int = Field(ge=1)
+    # CP-R3/R4 pre-fit power-degeneracy epsilon (relative MMP power spread below which
+    # the fit refuses with INSUFFICIENT_DATA before any regression); the VALUE lives in
+    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraint.
+    analytics__cp_power_spread_epsilon: float = Field(gt=0, lt=1)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str

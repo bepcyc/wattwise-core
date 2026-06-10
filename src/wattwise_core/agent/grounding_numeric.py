@@ -1,22 +1,24 @@
-"""Numeric claim verification + the GROUND-R7 number machinery (QUAL-R9 size split).
+"""Per-claim NUMBER verification + the user-request ECHO path (doc 50 GROUND-R3/R5/R7).
 
-The focused sibling of :mod:`wattwise_core.agent.grounding` that owns everything NUMERIC in the
-fail-closed grounder: the config-loaded :class:`NumericTolerance` band, the per-claim NUMBER
-verifier (canonical match within tolerance, the user-request ECHO path, contradiction
-correction), the canonical-value display rendering, and the in-draft numeric span rewrite.
-Behaviour is identical to the prior inline definitions; this is purely a size decomposition that
-keeps ``grounding`` under the QUAL-R9 module ceiling. Everything here is pure, synchronous and
-deterministic (GRAPH-R4) — no model call, no awaits.
+The focused sibling of :mod:`wattwise_core.agent.grounding` (QUAL-R9 size split) that owns the
+per-claim verdict machinery the grounder dispatches on: the :class:`_Outcome` verdict+edit pair,
+the NUMBER verifier (canonical match within tolerance, contradiction correction, GROUND-R7) and
+the user-request ECHO path — a number the ATHLETE supplied in their own request (a plan's
+"5-7 hours a week") is the request's own constraint, not a canonical-data claim, so an echo of it
+grounds with a ``user_request`` citation instead of failing closed (GROUND-R3 scope, GROUND-R5).
 
-Cited requirements: GROUND-R1, GROUND-R2, GROUND-R3, GROUND-R5, GROUND-R7, QUAL-R9.
+The POSITIONAL primitives the published rewrite runs on (word-bounded token spans, character-RANGE
+coverage — issue #4) live in :mod:`wattwise_core.agent.grounding_match`; an echoed figure is
+republished VERBATIM over its own anchored span via the same
+:func:`~wattwise_core.agent.grounding_match._apply_number_scrub` path, so echo coverage is a
+character range too (never string membership) and an ambiguous bare-token echo fails closed like
+any other claim. Everything here is pure, synchronous and deterministic (GRAPH-R4).
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any
 
 from wattwise_core.agent.contracts import (
     Claim,
@@ -24,47 +26,14 @@ from wattwise_core.agent.contracts import (
     GroundingEvidence,
     GroundVerdict,
 )
-from wattwise_core.agent.grounding_sweep import NUMBER_RE, remove_numeric_span
-
-# Default numeric tolerance for matching a claimed metric value against the canonical
-# analytic (GROUND-R7). A claimed number within this band of the canonical value is treated
-# as a verbatim re-statement; anything outside is scrubbed/replaced. The default REL band is
-# wide enough to accept a model DISPLAYING the canonical value at sane human precision (e.g.
-# "your ctl is 6.7" for a canonical 6.7315, or a whole-number round of a small CTL/ATL/TSB),
-# while a FABRICATED number — wrong by tens of percent — is still scrubbed. The exact
-# threshold is config-loaded content (§16 / SKILL-R1 metric thresholds); this constant is the
-# fallback the OSS engine resolves it from, never a hidden hardcode of policy in the gate.
-_DEFAULT_REL_TOLERANCE = 0.02
-# Absolute floor so near-zero canonical values (e.g. tsb ≈ 0) still admit a 1-decimal
-# display ("0.0" for a canonical 0.004) without the relative band collapsing to nothing.
-_DEFAULT_ABS_TOLERANCE = 0.05
-# Decimal places the canonical value is rounded to when it REPLACES a recognized numeric span
-# in the published text (GROUND-R7). Config-loaded (§16); this is the no-config fallback.
-_DEFAULT_DISPLAY_DECIMALS = 1
-
-
-@dataclass(frozen=True, slots=True)
-class NumericTolerance:
-    """The numeric-match band the grounder accepts for a metric value (GROUND-R7).
-
-    Carried into :func:`ground` so the threshold is config-loaded content (§16 / SKILL-R1),
-    not a literal baked into the gate. ``rel`` is the relative band (a fraction of the
-    canonical magnitude) and ``abs_`` the absolute floor for near-zero canonical values; a
-    claimed value within EITHER band of the canonical value grounds. The defaults accept a
-    human-precision display of the canonical number and scrub a fabrication.
-
-    ``display_decimals`` is the precision the CANONICAL value is rounded to when it is PUBLISHED
-    in place of the model's numeric span (GROUND-R7 verbatim): the model's approximation — even
-    a within-tolerance one like "102" for a canonical 100 — is NEVER what reaches the athlete;
-    the canonical value, rounded for a human display, always is.
-    """
-
-    rel: float = _DEFAULT_REL_TOLERANCE
-    abs_: float = _DEFAULT_ABS_TOLERANCE
-    display_decimals: int = _DEFAULT_DISPLAY_DECIMALS
-
-
-_DEFAULT_TOLERANCE = NumericTolerance()
+from wattwise_core.agent.grounding_match import (
+    _THOUSANDS_AWARE_NUMBER_RE,
+    NumericTolerance,
+    _canonical_metric,
+    _metric_citation,
+    _render_value,
+    _within_tolerance,
+)
 
 
 class _Outcome:
@@ -107,13 +76,16 @@ def _parse_request_values(request_numbers: Iterable[str]) -> frozenset[float]:
 def _request_echo(claim: Claim) -> _Outcome:
     """Ground a number as an ECHO of the athlete's own request (the plan constraint).
 
-    The published span is left exactly as the user-supplied figure (no canonical rewrite — there
-    is no canonical analytic behind it); the citation records the ``user_request`` provenance so a
-    deliverable can distinguish an echoed constraint from a canonical metric (GROUND-R5). The
-    claim's own numeric token is re-published verbatim so the numeric-coverage sweep treats it as
-    covered.
+    The published figure is the user-supplied token re-published VERBATIM (no canonical rewrite —
+    there is no canonical analytic behind it); the citation records the ``user_request``
+    provenance so a deliverable can distinguish an echoed constraint from a canonical metric
+    (GROUND-R5). Republishing the claim's own token through the positional rewrite path
+    (:func:`~wattwise_core.agent.grounding_match._apply_number_scrub`) marks the token's OWN
+    character range as covered — never every string-equal occurrence (issue #4): the echo
+    legitimizes the value for ITS anchored span only, and an ambiguous bare-token echo (multiple
+    uncovered occurrences, no anchor) publishes nothing and is swept (fail-closed).
     """
-    token_match = NUMBER_RE.search(claim.text)
+    token_match = _THOUSANDS_AWARE_NUMBER_RE.search(claim.text)
     token = token_match.group(0) if token_match is not None else _render_value(claim.value or 0, 1)
     citation = {"kind": "user_request", "record_id": "user_request", "value": claim.value}
     return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), token)
@@ -157,7 +129,8 @@ def _verify_number(
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
     # The PUBLISHED figure is ALWAYS the canonical value rounded to display precision — never the
     # model's own number (GROUND-R7). ``scrub_text`` carries that bare canonical display token; the
-    # caller (:func:`_apply_number_scrub`) writes it over the model's numeric token in the draft.
+    # caller (:func:`~wattwise_core.agent.grounding_match._apply_number_scrub`) writes it over the
+    # model's numeric token in the claim's OWN anchored span of the draft (issue #4).
     canonical_display = _render_value(canonical, tolerance.display_decimals)
     if _within_tolerance(claim.value, canonical, tolerance):
         citation = _metric_citation(claim, canonical)
@@ -165,106 +138,4 @@ def _verify_number(
     return _Outcome(GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), canonical_display)
 
 
-# --- numeric helpers (GROUND-R7) ---
-
-
-def _canonical_metric(evidence: GroundingEvidence, metric: str, ref: str | None) -> float | None:
-    """Read the canonical value for a ``(metric, as_of)`` request, fail-closed (GROUND-R7).
-
-    The base :class:`GroundingEvidence` contract's ``metric_value`` is async; the grounder
-    is synchronous and deterministic, so the caller resolves snapshots ahead of time onto
-    an optional synchronous ``metric_snapshot(metric, as_of)`` accessor (the resolved-ahead
-    path). When that accessor is absent, or returns a non-finite/unavailable value, this
-    returns ``None`` — the number is then scrubbed, never surfaced as a placeholder. The
-    grounder never awaits inside ``ground``.
-    """
-    accessor = getattr(evidence, "metric_snapshot", None)
-    if accessor is None:
-        return None
-    raw: Any = accessor(metric, ref)
-    return _as_float(raw)
-
-
-def _as_float(raw: Any) -> float | None:
-    """Coerce a canonical value to a finite float, or ``None`` (fail-closed)."""
-    if raw is None or isinstance(raw, bool):
-        return None
-    if isinstance(raw, (int, float)):
-        value = float(raw)
-        return value if math.isfinite(value) else None
-    return None
-
-
-def _within_tolerance(
-    claimed: float, canonical: float, tolerance: NumericTolerance = _DEFAULT_TOLERANCE
-) -> bool:
-    """True iff a claimed number matches the canonical value within tolerance (GROUND-R7)."""
-    if not (math.isfinite(claimed) and math.isfinite(canonical)):
-        return False
-    return math.isclose(
-        claimed,
-        canonical,
-        rel_tol=tolerance.rel,
-        abs_tol=tolerance.abs_,
-    )
-
-
-def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
-    """Citation for a grounded number: canonical metric id + verbatim value (GROUND-R5/R7).
-
-    ``record_id`` is the stable canonical reference to the analytic the number was read
-    from — ``{metric}@{as_of}`` (or just the metric when no date) — so a deliverable layer
-    keeps the citation (a grounded number MUST carry a resolvable citation, GROUND-R5; a
-    citation with no record id is dropped downstream and the number would ship uncited).
-    """
-    record_id = f"{claim.metric}@{claim.ref}" if claim.ref else str(claim.metric)
-    return {
-        "kind": "metric",
-        "record_id": record_id,
-        "metric": claim.metric,
-        "value": canonical,
-        "as_of": claim.ref,
-    }
-
-
-def _apply_number_scrub(text: str, claim: Claim, replacement: str) -> tuple[str, str | None]:
-    """Rewrite the model's numeric token in ``text`` to the canonical value, or remove it (R7).
-
-    For a NUMBER claim the published figure is ALWAYS the canonical value (``replacement`` =
-    its display string, or ``""`` to remove an ungrounded/unavailable number). This finds the
-    model's own numeric token — the first number in ``claim.text`` (e.g. ``"63.50"`` from
-    ``"your fitness is at 63.50"``) — and replaces THAT token in the draft, so the rewrite is
-    robust to the model not reproducing ``claim.text`` verbatim (case / wording drift). Returns the
-    edited text and the canonical display string actually published (so the numeric-coverage sweep
-    treats it as covered), or ``None`` when nothing was published (removed / token not found).
-    """
-    token_match = NUMBER_RE.search(claim.text)
-    token = token_match.group(0) if token_match is not None else claim.text
-    idx = text.find(token)
-    if idx == -1:
-        # The model's token is not literally in the draft; nothing to publish/remove here. The
-        # numeric sweep is the backstop for any uncovered number that DID reach the draft.
-        return text, replacement or None
-    if replacement == "":
-        # Remove by the WHOLE containing numeric phrase (a "5-7" range scrubs as one span, plus
-        # any orphan leading dash / trailing empty unit), so a claim-level scrub never leaves a
-        # dangling range dash or a bare unit in the prose (VOICE-R2 clean copy).
-        return remove_numeric_span(text, idx, idx + len(token)), None
-    edited = text[:idx] + replacement + text[idx + len(token) :]
-    return edited, replacement
-
-
-def _render_value(value: float, decimals: int) -> str:
-    """Render the canonical value at ``decimals`` precision, dropping a trailing ``.0``.
-
-    Rounds to the configured display precision (so a high-precision canonical value surfaces as
-    the human number a coach would say) and, when the rounded value is integral, renders it
-    without a trailing ``.0`` for display parity (``84.0`` -> ``"84"``).
-    """
-    rounded = round(value, decimals)
-    if rounded == int(rounded):
-        return str(int(rounded))
-    return f"{rounded:.{decimals}f}"
-
-
-__all__ = ["NumericTolerance"]
+__all__ = ["_Outcome", "_parse_request_values", "_request_echo", "_scrubbed", "_verify_number"]

@@ -21,7 +21,7 @@ from sqlalchemy import Table
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
 
@@ -88,9 +88,15 @@ def build_upsert(
         if update_columns:
             set_ = {c: mstmt.inserted[c] for c in update_columns}
             return mstmt.on_duplicate_key_update(**set_)
-        # MariaDB insert-or-ignore: update a conflict key to itself (a no-op).
-        first_key = conflict_keys[0]
-        return mstmt.on_duplicate_key_update(**{first_key: mstmt.inserted[first_key]})
+        # MariaDB insert-or-ignore: a TRUE ``INSERT IGNORE`` — never the
+        # update-a-key-to-itself ``ON DUPLICATE KEY UPDATE`` trick. The self-assignment
+        # still WRITES the conflicting row, and under MariaDB >= 11.6's default
+        # ``innodb_snapshot_isolation=ON`` (REPEATABLE READ) writing a row whose
+        # committed version is newer than the transaction's read view fails with
+        # error 1020 ``ER_CHECKREAD`` — exactly the concurrent get-or-create race this
+        # branch exists to absorb. ``INSERT IGNORE`` skips the conflicting row without
+        # writing it, so both racers succeed (UPS-R2 atomicity, no catch-and-retry).
+        return mstmt.prefix_with("IGNORE")
     raise UnsupportedDialectError(
         f"unsupported dialect {dialect!r}; wattwise-core supports sqlite, postgresql, mariadb"
     )
@@ -136,4 +142,39 @@ async def upsert_many(
     await session.execute(stmt)
 
 
-__all__ = ["UnsupportedDialectError", "build_upsert", "upsert", "upsert_many"]
+async def ensure_row(
+    session_factory: async_sessionmaker[AsyncSession],
+    table: Table,
+    values: Mapping[str, Any],
+    *,
+    conflict_keys: Sequence[str],
+) -> None:
+    """Atomically guarantee a row EXISTS (insert-or-ignore) in its OWN short transaction.
+
+    The get-or-create seam for concurrent first-touches (UPS-R2): both racers issue ONE
+    atomic statement and both succeed — never a plain ``INSERT`` whose loser raises, and
+    never catch-and-retry. The statement runs on a FRESH session committed immediately,
+    NOT inside the caller's (possibly long-lived) transaction, because of a
+    MySQL-family semantic this seam must own: MariaDB >= 11.6 defaults
+    ``innodb_snapshot_isolation=ON``, under which a REPEATABLE READ statement that
+    touches a conflict row committed AFTER the transaction's read view fails with
+    error 1020 ``ER_CHECKREAD`` ("Record has changed since last read") — this hits
+    plain ``INSERT``, ``INSERT IGNORE`` and ``ON DUPLICATE KEY UPDATE`` alike. The
+    MySQL-family leg therefore runs the statement at ``READ COMMITTED`` (per-statement
+    read view; ``innodb_snapshot_isolation`` applies only to REPEATABLE READ), which
+    removes the failure mode at the root instead of retrying around it. This is dialect
+    knowledge, so it lives HERE — the one sanctioned dialect-aware module (RUN-R7-AC).
+
+    On return the row is committed and visible to NEW snapshots; a caller inside an
+    older REPEATABLE READ snapshot must re-read through a fresh session/connection.
+    """
+    async with session_factory() as session:
+        dialect = _dialect_name(session)
+        if dialect in ("mysql", "mariadb"):
+            await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
+        stmt = build_upsert(dialect, table, values, conflict_keys, update_columns=[])
+        await session.execute(stmt)
+        await session.commit()
+
+
+__all__ = ["UnsupportedDialectError", "build_upsert", "ensure_row", "upsert", "upsert_many"]

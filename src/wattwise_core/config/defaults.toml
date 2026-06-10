@@ -163,6 +163,15 @@ endurance_score_window_days = 90
 # Power-curve durations for the durability ratio MMP(long)/MMP(short) (ES-R1: 20 vs 5 min).
 endurance_score_long_duration_s = 1200
 endurance_score_short_duration_s = 300
+# CP-R3/R4 pre-fit degeneracy gate: when the distinct in-domain MMP powers are
+# (near-)constant — relative power spread (max - min) / max|P| strictly below this
+# epsilon — the CP/W' fit is REFUSED before any regression as
+# Unavailable(INSUFFICIENT_DATA) (points too clustered in power to determine CP and
+# W' separately). The verdict must be decided by this declared gate, never by
+# platform-dependent fit numerics (a perfectly linear W = P*t system can "converge"
+# with a tiny spurious positive intercept on one BLAS build and a non-positive one on
+# another). The VALUE lives here (CFG-R1a), never a code literal.
+cp_power_spread_epsilon = 1e-6
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.

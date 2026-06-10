@@ -18,6 +18,7 @@ conflict path was never exercised). PostgreSQL / MariaDB legs run when ``WATTWIS
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -30,13 +31,14 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import WRITES_IDX_MAP, empty_checkpoint
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import wattwise_core.agent.memory  # noqa: F401  (registers agent_memory_item on AgentStateBase)
 from wattwise_core.agent.checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
+    CheckpointError,
     CheckpointIdentityError,
     CheckpointSchemaVersionError,
     SqlAlchemyCheckpointSaver,
@@ -47,6 +49,7 @@ from wattwise_core.agent.state_store import (
     AgentThread,
     AgentWrite,
 )
+from wattwise_core.persistence.upsert import ensure_row
 
 if TYPE_CHECKING:
     from _pytest.mark.structures import ParameterSet
@@ -336,26 +339,20 @@ async def test_cross_identity_write_is_refused(
 async def test_cross_identity_refused_on_probe_path(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """CKPT-R3 holds on the POST-ROLLBACK probe branch, not only the fast-path (kills MUT-1).
+    """CKPT-R3 holds on the post-ensure resolve AFTER a collided create (kills MUT-1).
 
-    ``test_cross_identity_write_is_refused`` short-circuits at the FIRST ``_resolve_thread``
-    in ``_ensure_thread`` (the fast-path before any INSERT), so the IntegrityError probe
-    branch (``_ensure_thread`` rollback -> fresh-session re-resolve) is NEVER reached for a
-    cross-identity caller. This test forces execution INTO that probe and pins that it still
-    refuses a thread owned by another athlete.
+    ``_ensure_thread`` is ensure-first: the atomic insert-or-ignore (UPS-R2 seam) runs
+    BEFORE the resolve, so a cross-identity caller's create statement genuinely collides
+    with the other athlete's committed row (PK ``thread_id``) and is absorbed by the
+    database — and the ONLY thing standing between that absorbed collision and silently
+    adopting the foreign row is the post-ensure ``_resolve_thread``. This test drives
+    athlete **B** through that exact path against athlete A's committed thread and pins
+    that the post-ensure resolve runs and REFUSES (``CheckpointIdentityError``), never
+    returns A's row under identity B.
 
-    Setup: athlete A's thread row for thread_id ``T`` is committed first. Then athlete **B**'s
-    saver is driven through ``_ensure_thread(T)``, but its ``_resolve_thread`` is monkeypatched
-    so the FIRST invocation (the fast-path) returns ``None`` — making B's saver believe the
-    thread is absent and attempt the INSERT. That INSERT of ``(T, B, conv)`` collides with A's
-    committed row on the ``thread_id`` primary key, raising IntegrityError; the saver rolls
-    back and re-resolves through a FRESH session. Every invocation AFTER the first delegates to
-    the REAL ``_resolve_thread``, so the probe genuinely loads A's row under identity B and MUST
-    raise ``CheckpointIdentityError`` — it must NOT silently adopt/return the cross-identity row.
-
-    MUT-1 (probe bypassing ``_resolve_thread``, e.g. ``session.get(AgentThread, thread_id)``)
-    drops the athlete-scope check, so the cross-identity row would be returned instead of
-    refused, and this test MUST fail.
+    MUT-1 (post-ensure resolve bypassing ``_resolve_thread``, e.g.
+    ``session.get(AgentThread, thread_id)``) drops the athlete-scope check: B would adopt
+    A's row, ``aput`` would proceed, no error would surface — this test MUST fail.
     """
     cross_thread = "thread-probe-cross"
 
@@ -363,63 +360,64 @@ async def test_cross_identity_refused_on_probe_path(
     saver_a = _saver(factory, athlete_id=ATHLETE_A, conversation_id="conv-A")
     await saver_a.aput(_config(thread_id=cross_thread), _checkpoint("cp-a")[1], _metadata(), {})
 
-    # Athlete B will collide on the PK INSERT and reach the probe branch.
+    # Athlete B's ensure statement collides with A's row; the post-ensure resolve must refuse.
     saver_b = _saver(factory, athlete_id=ATHLETE_B, conversation_id="conv-B")
     real_resolve = type(saver_b)._resolve_thread  # unbound; called with (saver, session, tid)
     calls = {"n": 0}
 
-    async def _resolve_first_miss(session: AsyncSession, thread_id: str) -> AgentThread | None:
-        # First call = the ``_ensure_thread`` fast-path: pretend the thread is absent so B
-        # proceeds to INSERT (and collides). Every later call = the probe: use the REAL
-        # resolver so it loads A's row under identity B and refuses (CKPT-R3).
+    async def _counting_resolve(session: AsyncSession, thread_id: str) -> AgentThread | None:
+        # Delegate to the REAL resolver, counting invocations so the test proves the
+        # post-ensure athlete-scope check actually executed (not short-circuited away).
         calls["n"] += 1
-        if calls["n"] == 1:
-            return None
         return await real_resolve(saver_b, session, thread_id)
 
-    saver_b._resolve_thread = _resolve_first_miss  # type: ignore[method-assign]
+    saver_b._resolve_thread = _counting_resolve  # type: ignore[method-assign]
 
     with pytest.raises(CheckpointIdentityError):
         await saver_b.aput(_config(thread_id=cross_thread), _checkpoint("cp-b")[1], _metadata(), {})
-    # The fast-path miss + at least one probe call must both have run (probe truly exercised).
-    assert calls["n"] >= 2, "the IntegrityError probe branch was not reached"
+    assert calls["n"] >= 1, "the post-ensure _resolve_thread athlete-scope check did not run"
 
 
 async def test_genuine_integrity_error_fails_closed(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A non-race IntegrityError re-raises after the probe still misses (fail-closed; kills MUT-2).
+    """A non-race constraint violation fails CLOSED out of ``_ensure_thread`` (kills MUT-2).
 
-    The probe branch may only swallow the BENIGN concurrent-create race (where a fresh-session
-    re-resolve finds the winner's committed row). A genuine constraint violation whose row does
-    NOT resolve afterward MUST fail closed (re-raise), never be silently swallowed.
+    The ensure seam may only absorb the BENIGN concurrent-create collision on the
+    ``thread_id`` key it is declared on (after which the row resolves). A genuine
+    violation of a DIFFERENT constraint, whose requested row therefore does NOT exist
+    afterward, MUST surface as an error — never a silent success.
 
     Setup: one saver bound to (A, ``conv-fc``) commits a thread at ``T1``. We then call
     ``_ensure_thread`` DIRECTLY (on its own session) for a DIFFERENT thread_id ``T2``;
-    ``_ensure_thread`` finds no ``T2`` row, INSERTs ``(T2, A, conv-fc)``, which collides with the
-    ``T1`` row on the ``UNIQUE(athlete_id, conversation_id)`` constraint -> IntegrityError ->
-    rollback -> the probe re-resolves ``_resolve_thread(probe, "T2")`` -> ``T2`` still does not
-    exist -> ``existing is None`` -> MUST re-raise. The IntegrityError must propagate straight out
-    of ``_ensure_thread``.
+    the ensure statement inserts ``(T2, A, conv-fc)``, which collides with the ``T1`` row
+    on the ``UNIQUE(athlete_id, conversation_id)`` constraint — NOT the declared
+    ``thread_id`` conflict key. On PostgreSQL/SQLite the ``ON CONFLICT (thread_id)``
+    statement re-raises that violation as ``IntegrityError``; on MariaDB ``INSERT
+    IGNORE`` absorbs it, the ``T2`` row still does not exist, and the post-ensure
+    resolve fails closed with ``CheckpointError``. Either way an error propagates
+    straight out of ``_ensure_thread``.
 
-    Calling ``_ensure_thread`` directly (rather than via ``aput``) is what makes this assertion
-    NON-VACUOUS on ALL three backends: if MUT-2 swallows the error and ``aput`` then proceeds to
-    INSERT the ``agent_checkpoint`` row, PG/MariaDB would raise a DOWNSTREAM FK violation (T2's
-    thread row was never created) and mask the mutation — a false green. Pinning the error at the
-    ``_ensure_thread`` boundary isolates the probe's fail-closed re-raise itself.
+    Calling ``_ensure_thread`` directly (rather than via ``aput``) is what makes this
+    assertion NON-VACUOUS on ALL three backends: if MUT-2 swallows the error and ``aput``
+    then proceeds to INSERT the ``agent_checkpoint`` row, PG/MariaDB would raise a
+    DOWNSTREAM FK violation (T2's thread row was never created) and mask the mutation —
+    a false green. Pinning the error at the ``_ensure_thread`` boundary isolates the
+    seam's fail-closed contract itself.
 
-    MUT-2 (probe made fail-open, e.g. ``return existing`` / ``return None`` instead of ``raise``
-    when ``existing is None``) swallows this genuine error, so this test MUST fail.
+    MUT-2 (the post-ensure miss made fail-open, e.g. ``return existing`` / ``return
+    None`` instead of raising when the row did not resolve) swallows this genuine error,
+    so this test MUST fail.
     """
     saver = _saver(factory, athlete_id=ATHLETE_A, conversation_id="conv-fc")
     # T1 occupies (A, conv-fc) — the unique pair the T2 insert will collide with.
     await saver.aput(_config(thread_id="T1"), _checkpoint("cp-t1")[1], _metadata(), {})
 
-    # T2 is a new thread_id but the SAME (athlete, conversation) -> UNIQUE violation that does
-    # NOT correspond to a concurrent create of T2, so the probe re-resolve of T2 stays empty and
-    # the probe must re-raise. Assert at the _ensure_thread boundary so no downstream INSERT can
+    # T2 is a new thread_id but the SAME (athlete, conversation) -> a UNIQUE violation that
+    # does NOT correspond to a concurrent create of T2, so T2 never exists and the ensure
+    # must fail closed. Assert at the _ensure_thread boundary so no downstream INSERT can
     # mask the mutation on any backend.
-    with pytest.raises(IntegrityError):
+    with pytest.raises((IntegrityError, CheckpointError)):
         async with factory() as session:
             await saver._ensure_thread(session, "T2")
 
@@ -579,3 +577,41 @@ async def test_concurrent_consume_exactly_one_wins(
 
     rows = await _interrupt_rows(factory, THREAD_ID)
     assert [r.status for r in rows] == ["consumed"], "the single live row ended consumed once"
+
+
+async def test_ensure_row_isolation_does_not_stick_to_the_pooled_connection() -> None:
+    """``ensure_row``'s READ COMMITTED leg never leaks isolation into later checkouts (UPS-R2).
+
+    The MySQL-family leg of :func:`ensure_row` runs its statement at ``READ COMMITTED`` via a
+    per-connection execution option. SQLAlchemy resets a checkout-time isolation override on
+    pool check-in (the dialect's ``reset_isolation_level``); this pins that invariant on a REAL
+    MariaDB pool sized to ONE connection, so the very same DBAPI connection is re-checked-out
+    and must report the server default (REPEATABLE-READ) again — a sticky override would
+    silently run every later transaction at the wrong isolation.
+    """
+    maria = os.environ.get("WATTWISE_MARIADB_DSN")
+    if not maria:
+        pytest.skip("no MariaDB DSN (container leg only)")
+    engine = create_async_engine(maria, pool_size=1, max_overflow=0)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(AgentStateBase.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        await ensure_row(
+            factory,
+            AgentThread.__table__,
+            {
+                "thread_id": f"iso-{uuid.uuid4()}",
+                "athlete_id": uuid.uuid4(),
+                "conversation_id": "iso",
+                "created_at": _dt.datetime.now(_dt.UTC),
+            },
+            conflict_keys=["thread_id"],
+        )
+        async with factory() as probe:
+            level = (await probe.execute(text("SELECT @@transaction_isolation"))).scalar_one()
+        assert str(level).upper().replace("_", "-") == "REPEATABLE-READ", (
+            f"isolation leaked across pool check-in: {level!r}"
+        )
+    finally:
+        await engine.dispose()
