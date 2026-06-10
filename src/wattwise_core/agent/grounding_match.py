@@ -29,7 +29,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from wattwise_core.agent.contracts import Claim, GroundingEvidence
-from wattwise_core.agent.grounding_sweep import NUMBER_RE
 
 # Default numeric tolerance for matching a claimed metric value against the canonical
 # analytic (GROUND-R7). A claimed number within this band of the canonical value is treated
@@ -131,6 +130,12 @@ def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
     }
 
 
+#: Numeric-token extraction that keeps a thousands-separated figure as ONE token
+#: ("1,000" / "12,345.6"), so its rewrite replaces the whole figure instead of splicing
+#: the canonical value over the leading digit group (issue #4 review, finding 2).
+_THOUSANDS_AWARE_NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+
+
 def bounded_number_pattern(token: str) -> re.Pattern[str]:
     """Compile a word-bounded pattern for a numeric token (GROUND-R7, issue #4).
 
@@ -199,7 +204,7 @@ def find_claim_token_span(
     the token, or ``None`` when it is not present — the numeric-coverage sweep then owns
     fail-closure for any digits that DID reach the draft (GROUND-R3).
     """
-    token_match = NUMBER_RE.search(claim.text)
+    token_match = _THOUSANDS_AWARE_NUMBER_RE.search(claim.text)
     token = token_match.group(0) if token_match is not None else claim.text
     pattern = bounded_number_pattern(token)
     if token != claim.text:
@@ -209,9 +214,19 @@ def find_claim_token_span(
                 continue
             if not ranges_overlap(covered, inner.start(), inner.end()):
                 return inner.span()
-    for match in pattern.finditer(text):
-        if not ranges_overlap(covered, match.start(), match.end()):
-            return match.span()
+    uncovered = [
+        m.span() for m in pattern.finditer(text) if not ranges_overlap(covered, m.start(), m.end())
+    ]
+    if token == claim.text and len(uncovered) > 1:
+        # Bare-token claim with MULTIPLE uncovered occurrences: there is no anchor to say
+        # WHICH occurrence this claim means, and claim-list order is not a semantic signal
+        # (the extractor guarantees no ordering, STRUCT-R5). Guessing put canonical values
+        # on each other's spans when list order and text order diverged (issue #4 review,
+        # finding 1) — so ambiguity fails CLOSED: no span, the value is not published, and
+        # the uncovered occurrences are swept + downgraded rather than swapped.
+        return None
+    if uncovered:
+        return uncovered[0]
     return None
 
 
