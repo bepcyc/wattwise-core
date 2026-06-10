@@ -21,6 +21,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ValidationError
 
 from wattwise_core.agent.contracts import ChatModel
+from wattwise_core.observability import metrics as obs_metrics
 from wattwise_core.observability.logging import get_logger
 
 _DEFAULT_MAX_ATTEMPTS = 3
@@ -87,6 +88,10 @@ async def run_structured[M: BaseModel](
             return await model.structured(system=system, data=data, schema=schema)
         except (ValidationError, ValueError) as exc:
             last_error = exc
+            # OBS-R4 / AGT-OBS-R7: count the structured-output validation failure on the
+            # production metrics surface so the validation-failure rate is alertable, not only
+            # visible in the offline eval.
+            obs_metrics.get_registry().increment(obs_metrics.VALIDATION_FAILURES)
             _logger.warning(
                 "structured_output_retry",
                 schema=schema_name,
