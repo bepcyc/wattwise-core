@@ -34,7 +34,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -46,7 +46,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
         with: { fetch-depth: 0 }
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -69,7 +69,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -80,7 +80,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -96,7 +96,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -110,7 +110,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -124,7 +124,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -136,7 +136,7 @@ jobs:
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
         with: { fetch-depth: 0 }
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just gitleaks trivy
       - run: just install
@@ -147,7 +147,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -173,7 +173,7 @@ jobs:
       WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@postgres:5432/wattwise
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -219,7 +219,7 @@ jobs:
       WATTWISE_MARIADB_DSN: mysql+aiomysql://wattwise:wattwise@mariadb:3306/wattwise
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -263,7 +263,7 @@ jobs:
       WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@postgres:5432/wattwise
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -284,7 +284,7 @@ jobs:
     needs: [lint, type-check, fast-tests]
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
@@ -299,7 +299,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -340,7 +340,7 @@ jobs:
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
         with: { fetch-depth: 0 }
-      - uses: https://github.com/astral-sh/setup-uv@v8
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just trivy syft
       - name: Registry login (Forgejo OCI)
