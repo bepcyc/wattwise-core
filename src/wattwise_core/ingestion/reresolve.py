@@ -27,12 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.enums import GboType
 from wattwise_core.ingestion._candidate_store import _superseded_native_id
-from wattwise_core.ingestion._mapping import _parse_date
-from wattwise_core.ingestion.ingest import (
-    IngestService,
+from wattwise_core.ingestion._ingest_steps import (
     _activity_candidates,
     _wellness_candidates,
 )
+from wattwise_core.ingestion._mapping import _parse_date
+from wattwise_core.ingestion.ingest import IngestService
 from wattwise_core.persistence.models import (
     Activity,
     ActivityFile,

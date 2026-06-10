@@ -18,19 +18,21 @@ import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import mmp_cp as _mmp
+from wattwise_core.analytics.constants import SIGNATURE_MIN_FIT_R2
 from wattwise_core.analytics.result import Computed, MetricResult, is_computed
 from wattwise_core.analytics.series import Stream, resample_to_1hz
-from wattwise_core.domain.enums import StreamChannelName
+from wattwise_core.domain.enums import SignatureOrigin, StreamChannelName, StreamSetKind
 from wattwise_core.persistence.localdate import (
     MissingReferenceTimezone,
     project_local_date,
 )
 from wattwise_core.persistence.models import (
     Activity,
+    ActivityStreamSet,
     Athlete,
     DailyWellness,
     FitnessSignature,
@@ -278,6 +280,70 @@ async def _load_threshold_history(
     return list((await session.execute(stmt)).scalars().all())
 
 
+def _signature_fit_acceptable(sig: FitnessSignature) -> bool:
+    """GBO-R28 fail-closed gate for a stored MODELED signature's fit quality.
+
+    A modeled signature MUST carry ``fit_quality`` (GBO-R28); one without it, or whose
+    R-squared sits below the stated configurable floor
+    (``analytics.signature_min_fit_r2``), is refused — the caller surfaces a typed gap
+    instead of thresholds derived from a bad fit. Non-modeled origins (measured /
+    user_entered / source_provided) are not fit-gated.
+    """
+    if sig.origin != SignatureOrigin.MODELED:
+        return True
+    quality = sig.fit_quality or {}
+    r2 = quality.get("r_squared", quality.get("r2"))
+    if not isinstance(r2, int | float):
+        return False  # modeled with no stated fit quality: refuse (fail-closed)
+    return float(r2) >= SIGNATURE_MIN_FIT_R2
+
+
+async def _load_effective_signature(
+    session: AsyncSession, athlete_id: str, signature_type: str, as_of: _dt.date
+) -> FitnessSignature | None:
+    """The signature row effective as-of ``as_of`` in scope, or ``None`` (GBO-R27).
+
+    Honors the effective-dated interval ``[effective_date, effective_to)``: a row whose
+    interval was CLOSED at or before ``as_of`` never resolves, so a superseded signature
+    cannot shadow its successor. Fit-gating (GBO-R28) is the caller's concern.
+    """
+    as_of_instant = _dt.datetime.combine(as_of, _dt.time.min, tzinfo=_dt.UTC)
+    stmt = (
+        select(FitnessSignature)
+        .where(
+            FitnessSignature.athlete_id == _uid(athlete_id),
+            FitnessSignature.signature_type == signature_type,
+            FitnessSignature.effective_date <= as_of,
+            or_(
+                FitnessSignature.effective_to.is_(None),
+                FitnessSignature.effective_to > as_of_instant,
+            ),
+        )
+        .order_by(FitnessSignature.effective_date.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _load_activity_channels(
+    session: AsyncSession, activity_id: str
+) -> dict[StreamChannelName, Stream]:
+    """Load the activity's stream channels as analytic streams, keyed by channel."""
+    stmt = select(ActivityStreamSet).where(
+        ActivityStreamSet.activity_id == _uid(activity_id)
+    )
+    stream_set = (await session.execute(stmt)).scalar_one_or_none()
+    if stream_set is None:
+        return {}
+    cstmt = select(StreamChannel).where(
+        StreamChannel.stream_set_id == stream_set.stream_set_id,
+        StreamChannel.set_kind == StreamSetKind.ACTIVITY,
+    )
+    channels = (await session.execute(cstmt)).scalars().all()
+    rate = float(stream_set.sample_rate_hz) if stream_set.sample_rate_hz else 1.0
+    return {c.channel: _channel_to_stream(c, rate) for c in channels}
+
+
 def _better_mmp(
     candidate: Computed[_mmp.MMPWindow], current: MetricResult[_mmp.MMPWindow]
 ) -> bool:
@@ -296,14 +362,17 @@ __all__ = [
     "_f",
     "_fold_curve_point",
     "_hrv_baseline_midpoint",
+    "_load_activity_channels",
     "_load_athlete",
     "_load_athlete_or_fail",
     "_load_athlete_sex",
     "_load_earliest_activity_date",
+    "_load_effective_signature",
     "_load_threshold_history",
     "_load_wellness_hrv_baseline",
     "_load_wellness_hrv_summary",
     "_load_wellness_rr",
     "_num_or_nan",
+    "_signature_fit_acceptable",
     "_uid",
 ]

@@ -19,7 +19,6 @@ import datetime as _dt
 from collections import defaultdict
 from dataclasses import dataclass
 
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import decoupling as _dec
@@ -34,20 +33,21 @@ from wattwise_core.analytics import wbal as _wbal
 from wattwise_core.analytics._service_loaders import (
     _activities_in_local_range,
     _activity_local_date,
-    _channel_to_stream,
     _f,
     _fold_curve_point,
+    _load_activity_channels,
     _load_athlete,
     _load_athlete_or_fail,
     _load_athlete_sex,
     _load_earliest_activity_date,
+    _load_effective_signature,
     _load_threshold_history,
     _load_wellness_hrv_baseline,
     _load_wellness_hrv_summary,
     _load_wellness_rr,
+    _signature_fit_acceptable,
     _uid,
 )
-from wattwise_core.analytics.constants import SIGNATURE_MIN_FIT_R2
 from wattwise_core.analytics.result import (
     Computed,
     MetricResult,
@@ -57,41 +57,12 @@ from wattwise_core.analytics.result import (
 )
 from wattwise_core.analytics.series import Stream, resample_to_1hz
 from wattwise_core.domain.coverage import Coverage
-from wattwise_core.domain.enums import (
-    Fidelity,
-    SignatureOrigin,
-    StreamChannelName,
-    StreamSetKind,
-)
-from wattwise_core.persistence.models import (
-    Activity,
-    ActivityStreamSet,
-    Athlete,
-    FitnessSignature,
-    StreamChannel,
-)
+from wattwise_core.domain.enums import Fidelity, StreamChannelName
+from wattwise_core.persistence.models import Activity, Athlete, FitnessSignature
 
 ENGINE_VERSION = "analytics-1"
 
 _MISSING = UnavailableReason.MISSING_REQUIRED_INPUT
-
-
-def _signature_fit_acceptable(sig: FitnessSignature) -> bool:
-    """GBO-R28 fail-closed gate for a stored MODELED signature's fit quality.
-
-    A modeled signature MUST carry ``fit_quality`` (GBO-R28); one without it, or whose
-    R-squared sits below the stated configurable floor
-    (``analytics.signature_min_fit_r2``), is refused — the caller surfaces a typed gap
-    instead of thresholds derived from a bad fit. Non-modeled origins (measured /
-    user_entered / source_provided) are not fit-gated.
-    """
-    if sig.origin != SignatureOrigin.MODELED:
-        return True
-    quality = sig.fit_quality or {}
-    r2 = quality.get("r_squared", quality.get("r2"))
-    if not isinstance(r2, int | float):
-        return False  # modeled with no stated fit quality: refuse (fail-closed)
-    return float(r2) >= SIGNATURE_MIN_FIT_R2
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,19 +97,7 @@ class AnalyticsService:  # noqa: size-limits
 
     async def _activity_channels(self, activity_id: str) -> dict[StreamChannelName, Stream]:
         """Load the activity's stream channels as analytic streams, keyed by channel."""
-        stmt = select(ActivityStreamSet).where(
-            ActivityStreamSet.activity_id == _uid(activity_id)
-        )
-        stream_set = (await self._session.execute(stmt)).scalar_one_or_none()
-        if stream_set is None:
-            return {}
-        cstmt = select(StreamChannel).where(
-            StreamChannel.stream_set_id == stream_set.stream_set_id,
-            StreamChannel.set_kind == StreamSetKind.ACTIVITY,
-        )
-        channels = (await self._session.execute(cstmt)).scalars().all()
-        rate = float(stream_set.sample_rate_hz) if stream_set.sample_rate_hz else 1.0
-        return {c.channel: _channel_to_stream(c, rate) for c in channels}
+        return await _load_activity_channels(self._session, activity_id)
 
     async def current_sport(self, athlete_id: str) -> str | None:
         """The athlete's current primary sport code from the canonical profile, else ``None``.
@@ -189,22 +148,7 @@ class AnalyticsService:  # noqa: size-limits
         fail-closed): the empty :class:`SignatureParams` surfaces downstream as a
         typed gap, never thresholds derived from a bad fit.
         """
-        as_of_instant = _dt.datetime.combine(as_of, _dt.time.min, tzinfo=_dt.UTC)
-        stmt = (
-            select(FitnessSignature)
-            .where(
-                FitnessSignature.athlete_id == _uid(athlete_id),
-                FitnessSignature.signature_type == signature_type,
-                FitnessSignature.effective_date <= as_of,
-                or_(
-                    FitnessSignature.effective_to.is_(None),
-                    FitnessSignature.effective_to > as_of_instant,
-                ),
-            )
-            .order_by(FitnessSignature.effective_date.desc())
-            .limit(1)
-        )
-        sig = (await self._session.execute(stmt)).scalar_one_or_none()
+        sig = await _load_effective_signature(self._session, athlete_id, signature_type, as_of)
         if sig is None or not _signature_fit_acceptable(sig):
             return SignatureParams()
         return SignatureParams(

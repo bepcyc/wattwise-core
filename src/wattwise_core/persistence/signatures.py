@@ -30,6 +30,64 @@ class SignatureIntervalError(ValueError):
     """A write violating the GBO-R27/R28 signature invariants (refused, fail-closed)."""
 
 
+def _refuse_unfit_modeled(
+    origin: SignatureOrigin, fit_quality: dict[str, object] | None
+) -> None:
+    """Refuse a MODELED signature carrying no ``fit_quality`` (GBO-R28, fail-closed)."""
+    if origin == SignatureOrigin.MODELED and not fit_quality:
+        raise SignatureIntervalError(
+            "a MODELED signature MUST carry fit_quality (GBO-R28); refusing to record one"
+            " the analytics layer could never fit-gate"
+        )
+
+
+async def _refuse_overlapping(
+    session: AsyncSession,
+    athlete_id: uuid.UUID,
+    signature_type: str,
+    effective_date: _dt.date,
+) -> None:
+    """Refuse a write not dated strictly AFTER every existing one in scope (GBO-R27)."""
+    latest = (
+        await session.execute(
+            select(FitnessSignature)
+            .where(
+                FitnessSignature.athlete_id == athlete_id,
+                FitnessSignature.signature_type == signature_type,
+            )
+            .order_by(FitnessSignature.effective_date.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if latest is not None and latest.effective_date >= effective_date:
+        raise SignatureIntervalError(
+            f"signature for {signature_type!r} effective {effective_date} would overlap "
+            f"the existing interval starting {latest.effective_date} (GBO-R27: intervals "
+            "must not overlap; out-of-order writes are refused, never reordered)"
+        )
+
+
+async def _close_open_intervals(
+    session: AsyncSession,
+    athlete_id: uuid.UUID,
+    signature_type: str,
+    effective_date: _dt.date,
+) -> None:
+    """CLOSE the prior open interval at the new effective date, never overwrite (GBO-R27)."""
+    open_rows = (
+        await session.execute(
+            select(FitnessSignature).where(
+                FitnessSignature.athlete_id == athlete_id,
+                FitnessSignature.signature_type == signature_type,
+                FitnessSignature.effective_to.is_(None),
+            )
+        )
+    ).scalars().all()
+    closure = _dt.datetime.combine(effective_date, _dt.time.min, tzinfo=_dt.UTC)
+    for row in open_rows:
+        row.effective_to = closure  # close, never overwrite (GBO-R27)
+
+
 async def record_signature(
     session: AsyncSession,
     *,
@@ -54,40 +112,9 @@ async def record_signature(
     interval is CLOSED (``effective_to`` = the new effective date's UTC midnight), never
     overwritten. A modeled signature without ``fit_quality`` is refused (GBO-R28).
     """
-    if origin == SignatureOrigin.MODELED and not fit_quality:
-        raise SignatureIntervalError(
-            "a MODELED signature MUST carry fit_quality (GBO-R28); refusing to record one"
-            " the analytics layer could never fit-gate"
-        )
-    latest = (
-        await session.execute(
-            select(FitnessSignature)
-            .where(
-                FitnessSignature.athlete_id == athlete_id,
-                FitnessSignature.signature_type == signature_type,
-            )
-            .order_by(FitnessSignature.effective_date.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if latest is not None and latest.effective_date >= effective_date:
-        raise SignatureIntervalError(
-            f"signature for {signature_type!r} effective {effective_date} would overlap "
-            f"the existing interval starting {latest.effective_date} (GBO-R27: intervals "
-            "must not overlap; out-of-order writes are refused, never reordered)"
-        )
-    open_rows = (
-        await session.execute(
-            select(FitnessSignature).where(
-                FitnessSignature.athlete_id == athlete_id,
-                FitnessSignature.signature_type == signature_type,
-                FitnessSignature.effective_to.is_(None),
-            )
-        )
-    ).scalars().all()
-    closure = _dt.datetime.combine(effective_date, _dt.time.min, tzinfo=_dt.UTC)
-    for row in open_rows:
-        row.effective_to = closure  # close, never overwrite (GBO-R27)
+    _refuse_unfit_modeled(origin, fit_quality)
+    await _refuse_overlapping(session, athlete_id, signature_type, effective_date)
+    await _close_open_intervals(session, athlete_id, signature_type, effective_date)
     signature = FitnessSignature(
         athlete_id=athlete_id,
         signature_type=signature_type,
