@@ -31,6 +31,7 @@ mounted by their own routers (out of this module's scope).
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -190,7 +191,9 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
 
 #: Bearer extractor. ``auto_error=False`` so a missing credential routes through our
 #: uniform ``401`` problem document (AUTH-R1) instead of FastAPI's default body.
-_bearer_scheme: Final = HTTPBearer(auto_error=False, scheme_name="bearer")
+_bearer_scheme: Final = HTTPBearer(
+    auto_error=False, scheme_name="bearer", bearerFormat="JWT"
+)
 
 
 def authenticate(
@@ -206,13 +209,54 @@ def authenticate(
     request state for correlated logging; the credential itself is never logged or
     echoed (AUTH-R9). This is the single seam every protected route depends on, so
     no route can read identity from anywhere but the verified token.
+
+    The SECOND auth layer (AUTH-R8a / SEC-R4) is verified here too: a presented
+    ``X-Service-Auth`` header must match the configured service-principal secret in
+    constant time (a presented-but-unverifiable factor fails closed ``401``), and a
+    DELEGATED-client token (the bot token, AUTH-R8) MUST present the factor whenever
+    the deployment configures one. The factor never occupies ``Authorization`` and
+    never substitutes for the user token — identity remains the verified ``sub``.
     """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise ProblemError("unauthenticated", headers=_BEARER_CHALLENGE)
     settings = _settings_of(request)
-    principal = _principal_from_claims(_decode(credentials.credentials, settings))
+    claims = _decode(credentials.credentials, settings)
+    _verify_service_factor(request, settings, claims)
+    principal = _principal_from_claims(claims)
     request.state.athlete_id = principal.athlete_id
     return principal
+
+
+#: The dedicated service-principal header (AUTH-R8a) — outside ``Authorization``.
+SERVICE_AUTH_HEADER: Final = "X-Service-Auth"
+
+
+def _verify_service_factor(
+    request: Request, settings: Settings, claims: dict[str, Any]
+) -> None:
+    """Enforce the first-party service-principal factor (AUTH-R8a / SEC-R4).
+
+    Three fail-closed rules:
+
+    - a presented ``X-Service-Auth`` header is compared CONSTANT-TIME against the
+      configured ``security__service_auth_secret``; a mismatch — or a presented header
+      with NO configured secret (unverifiable) — is ``401``;
+    - a DELEGATED-client token (``client: delegated``, minted by the bot-link flow)
+      MUST carry a valid factor when the deployment configures one (the service
+      "SHALL additionally authenticate", AUTH-R8a);
+    - a valid factor grants NOTHING by itself: it never substitutes for the bearer
+      token and the acting athlete stays the verified ``sub`` (AUTH-R3).
+    """
+    presented = request.headers.get(SERVICE_AUTH_HEADER)
+    configured = settings.security__service_auth_secret
+    if presented is not None:
+        if configured is None or not hmac.compare_digest(
+            presented.encode(), configured.get_secret_value().encode()
+        ):
+            raise ProblemError("unauthenticated", headers=_BEARER_CHALLENGE)
+        return
+    if configured is not None and claims.get("client") == DELEGATED_CLIENT:
+        raise ProblemError("unauthenticated", headers=_BEARER_CHALLENGE)
 
 
 def _settings_of(request: Request) -> Settings:
@@ -241,6 +285,9 @@ def require_scopes(*required: Scope) -> Any:
             raise _insufficient_scope(required)
         return principal
 
+    # Introspection metadata for the OpenAPI per-operation ``security`` declaration
+    # (DOC-R3): the document generator reads the scopes off the dependency callable.
+    _dependency.required_scopes = tuple(scope.value for scope in required)  # type: ignore[attr-defined]
     return _dependency
 
 
@@ -258,12 +305,17 @@ def _insufficient_scope(required: tuple[Scope, ...]) -> ProblemError:
     return ProblemError("insufficient-scope", errors=field_errors)
 
 
+#: The ``client`` claim value marking a DELEGATED (bot-link) token (AUTH-R8/AUTH-R8a).
+DELEGATED_CLIENT: Final = "delegated"
+
+
 def issue_access_token(
     settings: Settings,
     *,
     subject: str,
     scopes: Iterable[Scope],
     ttl_seconds: int = DEFAULT_ACCESS_TTL_SECONDS,
+    client: str | None = None,
 ) -> AuthTokens:
     """Mint a signed first-party access token for ``subject`` (API-R23, AUTH-R6).
 
@@ -282,6 +334,8 @@ def issue_access_token(
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),
     }
+    if client is not None:
+        payload["client"] = client
     access = jwt.encode(payload, _signing_key(settings), algorithm=TOKEN_ALGORITHM)
     return AuthTokens(
         access_token=access,
@@ -293,6 +347,8 @@ def issue_access_token(
 
 __all__ = [
     "DEFAULT_ACCESS_TTL_SECONDS",
+    "DELEGATED_CLIENT",
+    "SERVICE_AUTH_HEADER",
     "TOKEN_AUDIENCE",
     "TOKEN_ISSUER",
     "AuthTokens",

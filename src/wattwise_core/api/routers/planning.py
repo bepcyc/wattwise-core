@@ -52,7 +52,7 @@ from wattwise_core.api.errors import ProblemError, resolve_trace_id
 from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
 from wattwise_core.api.problems import not_found, range_reversed
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
-from wattwise_core.api.routers.agent_routes import attached_entitlement
+from wattwise_core.api.routers.agent_routes import attached_entitlement, persisted_locale
 from wattwise_core.api.routers.agent_schemas import AgentAskResponse
 from wattwise_core.api.routers.planning_schemas import (
     PageOut,
@@ -148,6 +148,7 @@ AthleteId = Annotated[str, Depends(current_athlete_id)]
 Engine = Annotated[PlanningEngine, Depends(planning_engine)]
 Session = Annotated[AsyncSession, Depends(current_session)]
 Limiter = Annotated[RateLimiter, Depends(rate_limiter)]
+PersistedLocale = Annotated[str | None, Depends(persisted_locale)]
 CursorKey = Annotated[str, Depends(cursor_signing_key)]
 
 
@@ -174,6 +175,7 @@ async def generate_workouts(
     engine: Engine,
     athlete_id: AthleteId,
     limiter: Limiter,
+    stored_locale: PersistedLocale,
     accept_language: Annotated[str | None, Header()] = None,
 ) -> AgentAskResponse:
     """Generate a multi-day grounded training PLAN, approval-gated (API-R32 / API-R12a / COACH-R2).
@@ -191,7 +193,7 @@ async def generate_workouts(
     """
     limiter.check(athlete_id, LimitClass.AGENT)
     trace_id = resolve_trace_id(request)
-    locale = resolve_locale(body, accept_language)
+    locale = resolve_locale(body, accept_language, stored_locale)
     generate = getattr(engine, "plan_deliverable", None)
     if generate is None:
         # Phase-gated: the wired (no-LLM) engine cannot generate a plan (RUN-R4.1).
@@ -250,7 +252,7 @@ async def list_workouts(
     key: CursorKey,
     limiter: Limiter,
     *,
-    limit: Annotated[int, Query()] = 50,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ) -> PrescribedWorkoutList:
     """List the canonical prescribed-workout library, cursor-paginated (API-R32 / PAGE-R1).
@@ -353,3 +355,9 @@ __all__ = [
     "require_read_scope",
     "router",
 ]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_agent_scope.required_scopes = ('agent',)  # type: ignore[attr-defined]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_read_scope.required_scopes = ('read',)  # type: ignore[attr-defined]

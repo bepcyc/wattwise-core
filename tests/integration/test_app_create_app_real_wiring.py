@@ -149,8 +149,8 @@ def test_diagnose_does_not_500_on_no_llm(no_llm: tuple[TestClient, dict[str, str
     resp = client.post("/v1/agent/diagnose", headers=auth)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["status"] in {"completed", "degraded"}
-    assert {i["key"] for i in body["inputs"]} >= {"training_load", "fitness_signature"}
+    assert isinstance(body["overall_ok"], bool)
+    assert {c["code"] for c in body["checks"]} >= {"training_load", "fitness_signature"}
 
 
 def test_digest_crud_does_not_500_on_no_llm(no_llm: tuple[TestClient, dict[str, str]]) -> None:
@@ -161,7 +161,7 @@ def test_digest_crud_does_not_500_on_no_llm(no_llm: tuple[TestClient, dict[str, 
         json={"cadence": "weekly", "weekday": "mon", "hour_local": 7, "channels": ["web"]},
         headers=auth,
     )
-    assert sub.status_code == 200, sub.text
+    assert sub.status_code == 201, sub.text
     first_id = sub.json()["subscription_id"]
     # M5: a second subscribe UPDATES the standing row in place (same id), not a duplicate
     again = client.post(
@@ -169,9 +169,9 @@ def test_digest_crud_does_not_500_on_no_llm(no_llm: tuple[TestClient, dict[str, 
         json={"cadence": "daily", "hour_local": 18, "channels": ["web"]},
         headers=auth,
     )
-    assert again.status_code == 200, again.text
+    assert again.status_code == 201, again.text
     assert again.json()["subscription_id"] == first_id
-    listed = client.get("/v1/agent/digest/list", headers=auth)
+    listed = client.get("/v1/agent/digest/subscriptions", headers=auth)
     assert listed.status_code == 200, listed.text
     assert len(listed.json()["data"]) == 1, "exactly ONE standing schedule (GBO-R46 / M5)"
     deleted = client.delete(f"/v1/agent/digest/subscribe/{first_id}", headers=auth)
@@ -198,12 +198,11 @@ def test_memory_read_then_erase_then_404_on_no_llm(
     client, auth = no_llm
     listed = client.get("/v1/agent/memory", headers=auth)
     assert listed.status_code == 200, listed.text
-    assert [r["content"] for r in listed.json()["data"]] == ["prefers morning rides"]
+    assert [r["summary_text"] for r in listed.json()["data"]] == ["prefers morning rides"]
     got = client.get(f"/v1/agent/memory/{_MEMORY_ID}", headers=auth)
     assert got.status_code == 200, got.text
     erased = client.delete(f"/v1/agent/memory/{_MEMORY_ID}", headers=auth)
-    assert erased.status_code == 200, erased.text
-    assert erased.json()["status"] == "erased"
+    assert erased.status_code == 204, erased.text
     # PRIV-R8: the residual row is truly gone -> a re-GET is 404 (not a 500, not still present)
     regot = client.get(f"/v1/agent/memory/{_MEMORY_ID}", headers=auth)
     assert regot.status_code == 404, regot.text
@@ -258,7 +257,10 @@ def test_no_advertised_endpoint_500s_on_no_llm(
     ]
     for resp in probes:
         assert resp.status_code != 500, (resp.request.url, resp.text)
-        assert resp.status_code in {200, 202, 204, 404, 422}, (resp.request.url, resp.status_code)
+        assert resp.status_code in {200, 201, 202, 204, 404, 422}, (
+            resp.request.url,
+            resp.status_code,
+        )
 
 
 # --- the WITH-LLM path: the SAME factory binds the live engine without 500-ing the wiring ---
@@ -290,7 +292,7 @@ def test_with_llm_factory_wires_breadth_and_users_without_500(tmp_path: Path) ->
         ]
         for resp in probes:
             assert resp.status_code != 500, (resp.request.url, resp.text)
-            assert resp.status_code in {200, 202, 204, 404, 422}, (
+            assert resp.status_code in {200, 201, 202, 204, 404, 422}, (
                 resp.request.url,
                 resp.status_code,
             )

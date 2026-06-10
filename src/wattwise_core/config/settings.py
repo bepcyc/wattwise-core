@@ -172,6 +172,12 @@ class Settings(BaseSettings):
     # Security-header values (SEC-R10.1): HSTS max-age, the Referrer-Policy, and the CSP
     # for any HTML surface. Loaded content (CFG-R1a), never a code literal.
     security__hsts_max_age_seconds: int = Field(ge=0)
+    # --- AUTH-R8a / SEC-R4: the first-party service-principal shared secret ---
+    # A high-entropy secret a first-party service (bot runtime, BFF) presents in the
+    # dedicated ``X-Service-Auth`` header IN ADDITION to the per-athlete bearer token.
+    # Secret material: env-only (CFG-R2), ``None`` = the factor is not configured and
+    # any presented header fails closed (it can never be verified).
+    security__service_auth_secret: SecretStr | None = None
     security__referrer_policy: str
     security__content_security_policy: str
 
@@ -186,6 +192,15 @@ class Settings(BaseSettings):
     entitlement__wall_clock_seconds: float = Field(gt=0)
     entitlement__max_tool_iterations: int = Field(ge=1)
     entitlement__request_rate_per_minute: int = Field(ge=1)
+
+    # --- auth: refresh-token + account-link lifetimes (API-R23 / AUTH-R8, CFG-R1a) ---
+    # The rotating refresh-token family lifetime and the single-use link-challenge
+    # lifetime. Loaded content (CFG-R1a) — never a code literal.
+    auth__refresh_ttl_seconds: int = Field(ge=60)
+    auth__link_ttl_seconds: int = Field(ge=30)
+
+    # --- exports: the signed-download-URL lifetime (API-R34; short-lived, <= 5 min) ---
+    exports__signed_url_ttl_seconds: int = Field(ge=1, le=300)
 
     # --- rate-limit: the READ / MUTATING per-minute request ceilings (LIMIT-R2, CFG-R1a) ---
     # The per-athlete per-minute request ceilings for the read + mutating endpoint classes

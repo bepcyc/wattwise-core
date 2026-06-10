@@ -26,6 +26,9 @@ from typing import Any, ClassVar
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import AgentAnswer, Digest, Readiness
 from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, diagnose_coverage
+from wattwise_core.agent.digest_history import (
+    digest_history as read_digest_history,
+)
 from wattwise_core.agent.engine_extras import _read_stored_response_length
 from wattwise_core.agent.engine_memory import (
     delete_memory,
@@ -183,6 +186,20 @@ class UnconfiguredAgentEngine:
             digest_html=f"<p>{text}</p>",
             digest_text=text,
             coverage_caveat={"reason": "agent_unconfigured"},
+        )
+
+    async def digest_history(
+        self, *, athlete_id: str, limit: int = 50, before_week_end: str | None = None
+    ) -> list[Digest]:
+        """The stored weekly-review history — NON-LLM, works with no model (API-R14).
+
+        Reads recorded grounded reviews verbatim from the agent-state store; with no LLM
+        configured no new review is ever recorded, so this is typically empty — never a
+        fabricated history (GROUND-R7).
+        """
+        state_db = await self._agent_state_db()
+        return await read_digest_history(
+            state_db, athlete_id=athlete_id, limit=limit, before_week_end=before_week_end
         )
 
     async def list_memory(

@@ -115,6 +115,20 @@ test-golden:
 test-contract:
     {{uv}} pytest -m contract
 
+# Regenerate the committed OpenAPI reference artifact (DOC-R2).
+openapi:
+    {{uv}} python -m tools.openapi_artifact
+
+# Fail when the emitted OpenAPI schema drifts from the committed artifact (DOC-R2).
+# Also enforced by the contract suite (`just test-contract`) so CI gates on it.
+openapi-check:
+    {{uv}} python -m tools.openapi_artifact --check
+
+# Generate TypeScript interfaces + type guards from the OpenAPI document (DOC-R5/R6).
+# Fails on any unresolved $ref / unknown type / unguardable required field.
+client-gen out="generated/client.ts":
+    {{uv}} python -m tools.client_gen {{out}}
+
 # Parser/decoder fuzzing — bounded, deterministic PR-gate mode (TIER-R5 (a)).
 # CI-R1 item 16. Hypothesis-driven, ≤ 3 min, reproducible (no coverage engine).
 # TODO(tests): requires the `fuzz` pytest marker (registered by Dev B in

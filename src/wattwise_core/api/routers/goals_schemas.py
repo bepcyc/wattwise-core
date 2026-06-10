@@ -47,7 +47,7 @@ class GoalOut(BaseModel):
     the create/patch echo. All fields beyond the §8.13 core are optional.
     """
 
-    goal_id: str
+    goal_id: str = Field(json_schema_extra={"format": "uuid"})
     title: str
     goal_type: GoalType
     target_date: _dt.date | None = None

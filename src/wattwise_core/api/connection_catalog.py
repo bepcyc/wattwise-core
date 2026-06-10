@@ -20,7 +20,7 @@ INTERVALS_SOURCE_KEY: Final = "intervals_icu"
 FILE_IMPORT_SOURCE_KEY: Final = "file_import"
 
 #: The activity-file formats the OSS importer accepts (API-R33; routes to imports).
-ACCEPTED_FILE_FORMATS: Final[tuple[str, ...]] = (".fit", ".fit.gz", ".gpx", ".tcx", ".pwx")
+ACCEPTED_FILE_FORMATS: Final[tuple[str, ...]] = (".fit", ".fit.gz", ".gpx", ".tcx")
 
 
 @dataclass(frozen=True, slots=True)

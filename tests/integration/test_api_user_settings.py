@@ -26,6 +26,7 @@ connection can't model and would false-green the store round-trip, skill §7).
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -221,6 +222,29 @@ async def test_set_and_get_language(seeded: Env) -> None:
     assert put.status_code == 200
     assert put.json()["language"] == "de"
     assert (await seeded.client.get("/v1/user-settings/language")).json()["language"] == "de"
+
+
+async def test_put_language_preserves_region_and_get_returns_subtag(seeded: Env) -> None:
+    """Writing the subtag preserves a stored region; reading returns the SUBTAG (API-R37).
+
+    The preference is the language subtag of ``athlete.primary_locale``: writing ``de``
+    over a stored ``en-US`` yields ``de-US`` (region preserved, never destroyed), and a
+    stored ``de-DE`` reads back as ``de`` (the subtag), not ``en``.
+    """
+    owner = await _owner(seeded)
+    owner.primary_locale = "en-US"
+    await seeded.session.commit()
+    put = await seeded.client.put("/v1/user-settings/language", json={"language": "de"})
+    assert put.status_code == 200
+    await seeded.session.refresh(owner)
+    assert owner.primary_locale == "de-US"  # subtag set, region preserved
+    got = await seeded.client.get("/v1/user-settings/language")
+    assert got.json()["language"] == "de"  # the SUBTAG, not the full locale / not "en"
+
+
+async def _owner(seeded: Env):
+    """Load the seeded owner row for direct ``primary_locale`` manipulation."""
+    return await seeded.session.get(Athlete, uuid.UUID(seeded.athlete_id))
 
 
 async def test_unsupported_language_is_422(seeded: Env) -> None:

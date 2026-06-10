@@ -45,25 +45,26 @@ from wattwise_core.agent.deliverables import Digest
 from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis
 from wattwise_core.agent.memory import RecalledItem
 from wattwise_core.api.errors import ProblemError, resolve_trace_id
+from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
 from wattwise_core.api.problems import not_found
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
+from wattwise_core.api.routers.agent_request import scan_header_locale
 from wattwise_core.api.routers.agent_routes import (
     agent_engine,
     attached_entitlement,
     current_athlete_id,
+    persisted_locale,
     rate_limiter,
     require_agent_scope,
 )
 from wattwise_core.api.routers.agent_schemas import (
     AgentDiagnosisResponse,
     DigestBody,
+    DigestList,
+    DigestPage,
     DigestSubscribeRequest,
     DigestSubscriptionList,
     DigestSubscriptionOut,
-    MemoryEraseAck,
-    MemoryItemList,
-    MemoryItemOut,
-    memory_item_out,
     render_diagnosis,
     render_digest,
 )
@@ -104,6 +105,10 @@ class BreadthEngine(Protocol):
         self, *, athlete_id: str, week_end: str, entitlement: Entitlements | None = None
     ) -> Digest: ...
 
+    async def digest_history(
+        self, *, athlete_id: str, limit: int = 50, before_week_end: str | None = None
+    ) -> Sequence[Digest]: ...
+
     async def list_memory(
         self, *, athlete_id: str, limit: int, offset: int
     ) -> Sequence[RecalledItem]: ...
@@ -126,6 +131,11 @@ def current_session() -> AsyncSession:
     raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
 
 
+def cursor_signing_key() -> str:
+    """The signed-cursor HMAC key seam (PAGE-R5); the app factory overrides it (fail-closed)."""
+    raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
+
+
 def _breadth_engine(engine: Annotated[object, Depends(agent_engine)]) -> BreadthEngine:
     """Type the shared injected engine as the :class:`BreadthEngine` seam (ARCH-R21).
 
@@ -141,15 +151,17 @@ AthleteId = Annotated[str, Depends(current_athlete_id)]
 Engine = Annotated[BreadthEngine, Depends(_breadth_engine)]
 Limiter = Annotated[RateLimiter, Depends(rate_limiter)]
 Session = Annotated[AsyncSession, Depends(current_session)]
+CursorKey = Annotated[str, Depends(cursor_signing_key)]
+PersistedLocale = Annotated[str | None, Depends(persisted_locale)]
 
 
-def _header_locale(accept_language: str | None) -> str:
-    """The first supported ``Accept-Language`` tag (en/de/ru), else the default ``en`` (API-R37)."""
-    if accept_language:
-        for part in accept_language.split(","):
-            tag = part.split(";", 1)[0].strip().lower()[:2]
-            if tag in _SUPPORTED_LOCALES:
-                return tag
+def _resolve_locale(accept_language: str | None, persisted: str | None) -> str:
+    """``Accept-Language`` -> the PERSISTED subtag -> the ``en`` baseline (API-R37)."""
+    header = scan_header_locale(accept_language)
+    if header is not None:
+        return header
+    if persisted in _SUPPORTED_LOCALES:
+        return persisted
     return "en"
 
 
@@ -175,6 +187,7 @@ async def agent_diagnose(
     engine: Engine,
     athlete_id: AthleteId,
     limiter: Limiter,
+    stored_locale: PersistedLocale,
     accept_language: Annotated[str | None, Header()] = None,
 ) -> AgentDiagnosisResponse:
     """Narrate the athlete's canonical data-quality / coverage, fail-closed (API-R15).
@@ -188,7 +201,7 @@ async def agent_diagnose(
     """
     limiter.check(athlete_id, LimitClass.AGENT)
     trace_id = resolve_trace_id(request)
-    locale = _header_locale(accept_language)
+    locale = _resolve_locale(accept_language, stored_locale)
     diagnosis = await engine.diagnose(athlete_id=athlete_id, locale=locale)
     return render_diagnosis(diagnosis, trace_id)
 
@@ -216,6 +229,7 @@ async def agent_digest_last(
     engine: Engine,
     athlete_id: AthleteId,
     limiter: Limiter,
+    stored_locale: PersistedLocale,
     accept_language: Annotated[str | None, Header()] = None,
     week_end: Annotated[str | None, Query()] = None,
 ) -> DigestBody:
@@ -229,7 +243,7 @@ async def agent_digest_last(
     """
     limiter.check(athlete_id, LimitClass.AGENT)
     trace_id = resolve_trace_id(request)
-    locale = _header_locale(accept_language)
+    locale = _resolve_locale(accept_language, stored_locale)
     resolved = week_end or _last_week_end(_dt.datetime.now(_dt.UTC).date())
     digest = await engine.digest(
         athlete_id=athlete_id, week_end=resolved, entitlement=attached_entitlement(request)
@@ -270,12 +284,13 @@ def _subscription_out(row: DigestSubscription) -> DigestSubscriptionOut:
     response_model=DigestSubscriptionOut,
     dependencies=[_Agent],
     operation_id="agentDigestSubscribe",
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_201_CREATED,
 )
 async def agent_digest_subscribe(
     body: DigestSubscribeRequest,
     athlete_id: AthleteId,
     session: Session,
+    limiter: Limiter,
 ) -> DigestSubscriptionOut:
     """Create the owner's standing weekly-digest schedule (API-R14 / GBO-R46).
 
@@ -286,8 +301,11 @@ async def agent_digest_subscribe(
     never leave two active schedules). The ``email`` channel is GATED: if the subscription names
     ``email`` while the owner's email is unverified (GBO-R49), it is refused ``422``
     ``validation-error`` so an unverified address can never gate the channel open (fail-closed).
-    ``hour_local`` is the athlete-LOCAL firing hour (GBO-R47), never UTC.
+    ``hour_local`` is the athlete-LOCAL firing hour (GBO-R47), never UTC. Returns ``201``
+    with the standing :class:`DigestSubscription` (API-R14). Debits the per-athlete
+    ``agent`` rate bucket (LIMIT-R1 — every endpoint is rate-limited).
     """
+    limiter.check(athlete_id, LimitClass.AGENT)
     athlete_uuid = _uid(athlete_id)
     if "email" in body.channels and await _email_unverified(session, athlete_uuid):
         raise ProblemError("validation-error")
@@ -329,19 +347,70 @@ async def _active_subscription(
 
 @router.get(
     "/digest/list",
-    response_model=DigestSubscriptionList,
+    response_model=DigestList,
     dependencies=[_Agent],
     operation_id="agentDigestList",
 )
 async def agent_digest_list(
-    athlete_id: AthleteId, session: Session
-) -> DigestSubscriptionList:
-    """List the owner's standing digest subscriptions (API-R14).
+    request: Request,
+    athlete_id: AthleteId,
+    engine: Engine,
+    limiter: Limiter,
+    key: CursorKey,
+    stored_locale: PersistedLocale,
+    accept_language: Annotated[str | None, Header()] = None,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
+    cursor: Annotated[str | None, Query()] = None,
+) -> DigestList:
+    """The PAGINATED history of stored weekly reviews, newest first (API-R14 / §5).
 
-    Requires the ``agent`` scope (AUTH-R13). Reads ONLY the server-derived owner's subscriptions
-    (AUTH-R3), newest first; never another athlete's. The owner's digest schedule is bounded (ONE
-    standing schedule, GBO-R46) so the list is small and unpaginated by design.
+    Requires the ``agent`` scope (AUTH-R13) and debits the ``agent`` rate bucket (LIMIT-R1).
+    Replays the stored grounded reviews VERBATIM (never recomputed, GROUND-R7) behind the
+    signed opaque keyset cursor (PAGE-R1/R5); the ``limit`` is bounded ``[1, 200]``
+    (PAGE-R3). Owner-scoped (AUTH-R3) — never another athlete's reviews.
     """
+    limiter.check(athlete_id, LimitClass.AGENT)
+    trace_id = resolve_trace_id(request)
+    locale = _resolve_locale(accept_language, stored_locale)
+    bounded = clamp_limit(int(limit))
+    before: str | None = None
+    if cursor is not None:
+        anchor, _item = decode_cursor(cursor, params={}, key=key)
+        before = anchor.date().isoformat()
+    digests = list(
+        await engine.digest_history(
+            athlete_id=athlete_id, limit=bounded + 1, before_week_end=before
+        )
+    )
+    has_more = len(digests) > bounded
+    page_rows = digests[:bounded]
+    nxt = None
+    if has_more and page_rows:
+        last_week = _dt.datetime.fromisoformat(page_rows[-1].week_end + "T00:00:00+00:00")
+        nxt = encode_cursor(last_week, page_rows[-1].week_end, params={}, key=key)
+    return DigestList(
+        data=[render_digest(d, trace_id, locale) for d in page_rows],
+        page=DigestPage(limit=bounded, next_cursor=nxt, has_more=has_more),
+    )
+
+
+@router.get(
+    "/digest/subscriptions",
+    response_model=DigestSubscriptionList,
+    dependencies=[_Agent],
+    operation_id="agentDigestSubscriptions",
+)
+async def agent_digest_subscriptions(
+    athlete_id: AthleteId, session: Session, limiter: Limiter
+) -> DigestSubscriptionList:
+    """List the owner's standing digest subscriptions (API-R14 subscription CRUD).
+
+    Requires the ``agent`` scope (AUTH-R13) and debits the ``agent`` rate bucket (LIMIT-R1).
+    Reads ONLY the server-derived owner's subscriptions (AUTH-R3), newest first; never another
+    athlete's. The owner's digest schedule is bounded (ONE standing schedule, GBO-R46) so the
+    list is small and unpaginated by design.
+    """
+    limiter.check(athlete_id, LimitClass.AGENT)
     stmt = (
         select(DigestSubscription)
         .where(DigestSubscription.athlete_id == _uid(athlete_id))
@@ -360,6 +429,7 @@ async def agent_digest_list(
 async def agent_digest_unsubscribe(
     athlete_id: AthleteId,
     session: Session,
+    limiter: Limiter,
     subscription_id: Annotated[str, Path()],
 ) -> None:
     """Cancel the owner's standing digest subscription by id (API-R14 / GBO-R47).
@@ -395,84 +465,9 @@ async def _owned_subscription(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-# --- /v1/agent/memory/* — the per-item read + erase seam (API-R15a / MEM-R3) -----
-
-
-@router.get(
-    "/memory",
-    response_model=MemoryItemList,
-    dependencies=[_Agent],
-    operation_id="agentMemoryList",
-)
-async def agent_memory_list(
-    athlete_id: AthleteId,
-    engine: Engine,
-    *,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> MemoryItemList:
-    """List the owner's durable memory rows, newest first (API-R15a / MEM-R3).
-
-    Requires the ``agent`` scope (AUTH-R13). NON-LLM and OUTSIDE the agent cost gate (a memory read
-    debits no coaching budget). Scoped STRICTLY to the server-derived owner (AUTH-R3 / MEM-R3) —
-    another athlete's rows are never listed. Returns personalization context only, never a canonical
-    number (MEM-R1). ``limit`` is bounded ``[1, 200]`` and ``offset`` pages the newest-first list.
-    """
-    rows = await engine.list_memory(athlete_id=athlete_id, limit=limit, offset=offset)
-    return MemoryItemList(data=[memory_item_out(r) for r in rows])
-
-
-@router.get(
-    "/memory/{memory_item_id}",
-    response_model=MemoryItemOut,
-    dependencies=[_Agent],
-    operation_id="agentMemoryGet",
-)
-async def agent_memory_get(
-    athlete_id: AthleteId,
-    engine: Engine,
-    memory_item_id: Annotated[str, Path()],
-) -> MemoryItemOut:
-    """Fetch ONE durable memory row by id, scoped to the owner (API-R15a / MEM-R3, fail-closed).
-
-    Requires the ``agent`` scope (AUTH-R13). NON-LLM / outside the cost gate. Looks up by BOTH the
-    id AND the server-derived ``athlete_id`` (AUTH-R3): a foreign / unknown / non-UUID id is
-    ``404`` ``not-found`` (API-R51), indistinguishable from truly absent and never disclosed
-    (MEM-R3). Returns personalization context only, never a canonical number (MEM-R1).
-    """
-    item = await engine.get_memory(athlete_id=athlete_id, memory_item_id=memory_item_id)
-    if item is None:
-        raise not_found()
-    return memory_item_out(item)
-
-
-@router.delete(
-    "/memory/{memory_item_id}",
-    response_model=MemoryEraseAck,
-    dependencies=[_Agent],
-    operation_id="agentMemoryErase",
-)
-async def agent_memory_erase(
-    athlete_id: AthleteId,
-    engine: Engine,
-    memory_item_id: Annotated[str, Path()],
-) -> MemoryEraseAck:
-    """Erase ONE durable memory row by id, scoped to the owner (API-R15a / MEM-R3 MUST / PRIV-R8).
-
-    Requires the ``agent`` scope (AUTH-R13). NON-LLM / outside the cost gate. The guarded delete
-    matches BOTH the id AND the server-derived ``athlete_id`` (AUTH-R3): a cross-athlete / unknown /
-    non-UUID id erases nothing and is ``404`` ``not-found`` (API-R51), never disclosed. A successful
-    erase removes the residual row entirely (PRIV-R8) so a re-GET of the id is ``404``. Per-item
-    erase is a privacy MUST (MEM-R3).
-    """
-    erased = await engine.delete_memory(athlete_id=athlete_id, memory_item_id=memory_item_id)
-    if not erased:
-        raise not_found()
-    return MemoryEraseAck(memory_item_id=memory_item_id)
-
-
 __all__ = [
     "BreadthEngine",
     "current_session",
+    "cursor_signing_key",
     "router",
 ]

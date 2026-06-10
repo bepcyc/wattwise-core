@@ -1,0 +1,33 @@
+# The /v1/help static topic catalog (API-R10 / AUTH-R10) — externalized athlete copy
+# (QUAL-R13): every title/body the help surface serves resolves from this keyed file,
+# never an inline literal in logic. Order here is the serve order.
+
+[getting-started]
+title = "Getting started"
+kind = "info"
+text = "Connect a training source or upload a workout file, and your first numbers appear within moments. From there, ask your coach anything."
+
+[connect-a-source]
+title = "Connecting a training source"
+kind = "info"
+text = "Open Connections, pick your platform, and follow the steps shown. You can disconnect at any time and your data stays yours."
+
+[upload-a-file]
+title = "Uploading a workout file"
+kind = "info"
+text = "You can upload .fit, .fit.gz, .gpx, or .tcx files exported from a watch or another app. Each upload becomes a normal activity."
+
+[ask-the-coach]
+title = "Asking your coach"
+kind = "info"
+text = "Ask plain questions about your training - how recovered you are, what to do this week, or why a ride felt hard. Every answer is grounded in your own data."
+
+[weekly-review]
+title = "Your weekly review"
+kind = "info"
+text = "Subscribe to the weekly review to get a short, friendly summary of your training load and recovery, delivered on the day you choose."
+
+[export-your-data]
+title = "Exporting your data"
+kind = "info"
+text = "You can export your activities and analytics at any time as CSV, JSON, or a ZIP archive. Your data is never locked in."

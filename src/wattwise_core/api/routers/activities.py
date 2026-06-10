@@ -144,7 +144,9 @@ class ActivityFilters(BaseModel):
     device_class: DeviceClass | None = None
     sort: SortKey = "start_time"
     order: SortOrder = "desc"
-    limit: int = 50
+    # ge=1 rejects limit < 1 up front (PAGE-R3 422); the >200 bound CLAMPS server-side
+    # (clamp_limit), so the schema documents it as ``maximum`` (DOC-R3) without rejecting.
+    limit: int = Field(default=50, ge=1, json_schema_extra={"maximum": 200})
     cursor: str | None = None
 
 

@@ -30,7 +30,7 @@ MEM-R3, OUTCOME-R3, SCHEMA-R4, VOICE-R7.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -53,72 +53,63 @@ from wattwise_core.api.sanitize import sanitize_html
 # --- /v1/agent/diagnose — data-quality / coverage diagnosis (API-R15) -------------
 
 
-class InputCoverageOut(BaseModel):
-    """One canonical input's typed coverage line on the wire (API-R15).
+class DiagnosisCheckOut(BaseModel):
+    """One deterministic data-health CHECK on the wire (API-R15).
 
-    ``key`` is the stable machine id the client branches on; ``label`` is the jargon-free
-    athlete-native name (VOICE-R2); ``status`` is the closed ``present|stale|missing`` state;
-    ``reason`` is the typed analytics reason for a degraded input, else ``null``. There is
-    deliberately NO numeric field — a diagnosis reports coverage, never a canonical value
-    (VOICE-R7 / GROUND-R7).
+    ``code`` is the stable machine id the client branches on (the canonical input key from
+    the data-health/coverage probe); ``ok`` is its boolean pass state (``present``); the
+    ``detail`` is the jargon-free athlete-native narration of the check (VOICE-R2). There
+    is deliberately NO numeric field — a diagnosis reports coverage, never a canonical
+    value (VOICE-R7 / GROUND-R7).
     """
 
-    key: str
-    label: str
-    status: Literal["present", "stale", "missing"]
-    reason: str | None = None
+    code: str
+    ok: bool
+    detail: str
 
 
 class AgentDiagnosisResponse(BaseModel):
-    """The ``POST /v1/agent/diagnose`` response: a fail-closed coverage narration (API-R15).
+    """The ``POST /v1/agent/diagnose`` response: ``AgentDiagnosis`` (API-R15).
 
-    DETERMINISTIC over the canonical analytics envelope (no model call, nothing to fabricate,
-    GROUND-R7): ``status`` is ``completed`` when at least one canonical input is present and
-    ``degraded`` when the athlete has NO usable canonical coverage at all (OUTCOME-R3), in which
-    case ``coverage_caveat`` carries the typed ``no_canonical_coverage`` note. ``as_of`` is the ISO
-    date the probe windowed against. Carries NO athlete-facing numbers (VOICE-R7) and NO
-    billing/model machinery (API-R11c). ``additionalProperties`` is closed so no numeric field can
-    be smuggled in.
+    The spec-named shape — a list of deterministic ``checks`` ``{code, ok, detail}`` over
+    the athlete's canonical coverage plus the rolled-up ``overall_ok``. The checks are
+    SOURCED from the deterministic data-health/coverage probe (doc 30 HLT-R*) — never
+    invented (GROUND-R7); the narration in ``detail`` stays jargon-free (API-R21).
+    ``as_of`` is the ISO date the probe windowed against; ``trace_id`` correlates the
+    request. Carries NO athlete-facing numbers (VOICE-R7) and NO billing/model machinery
+    (API-R11c). ``additionalProperties`` is closed so no numeric field can be smuggled in.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["completed", "degraded"]
+    checks: list[DiagnosisCheckOut]
+    overall_ok: bool
     as_of: str
     trace_id: str
-    inputs: list[InputCoverageOut]
-    coverage_caveat: dict[str, Any] | None = None
 
 
 def render_diagnosis(diagnosis: AgentDiagnosis, trace_id: str) -> AgentDiagnosisResponse:
-    """Render the deterministic diagnosis deliverable into the typed response (API-R15).
+    """Render the deterministic diagnosis deliverable into ``AgentDiagnosis`` (API-R15).
 
-    Maps the typed ``Computed``/``Unavailable`` coverage lines verbatim (no model call, no
-    fabrication) and the terminal status into the closed ``completed``/``degraded`` member; the
-    ``coverage_caveat`` passes through unchanged. No value is invented — only presence is reported
-    (GROUND-R7 / VOICE-R7).
+    Maps each typed coverage line to a ``{code, ok, detail}`` check verbatim — ``ok`` is
+    the ``present`` state, ``detail`` narrates the label (+ the typed reason for a failed
+    check) without inventing a value (GROUND-R7 / VOICE-R7). ``overall_ok`` is true only
+    when EVERY check passes (fail-closed roll-up).
     """
-    caveat = dict(diagnosis.coverage_caveat) if diagnosis.coverage_caveat is not None else None
-    member: Literal["completed", "degraded"] = (
-        "degraded" if diagnosis.status is RunStatus.DEGRADED else "completed"
-    )
+    checks = [_check_out(i) for i in diagnosis.inputs]
     return AgentDiagnosisResponse(
-        status=member,
+        checks=checks,
+        overall_ok=all(c.ok for c in checks),
         as_of=diagnosis.as_of,
         trace_id=trace_id,
-        inputs=[_coverage_out(i) for i in diagnosis.inputs],
-        coverage_caveat=caveat,
     )
 
 
-def _coverage_out(coverage: InputCoverage) -> InputCoverageOut:
-    """Project one canonical coverage line onto the wire shape (API-R15); no numeric field."""
-    return InputCoverageOut(
-        key=coverage.key,
-        label=coverage.label,
-        status=coverage.status.value,
-        reason=coverage.reason,
-    )
+def _check_out(coverage: InputCoverage) -> DiagnosisCheckOut:
+    """Project one coverage line onto the ``{code, ok, detail}`` check (API-R15)."""
+    ok = coverage.status.value == "present"
+    detail = coverage.label if ok else f"{coverage.label} — {coverage.status.value}"
+    return DiagnosisCheckOut(code=coverage.key, ok=ok, detail=detail)
 
 
 # --- /v1/agent/digest — the weekly digest + its standing subscription (API-R14) ---
@@ -231,30 +222,51 @@ class DigestSubscriptionOut(BaseModel):
 
 
 class DigestSubscriptionList(BaseModel):
-    """The ``GET /v1/agent/digest/list`` response: the owner's standing subscriptions (API-R14)."""
+    """``GET /v1/agent/digest/subscriptions``: the owner's standing subscriptions (API-R14)."""
 
     data: list[DigestSubscriptionOut]
+
+
+class DigestPage(BaseModel):
+    """The PAGE-R4 envelope page block for the weekly-review history (API-R14 / §5)."""
+
+    limit: int
+    next_cursor: str | None = None
+    has_more: bool
+
+
+class DigestList(BaseModel):
+    """``GET /v1/agent/digest/list``: the PAGINATED weekly-review history (API-R14 / §5).
+
+    Each item is the SAME sanitized :class:`DigestBody` the ``digest/last`` surface
+    returns (replayed verbatim from the stored grounded review — never recomputed,
+    GROUND-R7), wrapped in the PAGE-R4 envelope behind a signed opaque cursor (PAGE-R5).
+    """
+
+    data: list[DigestBody]
+    page: DigestPage
 
 
 # --- /v1/agent/memory — the per-item read + erase seam (API-R15a / MEM-R3) --------
 
 
 class MemoryItemOut(BaseModel):
-    """One durable memory item on the wire (API-R15a / MEM-R1).
+    """One durable memory item on the wire — the spec ``MemoryItem`` (API-R15a / MEM-R1).
 
     Personalization context ONLY — never a canonical analytic number (MEM-R1): there is
-    deliberately no numeric field. ``inferred`` marks an LLM-derived item (MEM-R2). ``recorded_at``
-    is the ISO instant the episode was captured. The id is the stable handle the per-item
-    GET/DELETE address (MEM-R3 erasure).
+    deliberately no numeric field. ``memory_id`` is the stable handle the per-item
+    GET/DELETE address (MEM-R3 erasure); ``summary_text`` is the athlete-native content
+    (API-R21); ``created_at``/``updated_at`` are the ISO instants the item was captured /
+    last revised.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    memory_item_id: str
+    memory_id: str
     kind: str
-    content: str
-    inferred: bool
-    recorded_at: str
+    summary_text: str
+    created_at: str
+    updated_at: str
 
 
 class MemoryItemList(BaseModel):
@@ -263,39 +275,35 @@ class MemoryItemList(BaseModel):
     data: list[MemoryItemOut]
 
 
-class MemoryEraseAck(BaseModel):
-    """The ``DELETE /v1/agent/memory/{id}`` acknowledgement (API-R15a / MEM-R3 erasure)."""
-
-    status: Literal["erased"] = "erased"
-    memory_item_id: str
-
-
 def memory_item_out(item: RecalledItem) -> MemoryItemOut:
-    """Project one durable memory row onto the wire shape (API-R15a / MEM-R1).
+    """Project one durable memory row onto the spec ``MemoryItem`` shape (API-R15a / MEM-R1).
 
-    Carries personalization context only — never a canonical number (the store structurally has no
-    numeric field, MEM-R1). ``recorded_at`` is rendered as the ISO instant.
+    Carries personalization context only — never a canonical number (the store structurally
+    has no numeric field, MEM-R1). ``updated_at`` falls back to the capture instant when the
+    row has never been revised.
     """
+    updated = item.updated_at or item.recorded_at
     return MemoryItemOut(
-        memory_item_id=item.memory_item_id,
+        memory_id=item.memory_item_id,
         kind=item.kind.value,
-        content=item.content,
-        inferred=item.inferred,
-        recorded_at=item.recorded_at.isoformat(),
+        summary_text=item.content,
+        created_at=item.recorded_at.isoformat(),
+        updated_at=updated.isoformat(),
     )
 
 
 __all__ = [
     "AgentDiagnosisResponse",
     "DeliveryChannelOut",
+    "DiagnosisCheckOut",
     "DigestBody",
     "DigestCadenceOut",
+    "DigestList",
+    "DigestPage",
     "DigestStatusOut",
     "DigestSubscribeRequest",
     "DigestSubscriptionList",
     "DigestSubscriptionOut",
-    "InputCoverageOut",
-    "MemoryEraseAck",
     "MemoryItemList",
     "MemoryItemOut",
     "WeekdayOut",
