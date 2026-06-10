@@ -46,6 +46,7 @@ from wattwise_core.api.deps import get_db, get_settings
 from wattwise_core.api.errors import install_error_handlers
 from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import connections as connections_router
+from wattwise_core.api.routers import connections_management as connections_mgmt_router
 from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import onboarding as onboarding_router
 from wattwise_core.api.routers import sync as sync_router
@@ -231,7 +232,13 @@ def _build_app(
     app.state.settings = settings
     app.state.rate_limiter = RateLimiter()  # the per-athlete read/mutating buckets (LIMIT-R1)
     install_error_handlers(app)
-    for module in (connections_router, imports_router, sync_router, onboarding_router):
+    for module in (
+        connections_router,
+        connections_mgmt_router,
+        imports_router,
+        sync_router,
+        onboarding_router,
+    ):
         app.include_router(module.router)
 
     async def _session() -> AsyncIterator[AsyncSession]:
@@ -455,6 +462,116 @@ def test_initiate_complete_accept_write_only_token(harness: _Harness) -> None:
         )
 
 
+# ----------------------------------------------------------- list / get / disconnect
+
+
+def test_list_connections_empty_when_none(harness: _Harness) -> None:
+    """GET /v1/connections returns an empty PAGE-R4 page when nothing is connected (API-R27)."""
+    resp = harness.client.get("/v1/connections", headers=_auth())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data"] == []  # PAGE-R4 envelope key, not `items`
+    assert body["page"]["limit"] == 0
+    assert body["page"]["has_more"] is False
+    assert body["page"]["next_cursor"] is None
+
+
+def test_list_connections_names_the_source(harness: _Harness) -> None:
+    """GET /v1/connections lists the connected source with the API-R27 field set (API-R27/R47).
+
+    This is the one consumer list where a named ``source`` is a legitimate field (the
+    AUTH-R15 exception); the row also carries the canonical four-member ``status`` enum,
+    the ``scopes`` projection, and BOTH API-R47 additive fields (``auth_archetype`` AND
+    ``first_sync_state``). The collection is wrapped in the project-wide PAGE-R4 envelope
+    (``{data, page}``), not the legacy ``{items, next_cursor}`` shape.
+    """
+    harness.client.post(
+        "/v1/connections/intervals_icu/complete", headers=_auth(), json={"api_key": "good-key"}
+    )
+    resp = harness.client.get("/v1/connections", headers=_auth())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["page"]["limit"] == 1  # PAGE-R4 page sub-object
+    assert body["page"]["has_more"] is False
+    items = body["data"]
+    assert len(items) == 1
+    row = items[0]
+    assert row["source"] == "intervals_icu"  # the AUTH-R15 source-naming exception
+    assert row["display_name"] == "Intervals.icu"
+    assert row["status"] == "connected"  # canonical connection.status enum, verbatim
+    assert row["auth_archetype"] == "api_key"  # the API-R47 additive field
+    # OSS carve-out: an api_key connect does NOT auto-sync, so no data has landed yet
+    # (API-R46) -> the API-R47 first_sync_state stays `not_started`.
+    assert row["first_sync_state"] == "not_started"  # the SECOND API-R47 additive field
+    assert set(row) >= {
+        "connection_id", "source", "display_name", "status",
+        "connected_at", "last_synced_at", "scopes", "auth_archetype", "first_sync_state",
+    }
+
+
+def test_get_connection_returns_typed_status(harness: _Harness) -> None:
+    """GET /v1/connections/{id} returns the one connection with its typed status (API-R27)."""
+    harness.client.post(
+        "/v1/connections/intervals_icu/complete", headers=_auth(), json={"api_key": "good-key"}
+    )
+    connection_id = str(_only_connection(harness).connection_id)
+    resp = harness.client.get(f"/v1/connections/{connection_id}", headers=_auth())
+    assert resp.status_code == 200
+    assert resp.json()["connection_id"] == connection_id
+    assert resp.json()["status"] == "connected"
+
+
+def test_get_connection_unknown_is_404(harness: _Harness) -> None:
+    """GET /v1/connections/{id} for an unknown/foreign id -> 404 not-found (API-R51)."""
+    resp = harness.client.get(
+        "/v1/connections/00000000-0000-0000-0000-000000000000", headers=_auth()
+    )
+    assert resp.status_code == 404
+    assert resp.json()["type"].endswith("/not-found")
+
+
+def test_disconnect_is_data_preserving_204(harness: _Harness) -> None:
+    """POST /{id}/disconnect → 204, status=disconnected, drops the ref, KEEPS data (API-R27/R29).
+
+    The data-preserving guarantee (API-R29) is load-bearing: a canonical activity ingested
+    while connected MUST survive the disconnect — analytics re-resolve to the next-best data
+    rather than erroring. This test lands an activity, disconnects, and asserts the row is
+    still present (and would break if disconnect deleted ingested data).
+    """
+    harness.client.post(
+        "/v1/connections/intervals_icu/complete", headers=_auth(), json={"api_key": "good-key"}
+    )
+    _land_activity(harness)
+    connection_id = str(_only_connection(harness).connection_id)
+    resp = harness.client.post(
+        f"/v1/connections/{connection_id}/disconnect", headers=_auth()
+    )
+    assert resp.status_code == 204
+    assert resp.content == b""
+    conn = _only_connection(harness)
+    assert conn.status is ConnectionStatus.DISCONNECTED  # canonical status flipped
+    assert conn.credential_ref is None  # credential revoked
+    # Data-preserving (API-R29): the ingested activity is NOT deleted by a disconnect.
+    assert harness.run(_count_activities) == 1
+
+
+def test_disconnect_unknown_is_404(harness: _Harness) -> None:
+    """POST /{id}/disconnect for an unknown/foreign id -> 404 (API-R51)."""
+    resp = harness.client.post(
+        "/v1/connections/00000000-0000-0000-0000-000000000000/disconnect", headers=_auth()
+    )
+    assert resp.status_code == 404
+
+
+def test_list_get_disconnect_in_openapi(harness: _Harness) -> None:
+    """The three API-R27 routes appear in the emitted OpenAPI document (DOC-R1)."""
+    spec = harness.client.get("/openapi.json").json()
+    paths = spec["paths"]
+    assert "get" in paths["/v1/connections"]
+    assert "get" in paths["/v1/connections/{connection_id}"]
+    assert "post" in paths["/v1/connections/{connection_id}/disconnect"]
+
+
 # --------------------------------------------------------------------------- imports
 
 
@@ -651,6 +768,11 @@ def _only_connection(harness: _Harness) -> Connection:
 async def _fetch_connections(session: AsyncSession) -> list[Connection]:
     """Read every connection row from the test session."""
     return list((await session.execute(select(Connection))).scalars().all())
+
+
+async def _count_activities(session: AsyncSession) -> int:
+    """Count canonical activity rows (the disconnect data-preserving assertion, API-R29)."""
+    return len(list((await session.execute(select(Activity))).scalars().all()))
 
 
 def _land_activity(harness: _Harness) -> None:

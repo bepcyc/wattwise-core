@@ -34,12 +34,14 @@ from wattwise_core.analytics import wbal as _wbal
 from wattwise_core.analytics._service_loaders import (
     _activities_in_local_range,
     _activity_local_date,
-    _better_mmp,
     _channel_to_stream,
     _f,
+    _fold_curve_point,
     _load_athlete,
     _load_athlete_or_fail,
     _load_athlete_sex,
+    _load_earliest_activity_date,
+    _load_threshold_history,
     _load_wellness_hrv_baseline,
     _load_wellness_hrv_summary,
     _load_wellness_rr,
@@ -364,16 +366,7 @@ class AnalyticsService:  # noqa: size-limits
         LOCAL calendar day (the PMC origin) is the projection of that instant — not its UTC
         date — so the EWMA grid starts on the correct local day (PMC-R3/R5).
         """
-        stmt = (
-            select(Activity)
-            .where(Activity.athlete_id == _uid(athlete_id))
-            .order_by(Activity.start_time.asc())
-            .limit(1)
-        )
-        first = (await self._session.execute(stmt)).scalar_one_or_none()
-        if first is None:
-            return None  # no activity ⇒ no origin; an empty athlete needs no reference tz
-        return _activity_local_date(first, await self._athlete_or_fail(athlete_id))
+        return await _load_earliest_activity_date(self._session, athlete_id)
 
     async def pmc(
         self,
@@ -424,9 +417,8 @@ class AnalyticsService:  # noqa: size-limits
             )
             if power is None:
                 continue
-            for d, res in _mmp.mmp(resample_to_1hz(power), sport=sport).items():
-                if is_computed(res) and (d not in best or _better_mmp(res, best[d])):
-                    best[d] = res
+            aid, day = str(act.activity_id), act.start_time.date()
+            _fold_curve_point(best, power, activity_id=aid, local_date=day, sport=sport)
         return best
 
     async def critical_power(
@@ -456,6 +448,18 @@ class AnalyticsService:  # noqa: size-limits
         one the verdict is read from form alone — never against a fabricated baseline.
         """
         return await _load_wellness_hrv_baseline(self._session, athlete_id, local_date)
+
+    async def threshold_history(
+        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+    ) -> list[FitnessSignature]:
+        """The effective-dated ``fitness_signature`` history in range (doc 20 §3.6).
+
+        A canonical READ of the versioned threshold rows (GBO-R26), NOT a doc-40
+        computed metric — the API-R30 ``threshold-history`` exception (backed by
+        doc 20). Chronological; ``[]`` when no signature exists in range (an empty
+        page, never a fabricated zero). The query lives in :mod:`._service_loaders`.
+        """
+        return await _load_threshold_history(self._session, athlete_id, from_date, to_date)
 
 
 __all__ = ["ENGINE_VERSION", "AnalyticsService", "SignatureParams"]

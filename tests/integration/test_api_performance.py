@@ -37,6 +37,7 @@ from wattwise_core.api.errors import install_error_handlers
 from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import activities as act_router
 from wattwise_core.api.routers import performance as perf_router
+from wattwise_core.api.routers import performance_history as perf_history_router
 from wattwise_core.domain.enums import (
     SampleBasis,
     SignatureOrigin,
@@ -98,6 +99,7 @@ def _build_app(session: AsyncSession, athlete_id: str) -> FastAPI:
     app.state.rate_limiter = RateLimiter()  # per-athlete read bucket the routers debit (LIMIT-R1)
     install_error_handlers(app)
     app.include_router(perf_router.router)
+    app.include_router(perf_history_router.router)
     app.include_router(act_router.router)
     # The routers attach the per-subject RateLimit gate, which derives identity from
     # ``authenticate`` (AUTH-R18); bind it to the seeded owner so the read bucket is keyed
@@ -452,3 +454,99 @@ async def test_activities_sort_by_duration_is_accepted(seeded: Env) -> None:
     assert resp.status_code == 200
     bad = await seeded.client.get("/v1/activities", params={"sort": "bogus"})
     assert bad.status_code == 422  # outside the allow-list
+
+
+# --- best-efforts (API-R30 §5) + threshold-history (API-R30 exception §12) -------
+
+
+@pytest.mark.integration
+async def test_best_efforts_is_paginated_collection_from_mmp(seeded: Env) -> None:
+    """best-efforts is a PAGINATED collection of MMP-derived items, not a chart series (§5).
+
+    Each item carries its OWN coverage + ``duration_s`` and the power equals ``MMP(d)``
+    (BEST-R1, single source of truth). The envelope is the PAGE-R4 ``{data, page}`` wrapper
+    (SCHEMA-R8), NOT the ``ChartSeries`` ``{items, x_axis, summary, ...}`` shape — pinning the
+    page shape so a regression to ``ChartSeries`` (which would drop the per-item coverage
+    contract) fails. Each item also carries the BEST-R2 lineage (``local_date`` +
+    ``activity_id`` of the originating activity, MMP-R4).
+    """
+    resp = await seeded.client.get("/v1/performance/best-efforts", params=_range())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "data" in body and "page" in body  # PAGE-R4 envelope, not {items, next_cursor}
+    assert body["page"]["has_more"] is False and body["page"]["next_cursor"] is None
+    assert "x_axis" not in body and "summary" not in body  # NOT a ChartSeries
+    items = body["data"]
+    assert items, "the constant-FTP ride yields best efforts for the MMP grid"
+    assert body["page"]["limit"] == len(items)
+    item = items[0]
+    assert set(item) == {
+        "duration_s", "label", "power_watts", "local_date", "activity_id", "coverage",
+    }
+    # The 1-hour 250 W ride: a short best effort equals MMP(d) ≈ 250 W (BEST-R1).
+    powered = [i for i in items if i["power_watts"] is not None]
+    assert powered and powered[0]["power_watts"] == pytest.approx(250.0, abs=1.0)
+    assert powered[0]["coverage"]["present"] is True
+    # BEST-R2 lineage: a computed best effort names the originating activity + its local date
+    # (MMP-R4), so the agent can cite "your best 5-min power came from <activity on date>".
+    assert powered[0]["local_date"] == _START.date().isoformat()
+    assert powered[0]["activity_id"] == str(seeded.activity_id)
+    _assert_no_source_name(body)
+
+
+@pytest.mark.integration
+async def test_threshold_history_reads_canonical_signature(seeded: Env) -> None:
+    """threshold-history is a paginated canonical read of fitness_signature rows (API-R30 exc, §12).
+
+    The seeded signature (effective 2026-01-01, FTP/CP 250, origin=measured) surfaces as ONE
+    ``ThresholdPoint`` carrying the canonical threshold fields + the ``origin`` provenance class
+    (NOT a source name, AUTH-R15). The envelope is the PAGE-R4 ``{data, page}`` page, not a
+    ChartSeries (SCHEMA-R8).
+    """
+    resp = await seeded.client.get(
+        "/v1/performance/threshold-history",
+        params={"from": "2026-01-01", "to": "2026-06-07"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "data" in body and "page" in body  # PAGE-R4 envelope, not {items, next_cursor}
+    assert body["page"]["has_more"] is False and body["page"]["next_cursor"] is None
+    assert "x_axis" not in body  # NOT a ChartSeries
+    items = body["data"]
+    assert len(items) == 1
+    assert body["page"]["limit"] == 1
+    pt = items[0]
+    assert pt["local_date"] == "2026-01-01"
+    assert pt["ftp_w"] == pytest.approx(250.0)
+    assert pt["cp_w"] == pytest.approx(250.0)
+    assert pt["origin"] == "measured"  # canonical provenance class, not a source name
+    assert pt["coverage"]["present"] is True
+    _assert_no_source_name(body)
+
+
+@pytest.mark.integration
+async def test_threshold_history_empty_out_of_range(seeded: Env) -> None:
+    """A range with no signature returns an empty PAGE-R4 page, not a fabricated point (ANL-R4)."""
+    resp = await seeded.client.get(
+        "/v1/performance/threshold-history",
+        params={"from": "2025-01-01", "to": "2025-12-31"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data"] == []  # PAGE-R4 envelope key, not `items`
+    assert body["page"]["limit"] == 0 and body["page"]["has_more"] is False
+
+
+@pytest.mark.integration
+async def test_best_efforts_and_threshold_history_require_read_scope(seeded: Env) -> None:
+    """Both new routes are gated on the ``read`` scope (AUTH-R11): no-read principal → 403."""
+    seeded.app.dependency_overrides[perf_router.require_read_scope] = (
+        perf_router.require_read_scope  # the fail-closed default raises insufficient-scope
+    )
+    try:
+        be = await seeded.client.get("/v1/performance/best-efforts", params=_range())
+        th = await seeded.client.get("/v1/performance/threshold-history", params=_range())
+        assert be.status_code == 403
+        assert th.status_code == 403
+    finally:
+        seeded.app.dependency_overrides[perf_router.require_read_scope] = lambda: None

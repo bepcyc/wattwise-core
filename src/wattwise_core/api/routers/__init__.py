@@ -15,10 +15,12 @@ from wattwise_core.api.routers import (
     agent_routes,
     athlete,
     connections,
+    connections_management,
     goals,
     imports,
     onboarding,
     performance,
+    performance_history,
     planning,
     sync,
     user_settings,
@@ -29,6 +31,7 @@ from wattwise_core.api.routers import (
 #: prefix, so the factory includes them verbatim (no extra prefix).
 ROUTERS: list[APIRouter] = [
     performance.router,
+    performance_history.router,
     activities.router,
     agent_routes.router,
     athlete.router,
@@ -37,6 +40,7 @@ ROUTERS: list[APIRouter] = [
     planning.router,
     goals.router,
     connections.router,
+    connections_management.router,
     imports.router,
     sync.router,
     onboarding.router,

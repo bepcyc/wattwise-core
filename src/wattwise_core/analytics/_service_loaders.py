@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import mmp_cp as _mmp
 from wattwise_core.analytics.result import Computed, MetricResult, is_computed
-from wattwise_core.analytics.series import Stream
+from wattwise_core.analytics.series import Stream, resample_to_1hz
 from wattwise_core.domain.enums import StreamChannelName
 from wattwise_core.persistence.localdate import (
     MissingReferenceTimezone,
@@ -33,6 +33,7 @@ from wattwise_core.persistence.models import (
     Activity,
     Athlete,
     DailyWellness,
+    FitnessSignature,
     StreamChannel,
     WellnessStreamSet,
 )
@@ -212,6 +213,71 @@ def _hrv_baseline_midpoint(low: float | None, high: float | None) -> float | Non
     return sum(bounds) / len(bounds)
 
 
+async def _load_earliest_activity_date(
+    session: AsyncSession, athlete_id: str
+) -> _dt.date | None:
+    """The athlete-LOCAL date of the first-ever activity, or ``None`` if none (GBO-R35).
+
+    The earliest activity by UTC ``start_time`` is also the earliest local instant, but its
+    LOCAL calendar day (the PMC origin) is the projection of that instant — not its UTC
+    date — so the EWMA grid starts on the correct local day (PMC-R3/R5).
+    """
+    stmt = (
+        select(Activity)
+        .where(Activity.athlete_id == _uid(athlete_id))
+        .order_by(Activity.start_time.asc())
+        .limit(1)
+    )
+    first = (await session.execute(stmt)).scalar_one_or_none()
+    if first is None:
+        return None  # no activity ⇒ no origin; an empty athlete needs no reference tz
+    return _activity_local_date(first, await _load_athlete_or_fail(session, athlete_id))
+
+
+def _fold_curve_point(
+    best: dict[int, MetricResult[_mmp.MMPWindow]],
+    power: Stream,
+    *,
+    activity_id: str,
+    local_date: _dt.date,
+    sport: str,
+) -> None:
+    """Fold one activity's MMP curve into the aggregate best-per-duration map (MMP-R4).
+
+    Each duration keeps the highest mean power seen so far (:func:`_better_mmp`); a
+    winning duration is stamped with the originating activity's identity and local
+    date (:func:`~wattwise_core.analytics.mmp_cp.stamp_curve_origin`) so a
+    best-effort consumer can cite its lineage (BEST-R2). Mutates ``best`` in place.
+    """
+    for d, res in _mmp.mmp(resample_to_1hz(power), sport=sport).items():
+        if is_computed(res) and (d not in best or _better_mmp(res, best[d])):
+            best[d] = _mmp.stamp_curve_origin(res, activity_id=activity_id, local_date=local_date)
+
+
+async def _load_threshold_history(
+    session: AsyncSession, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+) -> list[FitnessSignature]:
+    """The effective-dated ``fitness_signature`` history in range (doc 20 §3.6).
+
+    This is a canonical READ of the versioned threshold rows (GBO-R26), NOT a doc-40
+    computed metric — it backs the API-R30 ``threshold-history`` exception. Rows whose
+    ``effective_date`` falls within ``[from_date, to_date]`` are returned in
+    chronological order so the surface can render the FTP/CP/threshold-HR progression.
+    Returns ``[]`` when no signature exists in range (an empty page, never a
+    fabricated zero).
+    """
+    stmt = (
+        select(FitnessSignature)
+        .where(
+            FitnessSignature.athlete_id == _uid(athlete_id),
+            FitnessSignature.effective_date >= from_date,
+            FitnessSignature.effective_date <= to_date,
+        )
+        .order_by(FitnessSignature.effective_date, FitnessSignature.signature_id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 def _better_mmp(
     candidate: Computed[_mmp.MMPWindow], current: MetricResult[_mmp.MMPWindow]
 ) -> bool:
@@ -228,10 +294,13 @@ __all__ = [
     "_channel_to_stream",
     "_day_bounds_for_tz",
     "_f",
+    "_fold_curve_point",
     "_hrv_baseline_midpoint",
     "_load_athlete",
     "_load_athlete_or_fail",
     "_load_athlete_sex",
+    "_load_earliest_activity_date",
+    "_load_threshold_history",
     "_load_wellness_hrv_baseline",
     "_load_wellness_hrv_summary",
     "_load_wellness_rr",

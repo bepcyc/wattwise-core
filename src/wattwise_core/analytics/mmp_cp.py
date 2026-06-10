@@ -40,7 +40,8 @@ ANL-R5, ANL-R30, ANL-R31, ANL-R32, ANL-R33.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import datetime as _dt
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -335,6 +336,26 @@ def _count_gaps(valid_mask: FloatArray) -> int:
     return gaps
 
 
+def stamp_curve_origin(
+    res: Computed[MMPWindow], *, activity_id: str, local_date: _dt.date
+) -> Computed[MMPWindow]:
+    """Carry the originating activity into an aggregate-curve duration's lineage (MMP-R4).
+
+    The single-activity :func:`mmp` is provenance-blind to which activity it ran over, so the
+    multi-activity aggregator stamps the WINNING activity's identity onto the per-duration
+    result: which activity produced this duration's peak (``activity_id`` in ``InputLineage``)
+    and its ``local_date`` (in ``reference_params``), so a best-effort consumer can cite "your
+    best 5-minute power came from <activity on date>" (BEST-R2). Takes opaque primitives only —
+    never a source NAME — so formula-layer lineage stays provenance-blind (ANL-R33).
+    """
+    lineage = replace(
+        res.provenance,
+        activity_ids=(activity_id,),
+        reference_params={**res.provenance.reference_params, "local_date": local_date},
+    )
+    return replace(res, provenance=lineage)
+
+
 __all__ = [
     "APPLICABLE_SPORTS",
     "CPFit",
@@ -345,4 +366,5 @@ __all__ = [
     "best_effort",
     "cp_wprime",
     "mmp",
+    "stamp_curve_origin",
 ]
