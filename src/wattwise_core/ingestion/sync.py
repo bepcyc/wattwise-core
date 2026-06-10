@@ -195,44 +195,9 @@ class SyncOrchestrator:
         run = SyncRun(athlete_id=athlete_id, sync_run_id=str(uuid7()), started_at=self._now())
         for target in await self._select_connections(athlete_id, connection_id, source):
             run.results.extend(
-                await self._backfill_one(athlete_id, target, window, chunk_days, run.sync_run_id)
+                await _backfill_one(self, athlete_id, target, window, chunk_days, run.sync_run_id)
             )
         return run
-
-    async def _backfill_one(
-        self,
-        athlete_id: str,
-        target: _ConnectionTarget,
-        window: SyncWindow,
-        chunk_days: int,
-        sync_run_id: str,
-    ) -> list[SourceSyncResult]:
-        """Backfill ONE source oldest-first, skipping windows the cursor already committed."""
-        factory = self._factory_for(athlete_id)
-        athlete = _uid(athlete_id)
-        descriptor = _uid(target.source_descriptor_id)
-        cursor = await read_backfill_cursor(
-            factory, athlete, descriptor, range_oldest=window.oldest
-        )
-        results: list[SourceSyncResult] = []
-        for win in chunk_windows(window, chunk_days):
-            if cursor is not None and _dt.date.fromisoformat(win.newest) <= cursor:
-                continue  # SYN-R6: committed window — never re-downloaded
-            result = await self._sync_one(
-                athlete_id, target, win, self._now(), sync_run_id, explicit_window=True
-            )
-            results.append(result)
-            if result.outcome is not SyncOutcome.OK:
-                break  # resume point = last committed window; re-run continues here
-            await advance_backfill_cursor(
-                factory,
-                athlete,
-                descriptor,
-                range_oldest=window.oldest,
-                through=_dt.date.fromisoformat(win.newest),
-                ingest_run_id=_uid(sync_run_id),
-            )
-        return results
 
     async def _sync_one(
         self,
@@ -250,14 +215,9 @@ class SyncOrchestrator:
         ``fetch``. A failure degrades WITH a persisted typed gap (ING-R3), never a
         crash (CON-R3 / ARCH-R9) and never a swallowed-into-a-string outcome.
         """
-        try:
-            adapter = self._registry.get(target.source_key)
-        except UnknownSourceError:
-            return degraded(target, "source is not installed")
-        if not isinstance(adapter, DiscoverFetch | AdapterFetch):
-            # No direct-API fetch seam (e.g. connectionless file upload): nothing to
-            # pull on demand. Skipped, not degraded — this is the expected shape.
-            return skipped(target, "source has no on-demand fetch")
+        adapter = _resolve_fetch_adapter(self._registry, target)
+        if isinstance(adapter, SourceSyncResult):
+            return adapter
         since: _dt.datetime | None = None
         if not explicit_window:
             window, since = await narrow_incremental(self._ctx, athlete_id, target, window)
@@ -305,6 +265,65 @@ class SyncOrchestrator:
             discover=out,
             stats=stats,
         )
+
+
+def _resolve_fetch_adapter(
+    registry: AdapterRegistry, target: _ConnectionTarget
+) -> DiscoverFetch | AdapterFetch | SourceSyncResult:
+    """Resolve the target's adapter and gate on an on-demand fetch seam (ARCH-R2, ADP-R4).
+
+    Extracted from :meth:`SyncOrchestrator._sync_one` (QUAL-R9 function ceiling); behavior
+    unchanged. An uninstalled source returns the ``degraded`` result (never a crash); an
+    adapter with no direct-API fetch seam (e.g. connectionless file upload) returns the
+    ``skipped`` result — nothing to pull on demand is the expected shape, not a degradation.
+    """
+    try:
+        adapter = registry.get(target.source_key)
+    except UnknownSourceError:
+        return degraded(target, "source is not installed")
+    if not isinstance(adapter, DiscoverFetch | AdapterFetch):
+        return skipped(target, "source has no on-demand fetch")
+    return adapter
+
+
+async def _backfill_one(
+    orch: SyncOrchestrator,
+    athlete_id: str,
+    target: _ConnectionTarget,
+    window: SyncWindow,
+    chunk_days: int,
+    sync_run_id: str,
+) -> list[SourceSyncResult]:
+    """Backfill ONE source oldest-first, skipping windows the cursor already committed.
+
+    Extracted from :class:`SyncOrchestrator` (QUAL-R9 class ceiling) as the module-level
+    per-source backfill loop; behavior unchanged — it drives the orchestrator's own
+    ``_sync_one`` per chunk window and advances the persisted SYN-R6 cursor after each
+    committed window, stopping the source's loop on the first non-OK window.
+    """
+    factory = orch._factory_for(athlete_id)
+    athlete = _uid(athlete_id)
+    descriptor = _uid(target.source_descriptor_id)
+    cursor = await read_backfill_cursor(factory, athlete, descriptor, range_oldest=window.oldest)
+    results: list[SourceSyncResult] = []
+    for win in chunk_windows(window, chunk_days):
+        if cursor is not None and _dt.date.fromisoformat(win.newest) <= cursor:
+            continue  # SYN-R6: committed window — never re-downloaded
+        result = await orch._sync_one(
+            athlete_id, target, win, orch._now(), sync_run_id, explicit_window=True
+        )
+        results.append(result)
+        if result.outcome is not SyncOutcome.OK:
+            break  # resume point = last committed window; re-run continues here
+        await advance_backfill_cursor(
+            factory,
+            athlete,
+            descriptor,
+            range_oldest=window.oldest,
+            through=_dt.date.fromisoformat(win.newest),
+            ingest_run_id=_uid(sync_run_id),
+        )
+    return results
 
 
 __all__ = [

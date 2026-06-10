@@ -23,6 +23,11 @@ from langgraph.types import Command
 # stays stable (e.g. the integration tests import ``ClaimGrounder``/``_PlanSchema``). The
 # compiled-graph adapter + run bounds live in :mod:`engine_graph` (QUAL-R9 size split).
 from wattwise_core.agent.checkpoint import SqlAlchemyCheckpointSaver
+
+# The fail-closed decision refusal lives beside the interrupt-ledger guard that raises its cause
+# (QUAL-R9 size split); re-exported here so every historical ``from wattwise_core.agent.engine
+# import DecisionRefused`` path (the router + the durable tests) stays stable.
+from wattwise_core.agent.checkpoint_interrupts import DecisionRefused
 from wattwise_core.agent.contracts import ChatModel, RunStatus
 from wattwise_core.agent.deliverables import (
     AgentAnswer,
@@ -77,16 +82,6 @@ from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.entitlement import Entitlements
 from wattwise_core.persistence import Database
 from wattwise_core.seams import EngineSessionProvider, SessionProvider
-
-
-class DecisionRefused(RuntimeError):
-    """A HITL decision could not consume a live interrupt (CKPT-R9; fail-closed).
-
-    Raised by :meth:`GraphAgentEngine.decision` when ``consume_interrupt`` returns ``False`` —
-    the atomic guarded UPDATE matched no ``live`` row owned by the caller (an already-consumed
-    double-decision F-409, an unknown/never-recorded interrupt F-404, or a cross-athlete attempt
-    F-XID). The run is NEVER resumed in that case; the API router maps this to 404/409.
-    """
 
 
 class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # noqa: size-limits

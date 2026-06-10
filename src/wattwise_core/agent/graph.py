@@ -433,7 +433,23 @@ def build_graph(
     )
     for node_name, node_fn in nodes.items():
         builder.add_node(node_name, obs.traced(node_name, node_fn), input_schema=AgentState)
+    _wire_spine_edges(builder, ceiling, tool_bound)
+    return builder.compile(checkpointer=checkpointer)
 
+
+def _wire_spine_edges(
+    builder: StateGraph[AgentState, Any, AgentState, AgentState],
+    ceiling: int,
+    tool_bound: int,
+) -> None:
+    """Wire the fixed node spine + the three bounded recovery cycles (GRAPH-R2/R3).
+
+    Extracted from :func:`build_graph` (QUAL-R9 function ceiling); the edge set is byte-identical
+    to the inline wiring it replaces. The only cycles are coverage recovery
+    (``assess_coverage -> reflect -> plan_retrieval``), redraft recovery (``ground -> compose``
+    via ``redraft_tick``), and re-plan recovery (``ground -> reflect -> plan_retrieval``); every
+    ceiling/tool-bound breach routes to a graceful terminal, never a raise (GRAPH-R3/R5).
+    """
     # Fixed spine (GRAPH-R2). Admission-refused short-circuits ingest -> finalize (COST-R4).
     builder.add_edge(START, "ingest_request")
     builder.add_conditional_edges(
@@ -476,8 +492,6 @@ def build_graph(
     # Gate -> single sink (GRAPH-R2 / OUTCOME-R1).
     builder.add_edge("interrupt_gate", "finalize")
     builder.add_edge("finalize", END)
-
-    return builder.compile(checkpointer=checkpointer)
 
 
 __all__ = [
