@@ -66,12 +66,20 @@ _SUITE_METRICS: dict[str, tuple[str, ...]] = {
     "injection": ("injection.rate", "schema.rate", "pass_k.all_pass_rate"),
     "termination": ("termination.rate",),
     "reflection_termination": ("termination.rate",),
-    "intent_plan": ("intent_plan.precision", "intent_plan.recall"),
+    "intent_plan": (
+        "intent_plan.precision",
+        "intent_plan.recall",
+        "intent_plan.intent_accuracy",
+    ),
     "multilingual": ("termination.rate",),
     "judge": ("judge.passed_cases",),
     "readiness": ("readiness.consistency_rate", "readiness.voice_rate"),
     "plan": ("plan.grounding_rate", "plan.progression_rate", "plan.consistency_rate"),
     "voice": ("voice.rate", "pass_k.all_pass_rate"),
+    # The no-self-certification suite (QA-EVAL-R2.10 / QA-EVAL-R6): its zero-self-certified-
+    # but-ungrounded certificate (``self_cert.rate``, a 100% gate) is tracked so an erosion
+    # that still clears the absolute floor still trips the non-regression gate (QA-EVAL-R7).
+    "self_certification": ("self_cert.rate",),
 }
 
 

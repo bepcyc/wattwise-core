@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from wattwise_core.eval.budget import BudgetGrade
 from wattwise_core.eval.plan_suite import PlanGrade
 
 if TYPE_CHECKING:
@@ -160,20 +161,31 @@ class TerminationGrade:
 
 @dataclass(frozen=True, slots=True)
 class IntentPlanGrade:
-    """Outcome of grading intent/retrieval-plan accuracy (EVAL-R3 / PLAN-R*)."""
+    """Outcome of grading intent/retrieval-plan accuracy (EVAL-R3 / QA-EVAL-R2.9).
+
+    Both the retrieval-plan precision/recall (over the PRODUCTION planner's emitted
+    capability requests) AND the labelled intent-classification accuracy are scored; all
+    three must clear the EVAL-R3 >= 0.9 floor (QA-EVAL-R2.9 mandates classified-intent
+    match AND retrieval-plan precision/recall).
+    """
 
     total: int
     precision: float
     recall: float
     failures: tuple[str, ...] = ()
+    intent_accuracy: float = 1.0
 
     @property
     def passed(self) -> bool:
-        """Gate: precision AND recall >= 0.9 over the planner's capability requests."""
+        """Gate: plan precision AND recall AND intent accuracy >= 0.9 (QA-EVAL-R2.9)."""
         if self.total == 0:
             return True
         floor = INTENT_PLAN_MIN_ACCURACY
-        return self.precision >= floor and self.recall >= floor
+        return (
+            self.precision >= floor
+            and self.recall >= floor
+            and self.intent_accuracy >= floor
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +283,31 @@ class JudgeGrade:
 
 
 @dataclass(frozen=True, slots=True)
+class SelfCertGrade:
+    """Outcome of the no-self-certification suite (QA-EVAL-R2.10 / EVAL-R5a).
+
+    A case passes iff the model's self-cert claim neither moves the engine's grounding
+    verdict (QA-EVAL-R2.10 (a)) nor lets a self-certified-but-ungrounded number survive
+    (QA-EVAL-R2.10 (b)). The gate is 100%: a single self-certified-but-ungrounded answer
+    fails it. ``passed`` additionally requires ``failures == ()`` so a recorded defect
+    cannot hide behind a perfect rate.
+    """
+
+    total: int
+    passed_cases: int
+    failures: tuple[str, ...] = ()
+
+    @property
+    def rate(self) -> float:
+        return 1.0 if self.total == 0 else self.passed_cases / self.total
+
+    @property
+    def passed(self) -> bool:
+        """Gate: zero self-certified-but-ungrounded answers (QA-EVAL-R6)."""
+        return self.rate >= 1.0 and self.failures == ()
+
+
+@dataclass(frozen=True, slots=True)
 class SuiteGrades:
     """The aggregate of every grader for one suite run (EVAL-R9 machine-readable)."""
 
@@ -286,6 +323,8 @@ class SuiteGrades:
     readiness: ReadinessGrade = field(default_factory=lambda: ReadinessGrade(0, 0, 0, 0))
     plan: PlanGrade = field(default_factory=lambda: PlanGrade(0, 0, 0, 0))
     voice: VoiceGrade = field(default_factory=lambda: VoiceGrade(0, 0))
+    self_cert: SelfCertGrade = field(default_factory=lambda: SelfCertGrade(0, 0))
+    budget: BudgetGrade | None = None
 
     @property
     def passed(self) -> bool:
@@ -300,6 +339,8 @@ class SuiteGrades:
             and self.readiness.passed
             and self.plan.passed
             and self.voice.passed
+            and self.self_cert.passed
+            and (self.budget is None or self.budget.passed)
         )
 
 
@@ -434,6 +475,7 @@ __all__ = [
     "PlanGrade",
     "ReadinessGrade",
     "SchemaGrade",
+    "SelfCertGrade",
     "SuiteGrades",
     "TerminationGrade",
     "VoiceGrade",

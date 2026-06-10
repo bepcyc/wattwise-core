@@ -291,6 +291,18 @@ effort_preference = "low"
 grounding_refs = ["fail_closed_numbers"]
 prompt_fragments = ["shared_preamble", "readiness_system", "claim_system"]
 
+[agent.eval]
+# Offline-eval cost/latency budgets (QA-EVAL-R8): the harness records per-case token
+# usage, cost, and latency and FAILS the gate when the median cost-per-task or the p95
+# latency across the run exceeds these declared budgets — protecting the unit-economics
+# constraint that agent work stay cheap. These are LOADED budget content (CFG-R1a), never
+# a gate hardcode; an operator may tighten them. ``cost_per_1k_tokens_usd`` prices the
+# recorded token usage so a recorded run yields a per-case dollar cost without a network
+# call (deterministic, QA-EVAL-R9). Strictly positive.
+median_cost_usd = 0.05
+p95_latency_ms = 30000.0
+cost_per_1k_tokens_usd = 0.0002
+
 [agent.metric_aliases]
 # Metric-equivalence classes (§16 / SKILL-R1): natural athlete/coach phrasings a real model
 # emits, mapped to the canonical metric key the grounder verifies against (GROUND-R2/-R7).

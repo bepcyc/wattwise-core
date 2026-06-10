@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from wattwise_core.eval.budget import BudgetSample
 from wattwise_core.eval.grading import SuiteGrades
 from wattwise_core.eval.passk import PassK
 
@@ -37,6 +38,9 @@ class Scorecard:
     total_cases: int
     grades: SuiteGrades
     pass_k: PassK | None = None
+    # Per-case token/cost/latency records for this run (QA-EVAL-R8): recorded so the
+    # cost/latency budget is auditable per case, not only as the aggregate gate term.
+    budget_samples: tuple[BudgetSample, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -52,6 +56,9 @@ class Scorecard:
             "passed": self.passed,
             **_grades_jsonable(self.grades),
         }
+        if self.budget_samples:
+            # QA-EVAL-R8: the per-case token/cost/latency records attached to the run.
+            card["budget_samples"] = [s.to_jsonable() for s in self.budget_samples]
         if self.pass_k is not None:
             card["pass_k"] = {
                 "k": self.pass_k.k,
@@ -70,6 +77,15 @@ class Scorecard:
 
 def _grades_jsonable(g: SuiteGrades) -> dict[str, Any]:
     """The per-gate blobs (a module fn so :meth:`Scorecard.to_jsonable` stays small)."""
+    return {
+        **_safety_blobs(g),
+        **_engine_blobs(g),
+        **({"budget": g.budget.to_jsonable()} if g.budget is not None else {}),
+    }
+
+
+def _safety_blobs(g: SuiteGrades) -> dict[str, Any]:
+    """The claim-level safety-suite gate blobs (grounding/abstention/schema/injection)."""
     return {
         "grounding": {
             "faithfulness": g.grounding.faithfulness,
@@ -93,6 +109,17 @@ def _grades_jsonable(g: SuiteGrades) -> dict[str, Any]:
             "passed": g.injection.passed,
             "failures": list(g.injection.failures),
         },
+        "self_cert": {
+            "rate": g.self_cert.rate,
+            "passed": g.self_cert.passed,
+            "failures": list(g.self_cert.failures),
+        },
+    }
+
+
+def _engine_blobs(g: SuiteGrades) -> dict[str, Any]:
+    """The engine/coach-capability gate blobs (termination/intent/judge/readiness/plan/voice)."""
+    return {
         "termination": {
             "rate": g.termination.rate,
             "passed": g.termination.passed,
@@ -101,6 +128,7 @@ def _grades_jsonable(g: SuiteGrades) -> dict[str, Any]:
         "intent_plan": {
             "precision": g.intent_plan.precision,
             "recall": g.intent_plan.recall,
+            "intent_accuracy": g.intent_plan.intent_accuracy,
             "passed": g.intent_plan.passed,
             "failures": list(g.intent_plan.failures),
         },

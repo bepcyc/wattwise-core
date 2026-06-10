@@ -270,6 +270,12 @@ class Settings(BaseSettings):
     agent__coach__grounding_rules: dict[str, str]
     agent__coach__manifest: dict[str, str]
     agent__coach__skills: list[dict[str, Any]]
+    # Offline-eval cost/latency budgets (QA-EVAL-R8): the median cost-per-task and p95
+    # latency the eval gate enforces, plus the price per 1k tokens used to cost a recorded
+    # (network-free) run. Loaded content (CFG-R1a), never a gate hardcode; strictly positive.
+    agent__eval__median_cost_usd: float = Field(gt=0)
+    agent__eval__p95_latency_ms: float = Field(gt=0)
+    agent__eval__cost_per_1k_tokens_usd: float = Field(gt=0)
     agent__metric_aliases: dict[str, str]
 
     # --- retention ---
@@ -393,3 +399,47 @@ def get_settings() -> Settings:
 def load_settings(**overrides: Any) -> Settings:
     """Load and validate settings fresh, applying any explicit overrides."""
     return Settings(**overrides)
+
+
+# The offline-eval budget keys (QA-EVAL-R8), resolved from the SAME layered config
+# (defaults.toml -> operator file -> env) as the full settings but WITHOUT the secret
+# fail-close — so the network-free, secret-free offline eval tier (TIER-R1) can read its
+# cost/latency budgets. Each key is required: absence from every layer fails closed (CFG-R1a).
+_EVAL_BUDGET_KEYS: tuple[str, ...] = (
+    "agent__eval__median_cost_usd",
+    "agent__eval__p95_latency_ms",
+    "agent__eval__cost_per_1k_tokens_usd",
+)
+
+
+def load_eval_budget() -> dict[str, float]:
+    """Resolve the QA-EVAL-R8 cost/latency budget values from layered config (CFG-R1a).
+
+    Reads the ``[agent.eval]`` budgets from the layered packaged-defaults + operator file,
+    overlaid by any ``WATTWISE_AGENT__EVAL__*`` env override, WITHOUT instantiating the
+    secret-validated :class:`Settings` (the offline eval tier carries no operator secrets,
+    TIER-R1). A budget key absent from every layer fails closed (CFG-R1a). Values must be
+    strictly positive.
+    """
+    config_file_env = os.environ.get("WATTWISE_CONFIG_FILE")
+    config_file = Path(config_file_env) if config_file_env else None
+    merged: dict[str, Any] = {}
+    _flatten("", _read_toml(_DEFAULTS_PATH), merged)
+    if config_file is not None:
+        if not config_file.is_file():
+            raise ConfigError(f"WATTWISE_CONFIG_FILE does not exist: {config_file}")
+        _flatten("", _read_toml(config_file), merged)
+    out: dict[str, float] = {}
+    for key in _EVAL_BUDGET_KEYS:
+        env_val = os.environ.get(f"WATTWISE_{key.upper()}")
+        raw = env_val if env_val is not None else merged.get(key)
+        if raw is None:
+            raise ConfigError(
+                f"fail-closed: required eval-budget config is missing: WATTWISE_{key.upper()} "
+                "(defaults.toml [agent.eval] / operator file / env; QA-EVAL-R8, CFG-R1a)"
+            )
+        value = float(raw)
+        if value <= 0:
+            raise ConfigError(f"fail-closed: eval-budget {key} must be > 0 (got {value})")
+        out[key] = value
+    return out

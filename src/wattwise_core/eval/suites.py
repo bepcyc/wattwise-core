@@ -48,11 +48,11 @@ from wattwise_core.analytics.readiness import readiness_consistent
 from wattwise_core.domain.enums import ReadinessVerdict
 from wattwise_core.eval.grading import (
     READINESS_MAX_NUMBERS,
-    IntentPlanGrade,
     JudgeGrade,
     ReadinessGrade,
     TerminationGrade,
 )
+from wattwise_core.eval.intent_plan_suite import grade_intent_plan  # re-export (EVAL-R3)
 
 _DATASETS_DIR = Path(__file__).parent / "datasets"
 _INTERNAL_TOKEN = re.compile(r"(ctl|atl|tsb|rmssd|coverage_gaps|__truncated__)", re.IGNORECASE)
@@ -353,48 +353,6 @@ def grade_readiness() -> ReadinessGrade:
         else:
             voice_ok += 1
     return ReadinessGrade(len(cases), non_abstain, consistent, voice_ok, tuple(failures))
-
-
-# --- intent / retrieval-plan suite (EVAL-R3) -------------------------------------------
-
-
-def grade_intent_plan(predicted: dict[str, set[str]] | None = None) -> IntentPlanGrade:
-    """Score the planner's capability requests for precision + recall (EVAL-R3 >= 0.9).
-
-    ``predicted`` maps case id -> the set of capability keys the planner emitted; when not
-    supplied, the deterministic reference planner below is scored against the labelled
-    expected sets. Precision/recall are micro-averaged over all cases.
-    """
-    cases = _load("intent_plan")["cases"]
-    preds = predicted if predicted is not None else {c["id"]: _reference_plan(c) for c in cases}
-    tp = fp = fn = 0
-    failures: list[str] = []
-    for case in cases:
-        expected = {str(k) for k in case["expected_capabilities"]}
-        got = preds.get(case["id"], set())
-        tp += len(expected & got)
-        fp += len(got - expected)
-        fn += len(expected - got)
-        if got != expected:
-            failures.append(f"{case['id']}: expected {sorted(expected)} got {sorted(got)}")
-    precision = 1.0 if tp + fp == 0 else tp / (tp + fp)
-    recall = 1.0 if tp + fn == 0 else tp / (tp + fn)
-    return IntentPlanGrade(len(cases), precision, recall, tuple(failures))
-
-
-_INTENT_KEYWORDS: dict[str, set[str]] = {
-    "weekly_load": {"fitness", "load", "ctl", "form", "trend", "week"},
-    "critical_power": {"critical", "threshold", "ftp", "power"},
-    "hrv": {"hrv", "readiness", "recovery", "morning"},
-    "decoupling": {"decoupling", "aerobic", "drift"},
-    "load_metrics": {"tss", "intensity", "np", "activity"},
-}
-
-
-def _reference_plan(case: dict[str, Any]) -> set[str]:
-    """A deterministic keyword reference planner over the request text (PLAN-R*)."""
-    words = set(re.findall(r"[a-z]+", str(case["request_text"]).lower()))
-    return {cap for cap, kws in _INTENT_KEYWORDS.items() if words & kws}
 
 
 # --- multilingual rendering suite (EVAL-R7a) -------------------------------------------
