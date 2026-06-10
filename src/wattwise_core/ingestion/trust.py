@@ -28,6 +28,8 @@ policy is keyed by ``(source_descriptor_id, field/channel)`` — NEVER by a sour
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -66,6 +68,28 @@ class TrustPolicy:
 
     profiles: dict[str, tuple[dict[str, object], str | None]]
     overrides: dict[tuple[str, str], Fidelity]
+
+    @property
+    def policy_version(self) -> str:
+        """The CONTENT-DERIVED version of this policy (CONF-R1/CONF-R6 "versioned").
+
+        A stable digest over the declared profiles + per-athlete overrides (sorted,
+        canonical JSON): any change to a trust profile or override yields a NEW version
+        token, and the canonical writer records it on the resolved record (CONF-R6) so a
+        re-resolution under a changed policy is auditable. ``v1:`` pins the resolver's
+        CONF-R2 total-order revision so a future order change also versions.
+        """
+        payload = json.dumps(
+            {
+                "profiles": {k: [v[0], v[1]] for k, v in sorted(self.profiles.items())},
+                "overrides": {
+                    f"{d}\x1f{c}": f.value for (d, c), f in sorted(self.overrides.items())
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "v1:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     def tier(self, candidate: SourceCandidate, channel: str) -> Fidelity:
         """The EFFECTIVE tier for ``candidate`` on ``channel`` (the 5-layer order above).

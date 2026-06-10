@@ -37,6 +37,9 @@ class FieldCandidate:
     observed_at: _dt.datetime | None = None
     fetched_at: _dt.datetime | None = None
     completeness: float = 1.0
+    # The contributing ``source_candidate`` row id (LIN-R3 pointer); ``None`` only for
+    # contributions built outside the candidate store (pure unit tests).
+    candidate_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,10 @@ class GboCandidate:
     adapter_version: str = "0"
     mapping_version: str = "0"
     coverage: dict[str, Coverage] = field(default_factory=dict)
+    # MAP-R10: the TYPED shared device/file fingerprint (e.g. the FIT ``file_id``
+    # fingerprint) — a REAL cross-source identity signal, distinct from the per-source
+    # ``source_native_id`` dedup key. ``None`` when the source exposes none.
+    strong_fingerprint: str | None = None
 
     def candidate_key(self, athlete_id: str) -> tuple[str, str, str, str]:
         """The candidate idempotency/dedup key (UPS-R1) — the only key with source id."""

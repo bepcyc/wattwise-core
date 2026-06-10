@@ -122,6 +122,11 @@ atl_time_constant_days = 7
 # from a LOWER-fidelity equivalence-class member (substituted), so the day is never presented
 # at full fidelity. A factor in (0,1]; lives here (CFG-R1a), never baked into code.
 training_load_confidence_penalty = 0.7
+# GBO-R28: a stored MODELED fitness signature whose fit quality (R^2) is below this
+# threshold is REFUSED by signature resolution (fail-closed: a typed gap surfaces
+# instead of thresholds derived from a bad fit). A modeled signature carrying NO
+# fit_quality is refused outright.
+signature_min_fit_r2 = 0.85
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.
@@ -362,3 +367,31 @@ raw_file_days = 0
 # writes/interrupts older than this are expired by the retention sweeper. 0 = retain
 # indefinitely (no sweep), mirroring raw_file_days.
 agent_state_days = 0
+
+# ----------------------------------------------------------------------------
+# Metric-equivalence classes (doc 20 §7.5 DM-SUB-R1): the declared, ORDERED sets
+# of provider-metrics that may satisfy each canonical channel/metric. They are
+# EXTERNALIZED configuration, not inline engine constants; every member carries
+# a fidelity tier from the single ranked GAP-R2 enum, a documented semantic-
+# equivalence note, and the fidelity penalty applied when it substitutes for the
+# top member. Channels with no declared class resolve as their own degenerate
+# single-member class (no substitution badge is ever fabricated for them).
+# The shipped declaration is the DM-SUB-R1 worked example (training_load), the
+# class the analytics LOAD-R3 fallback + DEGR-R2 substitution consume.
+[[canonical.equivalence_class]]
+channel = "training_load"
+[[canonical.equivalence_class.members]]
+metric = "power_tss"
+tier = "raw_stream"
+note = "power-based TSS from power_w + CP/FTP: direct mechanical work vs threshold"
+penalty = "none"
+[[canonical.equivalence_class.members]]
+metric = "platform_load"
+tier = "platform_computed"
+note = "vendor's own load score (e.g. XSS); calibrated differently from TSS"
+penalty = "moderate"
+[[canonical.equivalence_class.members]]
+metric = "hr_trimp"
+tier = "modeled"
+note = "HR-derived proxy estimate of load (Banister TRIMP); weather/drift sensitive"
+penalty = "high"

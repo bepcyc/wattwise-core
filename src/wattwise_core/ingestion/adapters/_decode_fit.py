@@ -90,6 +90,7 @@ def _decode_with_fitdecode(data: bytes) -> ActivityAsbo:
         laps=tuple(laps),
         rr_intervals_ms=tuple(rr_ms),
         native_fingerprint=_fit_fingerprint(file_id),
+        strong_fingerprint=_fit_strong_fingerprint(file_id),
     )
 
 
@@ -136,6 +137,7 @@ def _build_asbo(messages: dict[str, Any], errors: list[Any]) -> ActivityAsbo:
         laps=tuple(laps),
         rr_intervals_ms=tuple(rr_ms),
         native_fingerprint=_fit_fingerprint(file_id),
+        strong_fingerprint=_fit_strong_fingerprint(file_id),
     )
 
 
@@ -190,6 +192,22 @@ def _fit_fingerprint(file_id: dict[str, Any]) -> str | None:
     if all(p is None for p in parts):
         return None
     return "|".join("" if p is None else _stable_str(p) for p in parts)
+
+
+def _fit_strong_fingerprint(file_id: dict[str, Any]) -> str | None:
+    """The MAP-R10 STRONG fingerprint: a real shared device identity, or ``None``.
+
+    Strong only when the FIT ``file_id`` carries BOTH a device ``serial_number`` AND a
+    ``time_created`` instant — a genuine "this device recorded this session" identity
+    two platforms exporting the same ride share. A stripped/degenerate ``file_id``
+    (missing either) yields ``None``: it must NEVER merge unrelated sessions
+    cross-window, so it falls back to the conservative windowed matcher.
+    """
+    serial = file_id.get("serial_number")
+    created = file_id.get("time_created")
+    if serial is None or created is None:
+        return None
+    return _fit_fingerprint(file_id)
 
 
 def _stable_str(value: Any) -> str:

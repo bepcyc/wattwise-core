@@ -234,6 +234,9 @@ class FileUploadAdapter:
                 connection_id=ctx.connection_id,
                 adapter_version=self.adapter_version,
                 mapping_version=self.mapping_version,
+                # MAP-R10: the TYPED strong fingerprint (FIT device serial +
+                # time_created) -- None for derived (GPX/TCX/PWX) fingerprints.
+                strong_fingerprint=asbo.strong_fingerprint,
             )
         ]
 

@@ -19,7 +19,7 @@ import datetime as _dt
 from collections import defaultdict
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import decoupling as _dec
@@ -47,6 +47,7 @@ from wattwise_core.analytics._service_loaders import (
     _load_wellness_rr,
     _uid,
 )
+from wattwise_core.analytics.constants import SIGNATURE_MIN_FIT_R2
 from wattwise_core.analytics.result import (
     Computed,
     MetricResult,
@@ -56,7 +57,12 @@ from wattwise_core.analytics.result import (
 )
 from wattwise_core.analytics.series import Stream, resample_to_1hz
 from wattwise_core.domain.coverage import Coverage
-from wattwise_core.domain.enums import Fidelity, StreamChannelName, StreamSetKind
+from wattwise_core.domain.enums import (
+    Fidelity,
+    SignatureOrigin,
+    StreamChannelName,
+    StreamSetKind,
+)
 from wattwise_core.persistence.models import (
     Activity,
     ActivityStreamSet,
@@ -68,6 +74,24 @@ from wattwise_core.persistence.models import (
 ENGINE_VERSION = "analytics-1"
 
 _MISSING = UnavailableReason.MISSING_REQUIRED_INPUT
+
+
+def _signature_fit_acceptable(sig: FitnessSignature) -> bool:
+    """GBO-R28 fail-closed gate for a stored MODELED signature's fit quality.
+
+    A modeled signature MUST carry ``fit_quality`` (GBO-R28); one without it, or whose
+    R-squared sits below the stated configurable floor
+    (``analytics.signature_min_fit_r2``), is refused — the caller surfaces a typed gap
+    instead of thresholds derived from a bad fit. Non-modeled origins (measured /
+    user_entered / source_provided) are not fit-gated.
+    """
+    if sig.origin != SignatureOrigin.MODELED:
+        return True
+    quality = sig.fit_quality or {}
+    r2 = quality.get("r_squared", quality.get("r2"))
+    if not isinstance(r2, int | float):
+        return False  # modeled with no stated fit quality: refuse (fail-closed)
+    return float(r2) >= SIGNATURE_MIN_FIT_R2
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,19 +179,33 @@ class AnalyticsService:  # noqa: size-limits
     async def resolve_signature(
         self, athlete_id: str, signature_type: str, as_of: _dt.date
     ) -> SignatureParams:
-        """Resolve the effective signature params as-of ``as_of`` (ANL-R9, GBO-R26/R27)."""
+        """Resolve the effective signature params as-of ``as_of`` (ANL-R9, GBO-R26/R27/R28).
+
+        Honors the effective-dated interval ``[effective_date, effective_to)``
+        (GBO-R27): a row whose interval was CLOSED at or before ``as_of`` never
+        resolves, so a superseded signature cannot shadow its successor. A MODELED
+        signature whose stored ``fit_quality`` R-squared is below the stated
+        configurable floor — or that carries none at all — is REFUSED (GBO-R28
+        fail-closed): the empty :class:`SignatureParams` surfaces downstream as a
+        typed gap, never thresholds derived from a bad fit.
+        """
+        as_of_instant = _dt.datetime.combine(as_of, _dt.time.min, tzinfo=_dt.UTC)
         stmt = (
             select(FitnessSignature)
             .where(
                 FitnessSignature.athlete_id == _uid(athlete_id),
                 FitnessSignature.signature_type == signature_type,
                 FitnessSignature.effective_date <= as_of,
+                or_(
+                    FitnessSignature.effective_to.is_(None),
+                    FitnessSignature.effective_to > as_of_instant,
+                ),
             )
             .order_by(FitnessSignature.effective_date.desc())
             .limit(1)
         )
         sig = (await self._session.execute(stmt)).scalar_one_or_none()
-        if sig is None:
+        if sig is None or not _signature_fit_acceptable(sig):
             return SignatureParams()
         return SignatureParams(
             ftp_w=_f(sig.ftp_w),

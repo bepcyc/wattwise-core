@@ -194,6 +194,33 @@ async def persist_candidate(
     return rows[cand.source_native_id]
 
 
+async def persist_quarantined(
+    session: AsyncSession,
+    athlete: uuid.UUID,
+    descriptor: uuid.UUID,
+    cand: GboCandidate,
+    connection_id: str | uuid.UUID | None,
+    run_id: uuid.UUID,
+    rule_id: str,
+) -> None:
+    """Persist a candidate that FAILED the MAP-R2/MAP-R6 validation gate (quarantine).
+
+    The row lands with its FULL lineage envelope plus ``quarantine_rule_id`` naming the
+    failing rule — retained for audit/diagnostics, excluded from every resolution set,
+    never partially written into the canonical store (MAP-R6). It deliberately runs NO
+    supersession: a quarantined restatement must not displace a prior GOOD version.
+    """
+    values = _candidate_values(athlete, descriptor, cand, connection_id, run_id)
+    values["quarantine_rule_id"] = rule_id
+    await upsert_many(
+        session,
+        cast("Table", SourceCandidate.__table__),
+        [values],
+        conflict_keys=_CANDIDATE_KEY,
+        update_columns=[*_CANDIDATE_REFRESH, "quarantine_rule_id"],
+    )
+
+
 async def _current_version(
     session: AsyncSession, athlete: uuid.UUID, descriptor: uuid.UUID, cand: GboCandidate
 ) -> SourceCandidate | None:
@@ -271,6 +298,8 @@ def _candidate_values(
         "confidence": cand.confidence,
         "ingest_run_id": run_id,
         "untrusted_content": cand.untrusted_content,
+        # MAP-R10: the typed cross-source identity signal (None when the source has none).
+        "strong_fingerprint": cand.strong_fingerprint,
     }
 
 
@@ -293,5 +322,6 @@ __all__ = [
     "PreparedCandidate",
     "persist_candidate",
     "persist_candidates_bulk",
+    "persist_quarantined",
     "prepare_batch",
 ]
