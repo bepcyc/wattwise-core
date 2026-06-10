@@ -29,8 +29,9 @@
       "passed": true
     },
     "intent_plan": {
-      "dataset_version": "1.0.0",
+      "dataset_version": "2.0.0",
       "metrics": {
+        "intent_plan.intent_accuracy": 1.0,
         "intent_plan.precision": 1.0,
         "intent_plan.recall": 1.0
       },
@@ -71,6 +72,13 @@
       "dataset_version": "1.0.0",
       "metrics": {
         "termination.rate": 1.0
+      },
+      "passed": true
+    },
+    "self_certification": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "self_cert.rate": 1.0
       },
       "passed": true
     },

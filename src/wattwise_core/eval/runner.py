@@ -30,29 +30,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
 from wattwise_core.agent.contracts import (
     Claim,
     ClaimKind,
     GroundDecision,
     GroundVerdict,
 )
+from wattwise_core.agent.engine_services import _ClaimSchema
 from wattwise_core.agent.grounding import ground
 from wattwise_core.agent.model import FakeModel
-from wattwise_core.eval import injection, reflection_suite, suites, voice_suite
+from wattwise_core.eval import budget as budget_mod
+from wattwise_core.eval import engine_suites, injection
 from wattwise_core.eval.grading import (
     AbstentionGrade,
     GroundingGrade,
     InjectionGrade,
     SchemaGrade,
     SuiteGrades,
-    TerminationGrade,
     grade_abstention,
     grade_grounding,
     grade_injection,
     grade_schema,
 )
 from wattwise_core.eval.passk import degenerate_pass_k
-from wattwise_core.eval.plan_suite import grade_plan
 from wattwise_core.eval.scorecard import EvalMode, Scorecard
 
 _DATASETS_DIR = Path(__file__).parent / "datasets"
@@ -160,7 +162,10 @@ class EvalRunner:
         _ = await model.compose(system="voice", context=str(case.get("request_text", "")))
         claims = _parse_claims(case.get("candidate_claims", []))
         evidence = dict(case.get("evidence", {}))
-        return await _ground_case(case, auth_id, claims, evidence, tolerance, authenticated)
+        schema_valid = _validate_structured_output(case)
+        return await _ground_case(
+            case, auth_id, claims, evidence, tolerance, authenticated, schema_valid
+        )
 
 
 class _EvalEvidence:
@@ -204,6 +209,7 @@ async def _ground_case(
     evidence: dict[str, Any],
     tolerance: float,
     authenticated: dict[str, Any] | None,
+    schema_valid: bool,
 ) -> RunnerOutcome:
     """Ground claims through the PRODUCTION grounder and assemble the outcome (GROUND-R8)."""
     metrics: dict[str, float] = {
@@ -250,7 +256,7 @@ async def _ground_case(
         case_id=str(case["id"]),
         suite=str(case.get("suite", "")),
         abstained=result.decision is GroundDecision.ABSTAIN or not survivors,
-        schema_valid=True,
+        schema_valid=schema_valid,
         every_surfaced_number_canonical=not non_canonical,
         published_non_canonical=frozenset(non_canonical),
         expected_scrubbed=_expected_scrubbed(case),
@@ -308,6 +314,40 @@ def _expected_scrubbed(case: dict[str, Any]) -> frozenset[str]:
     return frozenset(out)
 
 
+# The fields the production claim-extraction schema (``_ExtractedClaim``) accepts. The
+# recorded candidate-claim shape carries extra eval-only keys (``ref``/``prescriptive``)
+# the closed schema forbids; only these are projected when validating against it so the
+# check measures whether the recorded structured OUTPUT conforms, not the eval wrapper.
+_EXTRACTED_CLAIM_FIELDS = ("kind", "text", "metric", "value", "as_of")
+
+
+def _validate_structured_output(case: dict[str, Any]) -> bool:
+    """Measure structured-output conformance against the DECLARED schema (QA-EVAL-R2.6).
+
+    This is the REAL provider-enforced structured-output validation the schema suite reads,
+    NOT a hardcoded literal: the recorded structured claim-extraction output is validated
+    against the SHIPPED production claim-extraction schema (``_ClaimSchema``, ``extra='forbid'``,
+    in :mod:`wattwise_core.agent.engine_services`). A case may record the verbatim model
+    output under ``structured_output``; otherwise the recorded ``candidate_claims`` are
+    projected onto the closed schema's fields and validated. A value of the wrong type (e.g. a
+    non-numeric ``value``) or an extra/unknown field is a conformance failure (schema_valid False).
+    """
+    if "structured_output" in case:
+        payload = case["structured_output"]
+    else:
+        payload = {
+            "claims": [
+                {k: raw[k] for k in _EXTRACTED_CLAIM_FIELDS if k in raw}
+                for raw in case.get("candidate_claims", [])
+            ]
+        }
+    try:
+        _ClaimSchema.model_validate(payload)
+    except PydanticValidationError:
+        return False
+    return True
+
+
 def _parse_claims(raw_claims: list[dict[str, Any]]) -> tuple[Claim, ...]:
     """Build typed :class:`Claim` objects from a dataset's recorded candidate claims."""
     out: list[Claim] = []
@@ -355,27 +395,6 @@ def grade_suite(suite: str, outcomes: Sequence[RunnerOutcome]) -> SuiteGrades:
     )
 
 
-# Suites driven by the production graph/planner/judge (EVAL-R2a/-R3/-R5/-R7), in addition
-# to the claim-level grounding/abstention/injection suites above. ``plan`` (QA-EVAL-R2.5),
-# ``voice`` (QA-EVAL-R2.12) and ``reflection_termination`` (QA-EVAL-R2.11) are the
-# ROAD-R2-EXIT coach-capability suites promoted into the gate.
-_ENGINE_SUITES: frozenset[str] = frozenset(
-    {
-        "termination",
-        "reflection_termination",
-        "intent_plan",
-        "multilingual",
-        "judge",
-        "readiness",
-        "plan",
-        "voice",
-    }
-)
-# The dataset stem each engine suite loads for its dataset_version / case count (some suite
-# names differ from their datafile stem, e.g. ``voice`` -> ``voice_liveness``).
-_ENGINE_SUITE_DATASET: dict[str, str] = {"voice": "voice_liveness"}
-
-
 def list_suites() -> tuple[str, ...]:
     """Every CI-gated suite name (EVAL-R1/-R9): safety + engine + ROAD-R2-EXIT coach suites."""
     return (
@@ -390,68 +409,20 @@ def list_suites() -> tuple[str, ...]:
         "readiness",
         "plan",
         "voice",
+        "self_certification",
     )
-
-
-def _sync_engine_grades(name: str) -> SuiteGrades | None:
-    """The SYNC engine grades, or ``None`` when ``name`` needs the async path below."""
-    if name == "intent_plan":
-        return SuiteGrades(intent_plan=suites.grade_intent_plan())
-    if name == "readiness":
-        return SuiteGrades(readiness=suites.grade_readiness())
-    if name == "plan":
-        return SuiteGrades(plan=grade_plan())
-    if name == "multilingual":
-        # A parity check expressed via the all-or-nothing termination grade shape.
-        total, failures = suites.grade_multilingual()
-        return SuiteGrades(
-            termination=TerminationGrade(total, total - len(failures), failures)
-        )
-    return None
-
-
-async def _engine_grades(name: str) -> SuiteGrades:
-    """Compute the typed grades for one engine suite (EVAL-R2a/-R3/-R5/-R7, QA-EVAL-R2.*)."""
-    sync = _sync_engine_grades(name)
-    if sync is not None:
-        return sync
-    if name == "voice":
-        return SuiteGrades(voice=await voice_suite.grade_voice())
-    if name == "reflection_termination":
-        return SuiteGrades(termination=await reflection_suite.grade_reflection_termination())
-    if name == "judge":
-        return SuiteGrades(judge=await suites.grade_judge())
-    return SuiteGrades(termination=await suites.grade_termination())
-
-
-async def _run_engine_suite(name: str, mode: EvalMode) -> Scorecard:
-    """Run an EVAL-R2a/-R3/-R5/-R7 suite that drives the production engine."""
-    raw = _load_raw(_ENGINE_SUITE_DATASET.get(name, name))
-    grades = await _engine_grades(name)
-    return Scorecard(
-        suite=name,
-        dataset_version=str(raw.get("dataset_version", "1.0.0")),
-        mode=mode,
-        total_cases=len(raw.get("cases", [])),
-        grades=grades,
-        pass_k=degenerate_pass_k(name, grades.passed),
-    )
-
-
-def _load_raw(name: str) -> dict[str, Any]:
-    path = _DATASETS_DIR / f"{name}.json"
-    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-    return loaded
 
 
 async def run_suite(name: str, *, mode: EvalMode = EvalMode.RECORDED) -> Scorecard:
     """Run a whole named suite and return its scorecard (EVAL-R9 + degenerate k=1 pass^k).
 
     The OSS recorded tier is deterministic (TIER-R1) so one trial is exact (QA-EVAL-R10);
-    the env-gated live nightly leg is the only place k>1 real trials are spent.
+    the env-gated live nightly leg is the only place k>1 real trials are spent. The
+    QA-EVAL-R8 per-case token/cost/latency record + budget gate are folded into every
+    scorecard.
     """
-    if name in _ENGINE_SUITES:
-        return await _run_engine_suite(name, mode)
+    if name in engine_suites.ENGINE_SUITES:
+        return await engine_suites.run_engine_suite(name, mode)
     dataset = load_dataset(name)
     runner = EvalRunner(mode=mode)
     outcomes = [
@@ -466,7 +437,8 @@ async def run_suite(name: str, *, mode: EvalMode = EvalMode.RECORDED) -> Scoreca
         dataset_version=dataset.version,
         mode=mode,
         total_cases=len(outcomes),
-        grades=grades,
+        grades=budget_mod.with_budget(grades, dataset.cases),
+        budget_samples=budget_mod.record_samples(dataset.cases),
         pass_k=degenerate_pass_k(dataset.suite, grades.passed),
     )
 

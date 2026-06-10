@@ -7,7 +7,15 @@ from wattwise_core.config.settings import (
     Environment,
     Settings,
     get_settings,
+    load_eval_budget,
     load_settings,
 )
 
-__all__ = ["ConfigError", "Environment", "Settings", "get_settings", "load_settings"]
+__all__ = [
+    "ConfigError",
+    "Environment",
+    "Settings",
+    "get_settings",
+    "load_eval_budget",
+    "load_settings",
+]

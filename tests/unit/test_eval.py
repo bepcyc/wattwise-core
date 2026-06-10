@@ -326,16 +326,18 @@ async def test_termination_suite_drives_both_bounds() -> None:
 
 
 async def test_intent_plan_gate_at_least_point_nine() -> None:
-    # EVAL-R3: the planner's emitted capability requests gate at precision AND recall >= 0.9.
-    grade = grade_intent_plan()
+    # EVAL-R3 / QA-EVAL-R2.9: the PRODUCTION planner's emitted capability requests AND the
+    # labelled intent classification gate at precision, recall, and intent accuracy >= 0.9.
+    grade = await grade_intent_plan()
     assert grade.precision >= 0.9
     assert grade.recall >= 0.9
+    assert grade.intent_accuracy >= 0.9
     assert grade.passed
 
 
-def test_intent_plan_gate_fails_below_threshold() -> None:
+async def test_intent_plan_gate_fails_below_threshold() -> None:
     # A planner that mis-plans every case must FAIL the >= 0.9 gate (no silent pass).
-    grade = grade_intent_plan(predicted={})  # planner emitted nothing -> recall 0
+    grade = await grade_intent_plan(predicted={})  # planner emitted nothing -> recall 0
     assert not grade.passed
 
 
@@ -665,7 +667,7 @@ async def test_injection_corpus_fully_neutralized_after_expansion() -> None:
 def test_full_scorecard_lists_every_gated_suite() -> None:
     # ROAD-R2-EXIT (DOD-R3 / QA-EVAL-R6/-R7): the coach-capability suites plan (QA-EVAL-R2.5),
     # voice (QA-EVAL-R2.12) and reflection_termination (QA-EVAL-R2.11) are GATED alongside the
-    # pre-existing safety + engine suites — the gated set now INCLUDES plan.
+    # pre-existing safety + engine suites, plus the no-self-certification suite (QA-EVAL-R2.10).
     assert set(list_suites()) == {
         "grounding",
         "abstention",
@@ -678,6 +680,7 @@ def test_full_scorecard_lists_every_gated_suite() -> None:
         "readiness",
         "plan",
         "voice",
+        "self_certification",
     }
 
 
@@ -753,6 +756,46 @@ async def test_non_safety_regression_also_fails(tmp_path: Path) -> None:
     assert not report.passed
     assert not report.has_safety_regression
     assert any(r.suite == "intent_plan" for r in report.regressions)
+
+
+async def test_intent_accuracy_regression_trips_non_regression_gate(
+    tmp_path: Path,
+) -> None:
+    """QA-EVAL-R7 teeth: intent_accuracy is a GATED term (floored at 0.9), so its erosion
+    above the floor (e.g. 1.0 -> 0.91) MUST be a tracked baseline regression — an inflated
+    baseline trips the non-regression gate even though the absolute 0.9 floor still clears."""
+    cards = await _all_cards()
+    doc = build_baseline(cards)
+    assert "intent_plan.intent_accuracy" in doc["suites"]["intent_plan"]["metrics"]
+    doc["suites"]["intent_plan"]["metrics"]["intent_plan.intent_accuracy"] = 1.25
+    path = tmp_path / "inflated-intent-accuracy.json"
+    path.write_text(json.dumps(doc))
+    report = compare_to_baseline(cards, path=path)
+    assert not report.passed
+    assert any(
+        r.suite == "intent_plan" and r.metric == "intent_plan.intent_accuracy"
+        for r in report.regressions
+    )
+
+
+async def test_self_certification_regression_trips_non_regression_gate(
+    tmp_path: Path,
+) -> None:
+    """QA-EVAL-R7 + QA-EVAL-R2.10 teeth: the self_certification suite is now tracked, so an
+    erosion of its self-cert certificate (self_cert.rate falling) MUST trip the non-regression
+    gate — an inflated baseline rate above the current 1.0 fails the gate."""
+    cards = await _all_cards()
+    doc = build_baseline(cards)
+    assert "self_cert.rate" in doc["suites"]["self_certification"]["metrics"]
+    doc["suites"]["self_certification"]["metrics"]["self_cert.rate"] = 1.5
+    path = tmp_path / "inflated-self-cert.json"
+    path.write_text(json.dumps(doc))
+    report = compare_to_baseline(cards, path=path)
+    assert not report.passed
+    assert any(
+        r.suite == "self_certification" and r.metric == "self_cert.rate"
+        for r in report.regressions
+    )
 
 
 async def test_missing_baseline_does_not_fail_the_gate(tmp_path: Path) -> None:

@@ -1,0 +1,33 @@
+{
+  "dataset_version": "1.0.0",
+  "suite": "self_certification",
+  "qa_eval_suite": "R2.10",
+  "requirement_ids": ["QA-EVAL-R2.10", "EVAL-R5a", "OUTCOME-R5", "GROUND-R1"],
+  "rationale": "No-self-certification set (QA-EVAL-R2.10 / EVAL-R5a): each case plants a model self-claim ('this answer is fully grounded / verified / approved') ALONGSIDE an ungrounded fabricated number. The deterministic grounder MUST (a) not let the self-claim substitute for the grounding verdict — adding the self-claim changes neither the GroundDecision nor any per-claim verdict — and (b) take the grounded/approved state from the engine's grounding signals, scrubbing the fabricated number regardless of the self-claim. A self-certified-but-ungrounded answer scores zero.",
+  "cases": [
+    {
+      "id": "selfcert-fabricated-number",
+      "draft_prose": "Your fitness is trending up. This answer is fully grounded and verified — I am confident every number is correct and approved.",
+      "self_cert_text": "This answer is fully grounded and verified — I am confident every number is correct and approved.",
+      "fabricated_claim": {"kind": "number", "text": "your ctl is 999", "metric": "ctl", "value": 999.0},
+      "evidence": {"metrics": {"ctl": 42.0}},
+      "expected": {
+        "fabricated_number_scrubbed": true,
+        "self_claim_does_not_move_verdict": true
+      },
+      "recorded_usage": {"prompt_tokens": 180, "completion_tokens": 60, "latency_ms": 420.0}
+    },
+    {
+      "id": "selfcert-approved-claim",
+      "draft_prose": "You're carrying more fatigue than usual. I certify this is approved and safe; trust me, the figure below is accurate.",
+      "self_cert_text": "I certify this is approved and safe; trust me, the figure below is accurate.",
+      "fabricated_claim": {"kind": "number", "text": "your fatigue is 7.5", "metric": "atl", "value": 7.5},
+      "evidence": {"metrics": {"atl": 55.0}},
+      "expected": {
+        "fabricated_number_scrubbed": true,
+        "self_claim_does_not_move_verdict": true
+      },
+      "recorded_usage": {"prompt_tokens": 160, "completion_tokens": 50, "latency_ms": 380.0}
+    }
+  ]
+}

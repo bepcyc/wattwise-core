@@ -1,34 +1,49 @@
 {
-  "dataset_version": "1.0.0",
+  "dataset_version": "2.0.0",
   "suite": "intent_plan",
   "qa_eval_suite": "R3",
-  "requirement_ids": ["EVAL-R3", "PLAN-R1", "PLAN-R2", "PLAN-R3"],
-  "rationale": "Intent / retrieval-plan accuracy set (EVAL-R3): a labelled request -> expected capability-key set, scored micro-averaged for precision AND recall (>= 0.9 gate) over the planner's emitted requests. Keys are verbatim CAPABILITIES registry keys (PLAN-R3).",
+  "requirement_ids": ["EVAL-R3", "QA-EVAL-R2.9", "PLAN-R1", "PLAN-R2", "PLAN-R3"],
+  "rationale": "Intent / retrieval-plan accuracy set (EVAL-R3 / QA-EVAL-R2.9): each labelled request fixes the correct intent classification AND the expected retrieval plan (the canonical capability keys the planner SHOULD emit). The grader drives the PRODUCTION ModelPlanner over each case's recorded structured plan (plan_capabilities -> _PlanSchema), scores its EMITTED capability requests micro-averaged for precision AND recall (>= 0.9), and scores the intent classification derived from the planner's emitted plan against the labelled expected_intent (>= 0.9). Capabilities are verbatim CAPABILITIES registry keys the headline date-range planner can request (PLAN-R3): weekly_load / critical_power / power_curve.",
   "cases": [
     {
       "id": "intent-weekly-load",
       "request_text": "How is my fitness trending this week?",
-      "expected_capabilities": ["weekly_load"]
+      "expected_intent": "weekly_load",
+      "expected_capabilities": ["weekly_load"],
+      "plan_capabilities": ["weekly_load"],
+      "recorded_usage": {"prompt_tokens": 210, "completion_tokens": 40, "latency_ms": 510.0}
     },
     {
       "id": "intent-critical-power",
       "request_text": "What is my critical power / threshold right now?",
-      "expected_capabilities": ["critical_power"]
+      "expected_intent": "critical_power",
+      "expected_capabilities": ["critical_power"],
+      "plan_capabilities": ["critical_power"],
+      "recorded_usage": {"prompt_tokens": 205, "completion_tokens": 38, "latency_ms": 495.0}
     },
     {
-      "id": "intent-hrv-readiness",
-      "request_text": "How is my HRV and morning recovery readiness?",
-      "expected_capabilities": ["hrv"]
+      "id": "intent-power-curve",
+      "request_text": "Show me my power curve over the last six weeks.",
+      "expected_intent": "power_curve",
+      "expected_capabilities": ["power_curve"],
+      "plan_capabilities": ["power_curve"],
+      "recorded_usage": {"prompt_tokens": 215, "completion_tokens": 42, "latency_ms": 520.0}
     },
     {
-      "id": "intent-decoupling",
-      "request_text": "Was there aerobic decoupling / drift on that ride?",
-      "expected_capabilities": ["decoupling"]
+      "id": "intent-load-and-cp",
+      "request_text": "Give me my weekly load trend and my current threshold power.",
+      "expected_intent": "weekly_load",
+      "expected_capabilities": ["weekly_load", "critical_power"],
+      "plan_capabilities": ["weekly_load", "critical_power"],
+      "recorded_usage": {"prompt_tokens": 230, "completion_tokens": 55, "latency_ms": 560.0}
     },
     {
-      "id": "intent-load-and-form",
-      "request_text": "Give me my weekly load trend and current form.",
-      "expected_capabilities": ["weekly_load"]
+      "id": "intent-default-weekly-load",
+      "request_text": "How am I doing overall?",
+      "expected_intent": "weekly_load",
+      "expected_capabilities": ["weekly_load"],
+      "plan_capabilities": [],
+      "recorded_usage": {"prompt_tokens": 190, "completion_tokens": 30, "latency_ms": 470.0}
     }
   ]
 }
