@@ -22,6 +22,10 @@ htmlcov/
 coverage.xml
 junit*.xml
 
+# CI/scan artifacts (retained as workflow artifacts, never committed — CI-R6)
+/reports/
+/.scan/
+
 # local data / scratch (the engine targets ONLY its own isolated store)
 *.sqlite
 *.sqlite3

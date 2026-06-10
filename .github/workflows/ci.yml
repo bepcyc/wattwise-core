@@ -6,6 +6,11 @@
 # mirror (.forgejo/workflows/ci.yml) MUST reference the IDENTICAL recipe set
 # (`just test-forge-portable`, CI-R1 item 18 / CI-R9 / DELIV-R8).
 #
+# Runner plumbing (not gates): checkout, setup-uv, and `scripts/ci_tools.sh`,
+# which installs `just` (NOT preinstalled on ubuntu-latest) and, where a job
+# needs them, the scanner binaries (gitleaks/trivy/syft) from their official
+# installers — identical on both forges so the tool set cannot diverge.
+#
 # Job names are the branch-protection required-check names (CI-R1, QUAL-R3).
 # Staging (CI-R3): the `fast` jobs gate first and fail fast; the `slow` jobs
 # (integration, db-portability, e2e, image-scan/SBOM, package-build) follow.
@@ -25,7 +30,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write   # push the release image to GHCR (CI-R12)
 
 env:
   # uv installs from the frozen lockfile (CI-R5/RUN-R3.2); pin the runtime to 3.13.
@@ -41,6 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just lint            # CI-R1 item 1 + item 14 (lint-ast/content/novendor-sql/arch)
       - run: just fmt-check
@@ -52,6 +57,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just type            # CI-R1 item 2 (mypy --strict)
 
@@ -63,6 +69,7 @@ jobs:
         with: { fetch-depth: 0 }  # need the full PR commit range
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just lint-commits     # CI-R1 item 15
 
@@ -73,6 +80,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: uv run pre-commit validate-config   # CI-R1 item 19 (CI-R11)
 
@@ -83,6 +91,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just test-unit        # CI-R1 item 3
       - run: just test-property
@@ -98,6 +107,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥95%)
       - uses: actions/upload-artifact@v4   # retained artifact (CI-R6)
@@ -111,6 +121,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just eval             # CI-R1 item 6 (recorded-response mode)
       - uses: actions/upload-artifact@v4   # eval scorecard (CI-R6)
@@ -124,6 +135,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just test-inject      # CI-R1 item 7
 
@@ -135,8 +147,9 @@ jobs:
         with: { fetch-depth: 0 }   # secret scan over diff + history delta
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just gitleaks trivy
       - run: just install
-      - run: just scan             # CI-R1 items 8 + 9
+      - run: just scan             # CI-R1 items 8 + 9 (secret scan + lockfile SCA)
 
   forge-portability:
     name: Forge portability
@@ -145,6 +158,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just test-forge-portable   # CI-R1 item 18 (CI-R9/DELIV-R8)
 
@@ -171,6 +185,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just migrate
       - run: just test-integration      # CI-R1 item 4
@@ -209,6 +224,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       # Bootstrap-acceptance (BOOT-R1, E4-T3): clean checkout -> migrate ->
       # health-serving instance. The bootstrap recipe runs uvicorn in the
@@ -216,7 +232,6 @@ jobs:
       - name: Bootstrap acceptance (health endpoint serves)
         run: |
           just migrate
-          # TODO(src/wattwise_core/api): create_app + /health owned by Dev A.
           WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-ci.sqlite" \
             uv run uvicorn --factory wattwise_core.api.app:create_app \
             --host 127.0.0.1 --port 8000 &
@@ -248,6 +263,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just migrate
       - run: just test-e2e              # CI-R1 item 12
@@ -260,11 +276,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
-      - run: just sbom                  # CI-R1 item 10 (CONT-R1: no Critical + SBOM)
+      - run: just sbom                  # CI-R1 item 10 (CONT-R1: builds the image, no Critical + SBOM)
       - uses: actions/upload-artifact@v4   # retained image-scan report + SBOM (CI-R6)
         if: always()
-        with: { name: image-scan-sbom, path: reports/ }
+        with: { name: image-scan-sbom, path: .scan/ }
 
   package-build:
     name: Package build & install-boot
@@ -274,6 +291,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just install-boot-check    # CI-R1 item 20 (uv build + boot from wheel)
       - uses: actions/upload-artifact@v4
@@ -303,16 +321,27 @@ jobs:
       - image-scan-sbom
       - package-build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # `gh release create` (CI-R10 step 6)
+      packages: write   # push the release image to GHCR (CI-R12)
     env:
       FORGE_PROVIDER: github
+      VERSION: ${{ github.ref_name }}          # the pushed v* tag drives release.sh
+      WW_OWNER: ${{ github.repository_owner }} # GHCR namespace = repo owner
       # Publish tokens are injected as secrets; `just release` skips cleanly when
       # absent (CI-R10 step 6). Never baked into the image (SEC-R12).
-      UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: astral-sh/setup-uv@v5
         with: { python-version: "3.13" }
+      - uses: docker/login-action@v3            # GHCR push auth (CI-R12)
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
       - run: just release               # CI-R10/CI-R12 (live in CI; FORGE_PROVIDER=github)

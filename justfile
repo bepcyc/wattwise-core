@@ -248,9 +248,12 @@ test-db-portable:
 #     planted-canary self-test (SEC-R13.1 / SEC-R12-AC; gitleaks/trufflehog).
 #   * `scripts/scan.sh`        — dependency/SCA + image vuln scan (SEC-R13.2 /
 #     CONT-R1; trivy/grype). Secret scan runs FIRST so a leak fails fast.
+# The PR-stage scan runs BEFORE any image is built, so it scans the secret surface +
+# the repo filesystem (lockfile SCA) only; the image gate runs in `sbom`/release
+# against a freshly built tag (WW_SCAN_TARGETS selects the target set).
 scan:
     bash scripts/secret_scan.sh
-    bash scripts/scan.sh
+    WW_SCAN_TARGETS=fs bash scripts/scan.sh
 
 # Scan the runtime image (no Critical admitted) and emit an SBOM (CI-R1 item 10;
 # CONT-R1). Composed from the two real security-sibling scripts so the tool choice
@@ -260,9 +263,13 @@ scan:
 #   2. `scripts/sbom.sh` — syft SBOM (CycloneDX/SPDX) for that image.
 # Both retain their reports under reports/ (CI-R6). Override WW_IMAGE to point at
 # the freshly built tag, e.g. `WW_IMAGE=wattwise-core:v1.2.3 just sbom`.
-sbom:
-    WW_FAIL_SEVERITY=CRITICAL bash scripts/scan.sh
-    bash scripts/sbom.sh
+# Build the runtime image locally so the image gate has a real target to scan.
+image-build:
+    docker build -t {{image_name}}:local .
+
+sbom: image-build
+    WW_IMAGE={{image_name}}:local WW_FAIL_SEVERITY=CRITICAL WW_SCAN_TARGETS=image bash scripts/scan.sh
+    WW_IMAGE={{image_name}}:local bash scripts/sbom.sh
 
 # Conventional-commits gate (CI-R1 item 15, QUAL-R12). Lints PR commit messages.
 # TODO(scripts): `scripts/lint_commits.sh` owned by the delivery sibling
@@ -291,9 +298,9 @@ test-forge-portable:
         --github .github/workflows \
         --forgejo .forgejo/workflows
     @echo "forge-portable: dry-run release on forgejo"
-    RELEASE_DRY_RUN=1 FORGE_PROVIDER=forgejo just release
+    RELEASE_DRY_RUN=1 FORGE_PROVIDER=forgejo VERSION=v0.0.0-forge-portable-dryrun just release
     @echo "forge-portable: dry-run release on github"
-    RELEASE_DRY_RUN=1 FORGE_PROVIDER=github just release
+    RELEASE_DRY_RUN=1 FORGE_PROVIDER=github VERSION=v0.0.0-forge-portable-dryrun just release
 
 # Package-build & install-boot gate (CI-R1 item 20, COMM-R12): `uv build`
 # produces wheel+sdist, the wheel installs into a FRESH env (not the editable

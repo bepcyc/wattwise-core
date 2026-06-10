@@ -22,8 +22,26 @@
 
 VERSION="${VERSION:-}"
 FORGE_PROVIDER="${FORGE_PROVIDER:-github}"
-REGISTRY="${WW_REGISTRY:-ghcr.io}"
-OWNER="${WW_OWNER:-wattwise}"
+
+# Registry: explicit WW_REGISTRY wins; on Forgejo default to the forge's own OCI
+# registry (the instance host, taken from the GITHUB_SERVER_URL the runner sets);
+# on GitHub default to GHCR (CI-R12).
+if [ -n "${WW_REGISTRY:-}" ]; then
+  REGISTRY="${WW_REGISTRY}"
+elif [ "${FORGE_PROVIDER}" = "forgejo" ] && [ -n "${GITHUB_SERVER_URL:-}" ]; then
+  REGISTRY="$(printf '%s' "${GITHUB_SERVER_URL}" | sed -E 's#^https?://##; s#/+$##')"
+else
+  REGISTRY="ghcr.io"
+fi
+
+# Owner: explicit WW_OWNER wins; else the owner half of the repo the runner gives us.
+if [ -n "${WW_OWNER:-}" ]; then
+  OWNER="${WW_OWNER}"
+elif [ -n "${GITHUB_REPOSITORY:-}" ]; then
+  OWNER="${GITHUB_REPOSITORY%%/*}"
+else
+  OWNER="wattwise"
+fi
 IMAGE_REPO="${REGISTRY}/${OWNER}/wattwise-core"
 
 case "${FORGE_PROVIDER}" in
@@ -91,8 +109,8 @@ else
     -t "${image_tag}" \
     -t "${IMAGE_REPO}:${git_sha}" \
     "${WW_REPO_ROOT}"
-  # CONT-R1: abort the release on ANY Critical in the image.
-  WW_IMAGE="${image_tag}" WW_FAIL_SEVERITY="CRITICAL" "${WW_SCRIPT_DIR}/scan.sh"
+  # CONT-R1: abort the release on ANY Critical in the image (fs SCA already gated pre-merge).
+  WW_IMAGE="${image_tag}" WW_FAIL_SEVERITY="CRITICAL" WW_SCAN_TARGETS=image "${WW_SCRIPT_DIR}/scan.sh"
   WW_IMAGE="${image_tag}" "${WW_SCRIPT_DIR}/sbom.sh" image
   # step 5 (push) — registry/network action.
   ww_step "push image" docker push "${image_tag}"
@@ -102,20 +120,60 @@ else
 fi
 
 # ---- step 6: create the forge release (network) -------------------------------------------------
-# Forge API call is the FIRST network step; dry-run stops here. GitHub uses `gh release`, Forgejo
-# uses the Forgejo/Gitea release API via `tea` or curl — selected purely by FORGE_PROVIDER.
-release_assets="dist/* ${WW_OUT_DIR}/sbom.* CHANGELOG.md"
+# Forge API call is the FIRST network step; dry-run stops here. GitHub uses `gh release`; Forgejo
+# uses the Forgejo/Gitea REST API directly via curl (no extra CLI on the runner) — selected purely
+# by FORGE_PROVIDER. Assets attached: wheel + sdist + SBOM + CHANGELOG (CI-R10 step 6).
+
+# Collect the release assets that actually exist (dry-run builds nothing, so globs may be empty).
+release_assets=()
+for asset in "${WW_REPO_ROOT}"/dist/*.whl "${WW_REPO_ROOT}"/dist/*.tar.gz "${WW_OUT_DIR}"/sbom.* "${WW_REPO_ROOT}/CHANGELOG.md"; do
+  [ -f "${asset}" ] && release_assets+=("${asset}")
+done
+
+ww_create_github_release() {
+  local notes_args=(--notes "Release ${VERSION} (digest: ${digest:-unknown})")
+  [ -f "${WW_REPO_ROOT}/CHANGELOG.md" ] && notes_args=(--notes-file "${WW_REPO_ROOT}/CHANGELOG.md")
+  gh release create "${VERSION}" --title "${VERSION}" "${notes_args[@]}" "${release_assets[@]}"
+}
+
+ww_create_forgejo_release() {
+  # The Forgejo runner provides GITHUB_SERVER_URL / GITHUB_REPOSITORY; the token comes
+  # from the workflow secret (FORGEJO_TOKEN). Fail closed if either is missing.
+  local api_base="${FORGEJO_API_URL:-${GITHUB_SERVER_URL:-}/api/v1}"
+  local repo="${GITHUB_REPOSITORY:-}"
+  [ -n "${GITHUB_SERVER_URL:-}${FORGEJO_API_URL:-}" ] || ww_die "FORGEJO_API_URL or GITHUB_SERVER_URL is required to reach the Forgejo API."
+  [ -n "${repo}" ] || ww_die "GITHUB_REPOSITORY is required to create the Forgejo release."
+  [ -n "${FORGEJO_TOKEN:-}" ] || ww_die "FORGEJO_TOKEN is required to create the Forgejo release."
+  local release_id
+  release_id="$(curl -fsS -X POST \
+    -H "Authorization: token ${FORGEJO_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"tag_name\":\"${VERSION}\",\"name\":\"${VERSION}\",\"body\":\"Release ${VERSION} (image digest: ${digest:-unknown})\"}" \
+    "${api_base}/repos/${repo}/releases" \
+    | sed -E 's/.*"id": *([0-9]+).*/\1/; q')"
+  [ -n "${release_id}" ] || ww_die "Forgejo release creation returned no release id."
+  local asset
+  for asset in "${release_assets[@]}"; do
+    curl -fsS -X POST \
+      -H "Authorization: token ${FORGEJO_TOKEN}" \
+      -F "attachment=@${asset}" \
+      "${api_base}/repos/${repo}/releases/${release_id}/assets?name=$(basename "${asset}")" >/dev/null
+    ww_log "attached asset: $(basename "${asset}")"
+  done
+}
+
 case "${FORGE_PROVIDER}" in
-  github)  ww_step "create GitHub release ${VERSION}" gh release create "${VERSION}" --notes-file CHANGELOG.md ;;
-  forgejo) ww_step "create Forgejo release ${VERSION}" tea release create --tag "${VERSION}" --note-file CHANGELOG.md ;;
+  github)  ww_step "create GitHub release ${VERSION} (+ ${#release_assets[@]} assets)" ww_create_github_release ;;
+  forgejo) ww_step "create Forgejo release ${VERSION} (+ ${#release_assets[@]} assets)" ww_create_forgejo_release ;;
 esac
-ww_log "would attach assets: ${release_assets} + image digest"
 
 # ---- step 7: publish wheel to the index if a token is present (skip cleanly otherwise) -----------
-if [ -n "${PYPI_TOKEN:-}" ]; then
+PYPI_TOKEN="${PYPI_TOKEN:-${UV_PUBLISH_TOKEN:-}}"
+if [ -n "${PYPI_TOKEN}" ]; then
+  export PYPI_TOKEN
   ww_step "publish wheel to index" sh -c 'cd "${WW_REPO_ROOT}" && uv publish --token "${PYPI_TOKEN}" dist/*'
 else
-  ww_log "no PYPI_TOKEN set — skipping index publish cleanly (CI-R10 step 6)."
+  ww_log "no PYPI_TOKEN / UV_PUBLISH_TOKEN set — skipping index publish cleanly (CI-R10 step 6)."
 fi
 
 ww_log "release helper complete for ${VERSION} on ${FORGE_PROVIDER}$(ww_is_dry_run && printf ' (dry-run)')."
