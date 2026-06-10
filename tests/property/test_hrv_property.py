@@ -52,9 +52,7 @@ def _nn_streams(min_size: int = 2, max_size: int = 400) -> st.SearchStrategy[lis
     return st.lists(_NN_MS, min_size=min_size, max_size=max_size)
 
 
-def _long_steady_nn(
-    *, mean_rr_ms: float, jitter_ms: float, n: int, seed: int
-) -> list[float]:
+def _long_steady_nn(*, mean_rr_ms: float, jitter_ms: float, n: int, seed: int) -> list[float]:
     """A steady NN series long enough to clear the 2-min gate (deterministic)."""
     rng = np.random.default_rng(seed)
     jitter = rng.uniform(-jitter_ms, jitter_ms, size=n)
@@ -158,6 +156,40 @@ def test_summary_only_surfaces_no_freq(rmssd: float) -> None:
 def test_summary_negative_rmssd_out_of_domain() -> None:
     """A present-but-invalid summary scalar -> OUT_OF_DOMAIN, never a zero (ANL-R32)."""
     result = time_domain_hrv(summary_rmssd_ms=-1.0)
+    assert isinstance(result, Unavailable)
+    assert result.reason is UnavailableReason.OUT_OF_DOMAIN
+
+
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+@given(sdnn=st.floats(min_value=0.0, max_value=300.0, allow_nan=False))
+def test_summary_sdnn_only_surfaces_at_summary_only(sdnn: float) -> None:
+    """An SDNN-only summary is Computed at summary_only fidelity in its own statistic
+    (ANL-T-R1.8 tier (b)) — never forced to MISSING_REQUIRED_INPUT, never a zero RMSSD."""
+    td = time_domain_hrv(summary_sdnn_ms=sdnn)
+    assert isinstance(td, Computed)
+    assert td.value.sdnn_ms == pytest.approx(sdnn)
+    assert math.isnan(td.value.rmssd_ms)  # absent variant surfaces as NaN, never 0.0
+    assert td.quality.extra["fidelity"] == HrvFidelity.SUMMARY_ONLY.value
+    assert td.provenance.channels == ("hrv_sdnn_ms",)
+
+
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+@given(pnn50=st.floats(min_value=0.0, max_value=100.0, allow_nan=False))
+def test_summary_pnn50_only_surfaces_at_summary_only(pnn50: float) -> None:
+    """A pNN50-only summary is Computed at summary_only fidelity in its own statistic
+    (ANL-T-R1.8 tier (b)) — never forced to MISSING_REQUIRED_INPUT, never a zero RMSSD."""
+    td = time_domain_hrv(summary_pnn50_pct=pnn50)
+    assert isinstance(td, Computed)
+    assert td.value.pnn50_pct == pytest.approx(pnn50)
+    assert math.isnan(td.value.rmssd_ms)
+    assert math.isnan(td.value.sdnn_ms)
+    assert td.quality.extra["fidelity"] == HrvFidelity.SUMMARY_ONLY.value
+    assert td.provenance.channels == ("hrv_pnn50_pct",)
+
+
+def test_summary_invalid_sdnn_only_out_of_domain() -> None:
+    """A present-but-invalid SDNN-only summary -> OUT_OF_DOMAIN, never a fabricated value."""
+    result = time_domain_hrv(summary_sdnn_ms=-5.0)
     assert isinstance(result, Unavailable)
     assert result.reason is UnavailableReason.OUT_OF_DOMAIN
 

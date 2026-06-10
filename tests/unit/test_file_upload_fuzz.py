@@ -32,7 +32,7 @@ from wattwise_core.ingestion.adapters._decode_pwx import decode_pwx
 from wattwise_core.ingestion.adapters._decode_tcx import decode_tcx
 from wattwise_core.ingestion.adapters.file_upload import decode
 
-pytestmark = [pytest.mark.unit, pytest.mark.fuzz]
+pytestmark = pytest.mark.fuzz  # exactly ONE tier marker (TIER-R3)
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "contract" / "fixtures" / "file_upload"
 _VALID_FIT = (_FIXTURES / "ride.fit").read_bytes()

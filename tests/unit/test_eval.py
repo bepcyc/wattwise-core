@@ -40,6 +40,7 @@ from wattwise_core.eval.grading import (
     grade_schema,
 )
 from wattwise_core.eval.passk import compute_pass_k, degenerate_pass_k
+from wattwise_core.eval.prose_checks import detect_language, flesch_kincaid_grade
 from wattwise_core.eval.reflection_suite import grade_reflection_termination
 from wattwise_core.eval.runner import (
     EvalMode,
@@ -56,14 +57,15 @@ from wattwise_core.eval.suites import (
     _is_abstain as readiness_is_abstain,
 )
 from wattwise_core.eval.suites import (
-    _voice_failures as readiness_voice_failures,
-)
-from wattwise_core.eval.suites import (
+    _multilingual_parity_failures,
     grade_intent_plan,
     grade_judge,
     grade_multilingual,
     grade_readiness,
     grade_termination,
+)
+from wattwise_core.eval.suites import (
+    _voice_failures as readiness_voice_failures,
 )
 from wattwise_core.eval.voice_suite import (
     _load as load_voice,
@@ -455,10 +457,7 @@ def test_readiness_prod_hrv_clause_satisfies_voice_check() -> None:
     # Teeth (FIX 7): the EXACT prod HRV-unavailable clause MUST satisfy the voice grader's
     # HRV-unavailable check, so the gate matches a LIVE narration, not only hand fixtures.
     case = {"id": "teeth-prod-hrv-clause", "expects_hrv_unavailable_statement": True}
-    summary = (
-        "You're in a steady place today, so train as planned. "
-        f"{HRV_UNAVAILABLE_CLAUSE}"
-    )
+    summary = f"You're in a steady place today, so train as planned. {HRV_UNAVAILABLE_CLAUSE}"
     failures = readiness_voice_failures(case, summary)
     assert failures == [], f"prod HRV clause must clear the voice check, got {failures}"
 
@@ -576,6 +575,46 @@ def test_multilingual_switch_and_fallback_cases_pass() -> None:
     assert "unsupported-language-fallback-to-english" in ids
 
 
+def test_language_of_output_detection_is_programmatic() -> None:
+    """QA-EVAL-R2.8/R3: the language-of-output check is programmatic - Cyrillic decides ru,
+    German diacritics/stopwords decide de, English stopwords decide en, no-evidence fails."""
+
+    cyrillic = "\u0422\u0432\u043e\u044f \u0444\u043e\u0440\u043c\u0430 72.4"
+    assert detect_language(cyrillic) == "ru"
+    assert detect_language("Deine Fitness liegt stabil, die Form ist gut.") == "de"
+    assert detect_language("Gr\u00f6\u00dfe und Kraft wachsen.") == "de"  # diacritics alone decide
+    assert detect_language("Your fitness is holding steady today.") == "en"
+    assert detect_language("xyzzy 42") == "unknown"  # fail-closed: no silent assumption
+
+
+def test_reading_level_check_is_deterministic_and_non_vacuous() -> None:
+    """QUAL-R13(h)/(i): the plain-language ceiling is graded by code - simple coach
+    prose passes, jargon-dense run-on copy reads far above 8th grade and would fail."""
+    assert flesch_kincaid_grade("You're holding steady this week. Nice work.") <= 8.0
+    dense = (
+        "Comprehensive physiological adaptation necessitates systematically periodized "
+        "polarization methodologies incorporating individualized cardiovascular "
+        "autoregulation considerations alongside biomechanical optimization paradigms"
+    )
+    assert flesch_kincaid_grade(dense) > 8.0
+
+
+def test_wrong_language_render_fails_multilingual_gate() -> None:
+    """QA-EVAL-R2.8 (a) non-vacuity: a grounded-but-wrong-language render (English text
+    under the de key - the silent-wrong-language bug) trips the language-detection check."""
+    case = {
+        "id": "mutated",
+        "renders": {
+            "en": "Your fitness is holding steady at 72.4.",
+            "de": "Your fitness is holding steady at 72.4.",  # numbers right, language wrong
+        },
+        "expected_citations": [],
+        "citations": [],
+    }
+    failures = _multilingual_parity_failures(case)
+    assert any("output language detected" in f for f in failures)
+
+
 # --------------------------------------------------------------------------- #
 # pass^k offline plumbing (QA-EVAL-R10)                                        #
 # --------------------------------------------------------------------------- #
@@ -678,6 +717,7 @@ def test_full_scorecard_lists_every_gated_suite() -> None:
         "multilingual",
         "judge",
         "readiness",
+        "load_review",
         "plan",
         "voice",
         "self_certification",
@@ -793,8 +833,7 @@ async def test_self_certification_regression_trips_non_regression_gate(
     report = compare_to_baseline(cards, path=path)
     assert not report.passed
     assert any(
-        r.suite == "self_certification" and r.metric == "self_cert.rate"
-        for r in report.regressions
+        r.suite == "self_certification" and r.metric == "self_cert.rate" for r in report.regressions
     )
 
 

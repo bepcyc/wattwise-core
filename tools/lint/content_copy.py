@@ -83,9 +83,7 @@ _LEAK = re.compile(
     re.IGNORECASE,
 )
 # Raw fidelity-enum values must never surface to an athlete (E2E-R4).
-_FIDELITY_ENUM = re.compile(
-    r"\b(?:summary_only|modeled|measured|derived|estimated|sensor)\b"
-)
+_FIDELITY_ENUM = re.compile(r"\b(?:summary_only|modeled|measured|derived|estimated|sensor)\b")
 
 
 def _is_catalog(path: Path) -> bool:
@@ -136,10 +134,12 @@ def _scan_registry(path: Path, catalog: dict[str, Any]) -> list[Violation]:
         if not isinstance(entry, dict):
             out.append(
                 Violation(
-                    path=path, line=1, rule=_RULE_KEY, requirement=_REQ,
+                    path=path,
+                    line=1,
+                    rule=_RULE_KEY,
+                    requirement=_REQ,
                     message=(
-                        f"key '{key}' is not a keyed table; user copy MUST "
-                        f"resolve via a stable key"
+                        f"key '{key}' is not a keyed table; user copy MUST resolve via a stable key"
                     ),
                 )
             )
@@ -152,7 +152,10 @@ def _scan_registry(path: Path, catalog: dict[str, Any]) -> list[Violation]:
         if not code:
             out.append(
                 Violation(
-                    path=path, line=1, rule=_RULE_CODE, requirement=_REQ,
+                    path=path,
+                    line=1,
+                    rule=_RULE_CODE,
+                    requirement=_REQ,
                     message=(
                         f"error key '{key}' has no stable machine 'code' (clients "
                         f"branch on the code, not the sentence)"
@@ -164,7 +167,10 @@ def _scan_registry(path: Path, catalog: dict[str, Any]) -> list[Violation]:
         if code in seen_codes:
             out.append(
                 Violation(
-                    path=path, line=1, rule=_RULE_CODE, requirement=_REQ,
+                    path=path,
+                    line=1,
+                    rule=_RULE_CODE,
+                    requirement=_REQ,
                     message=(
                         f"duplicate error code '{code}' (keys '{seen_codes[code]}' "
                         f"and '{key}'); each code MUST be unique in the registry"
@@ -185,7 +191,10 @@ def _scan_registry(path: Path, catalog: dict[str, Any]) -> list[Violation]:
 # field (QUAL-R13(a): the standard "does NOT govern internal logs, machine codes,
 # or developer-facing strings"), so the scan is restricted to the API layer below
 # to avoid flagging internal reason text — a false positive we explicitly reject.
-_USERFACING_KWARGS = frozenset({"detail", "title", "user_message", "athlete_message"})
+# ``message`` covers the RFC-9457 ``errors[].message`` field (the per-field
+# validation copy a human reads) — previously excluded, which let the real
+# problem-builder copy bypass the catalog scan (QUAL-R13(c) gap).
+_USERFACING_KWARGS = frozenset({"detail", "title", "message", "user_message", "athlete_message"})
 _APP_SEGMENT = "wattwise_core"
 # Only these engine subpackages emit athlete-facing API copy through these kwargs.
 _USERFACING_LAYERS = frozenset({"api"})

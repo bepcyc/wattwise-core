@@ -48,6 +48,7 @@ from wattwise_core.api.athlete_schemas import (
     FitnessSignatureHistory,
     FitnessSignatureOut,
 )
+from wattwise_core.api.copy import message as _copy
 from wattwise_core.api.deps import RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
@@ -314,7 +315,9 @@ async def set_signature(
             "validation-error",
             errors=[
                 FieldError(
-                    code="signature_type_required", message="", pointer="/signature_type"
+                    code="signature_type_required",
+                    message=_copy("validation.signature_type_required"),
+                    pointer="/signature_type",
                 )
             ],
         )

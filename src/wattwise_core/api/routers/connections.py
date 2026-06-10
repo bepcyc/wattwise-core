@@ -55,6 +55,7 @@ from wattwise_core.api.connection_catalog import (
     OSS_CATALOG,
     CatalogEntry,
 )
+from wattwise_core.api.copy import message as _copy
 from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus
@@ -170,9 +171,7 @@ class FileUploadNextStep(BaseModel):
 
 #: The archetype-discriminated next-step union (SCHEMA-R10): a typed client branches on
 #: ``kind`` (the OpenAPI ``discriminator``) without guessing the union member.
-ConnectionNextStep = Annotated[
-    ApiKeyNextStep | FileUploadNextStep, Field(discriminator="kind")
-]
+ConnectionNextStep = Annotated[ApiKeyNextStep | FileUploadNextStep, Field(discriminator="kind")]
 
 
 class ApiKeyCompleteRequest(BaseModel):
@@ -313,9 +312,7 @@ async def reconnect(
     """
     athlete_uuid = uuid.UUID(principal.athlete_id)
     connection = await _owned_connection(session, athlete_uuid, connection_id)
-    entry = CATALOG_BY_SOURCE.get(
-        await _source_key_for(session, connection.source_descriptor_id)
-    )
+    entry = CATALOG_BY_SOURCE.get(await _source_key_for(session, connection.source_descriptor_id))
     if entry is None or entry.auth_archetype is not AuthArchetype.API_KEY:
         raise _wrong_archetype(connection.auth_archetype)
     await _run_probe(probe, entry.source, body.api_key)
@@ -352,7 +349,7 @@ async def _run_probe(probe: CredentialProbe, source: str, secret: str) -> None:
             errors=[
                 FieldError(
                     code="invalid_credential",
-                    message="That key didn't work — double-check it and try again.",
+                    message=_copy("connection.credential_rejected"),
                     pointer="/api_key",
                 )
             ],
@@ -466,7 +463,7 @@ def _wrong_archetype(archetype: AuthArchetype) -> ProblemError:
         errors=[
             FieldError(
                 code="unsupported_archetype",
-                message="This source isn't connected with a key.",
+                message=_copy("connection.key_archetype_only"),
                 parameter="source",
             )
         ],

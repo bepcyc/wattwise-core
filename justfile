@@ -136,6 +136,40 @@ test-e2e:
 test-llm:
     {{uv}} pytest -m llm
 
+# Nightly fuzz campaign (TIER-R5 (b), CI-R4): the SAME fuzz corpus under the extended
+# `fuzz-nightly` hypothesis profile (orders of magnitude more examples, no deadline).
+# A coverage-guided Atheris/libFuzzer engine is not available on CPython 3.13, so the
+# nightly depth comes from the extended generative budget (accepted deviation,
+# documented); any crash found MUST be distilled into a pinned @example regression
+# before the fix merges (TIER-R5/TIER-R1).
+test-fuzz-nightly:
+    {{uv}} pytest -m fuzz --hypothesis-profile=fuzz-nightly
+
+# T-MUT mutation gate (TIER-R6, CI-R1 item 17): mutmut over the analytics package and
+# the ASBO->GBO adapter layer with per-package score floors (>=90% / >=85%), enforced
+# by tools/mutation_gate.py. EXPENSIVE: nightly + analytics/adapter PRs only.
+test-mut:
+    {{uv}} python -m tools.mutation_gate run
+
+# PR-conditional T-MUT wrapper (CI-R1 item 17): runs the mutation gate ONLY when the
+# diff vs the base branch touches a mutated package — the decision lives HERE (CI-R0:
+# zero gate logic in workflow YAML). BASE_REF defaults to origin/main.
+test-mut-pr BASE_REF="origin/main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(git diff --name-only "{{BASE_REF}}"...HEAD --         src/wattwise_core/analytics src/wattwise_core/ingestion/adapters || true)
+    if [ -z "$changed" ]; then
+        echo "test-mut-pr: no analytics/adapter changes vs {{BASE_REF}}; skipping T-MUT"
+        exit 0
+    fi
+    just test-mut
+
+# Nightly LIVE eval leg (QA-EVAL-R9/CI-R4): real-provider smoke + INFRA_ERROR
+# classification + the max-infra-rate promotion gate (QA-EVAL-R12(b)). Env-gated on
+# WATTWISE_LLM_API_KEY; never part of the offline gate (TIER-R1).
+eval-live:
+    {{uv}} python -m {{package}}.eval run --mode=live --scorecard=reports/eval-live-scorecard.json
+
 # =====================================================================
 # 3. Coverage gate (CI-R1 item 5)
 # =====================================================================

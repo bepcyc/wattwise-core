@@ -24,6 +24,8 @@ drop does.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -74,6 +76,7 @@ _SUITE_METRICS: dict[str, tuple[str, ...]] = {
     "multilingual": ("termination.rate",),
     "judge": ("judge.passed_cases",),
     "readiness": ("readiness.consistency_rate", "readiness.voice_rate"),
+    "load_review": ("load_review.consistency_rate",),
     "plan": ("plan.grounding_rate", "plan.progression_rate", "plan.consistency_rate"),
     "voice": ("voice.rate", "pass_k.all_pass_rate"),
     # The no-self-certification suite (QA-EVAL-R2.10 / QA-EVAL-R6): its zero-self-certified-
@@ -119,8 +122,90 @@ def build_baseline(cards: Sequence[Scorecard]) -> dict[str, Any]:
         }
     return {
         "baseline_format_version": BASELINE_FORMAT_VERSION,
+        # QA-EVAL-R12(c): the release tag this baseline was produced at. ``WATTWISE_RELEASE_TAG``
+        # (the release pipeline) wins; otherwise the tag pointing at HEAD; ``None`` before the
+        # first release (the tag check then has nothing to verify and reports it).
+        "release_tag": _release_tag(),
         "suites": suites,
     }
+
+
+def _release_tag() -> str | None:
+    """The release tag to record on the baseline (QA-EVAL-R12(c)) — never fabricated."""
+    env_tag = os.environ.get("WATTWISE_RELEASE_TAG")
+    if env_tag:
+        return env_tag
+    try:
+        out = subprocess.run(
+            ["git", "tag", "--points-at", "HEAD"],  # noqa: S607 - PATH-resolved git, dev/CI tooling
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        ).stdout.strip()
+    except OSError:
+        return None
+    return out.splitlines()[0] if out else None
+
+
+def tag_in_git_history(tag: str) -> bool:
+    """``True`` iff ``tag`` resolves in the local git history (QA-EVAL-R12(c) CI check)."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, repo-local dev/CI tooling
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],  # noqa: S607 - PATH-resolved git, dev/CI tooling
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def baseline_tag_failures(*, path: Path | None = None) -> tuple[str, ...]:
+    """The QA-EVAL-R12(c) baseline-tag check: a recorded tag must exist in git history.
+
+    A baseline with ``release_tag: null`` (pre-first-release) has nothing to verify and
+    passes; a recorded tag absent from git history is the corruption the check exists
+    for (a baseline imported from elsewhere / a rewritten history) and fails.
+    """
+    document = load_baseline(path=path)
+    if document is None:
+        return ()
+    tag = document.get("release_tag")
+    if tag is None:
+        return ()
+    if not tag_in_git_history(str(tag)):
+        return (
+            f"baseline release_tag {tag!r} does not exist in git history "
+            "(QA-EVAL-R12(c)); re-seed via `just eval-update-baseline` at a real release",
+        )
+    return ()
+
+
+def live_run_blocks_baseline(*, live_scorecard: Path | None = None) -> str | None:
+    """Why the baseline must NOT advance, or ``None`` when advancement is allowed.
+
+    QA-EVAL-R12(c): the baseline may only advance from a commit whose LIVE-mode eval
+    completed with NO infrastructure errors. When a live scorecard artifact exists
+    (written by ``python -m wattwise_core.eval run --mode=live``), it must record a
+    CLEAN run; with no artifact present (an offline-only environment) the recorded-mode
+    gate is the only evidence available and advancement proceeds.
+    """
+    artifact = (
+        live_scorecard if live_scorecard is not None else Path("reports/eval-live-scorecard.json")
+    )
+    if not artifact.exists():
+        return None
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    if payload.get("clean") is True:
+        return None
+    return (
+        f"live eval artifact {artifact} does not record a clean run "
+        "(quality failures or INFRA_ERRORs present); refusing to advance the baseline "
+        "(QA-EVAL-R12(c))"
+    )
 
 
 def write_baseline(cards: Sequence[Scorecard], *, path: Path | None = None) -> Path:
@@ -128,9 +213,7 @@ def write_baseline(cards: Sequence[Scorecard], *, path: Path | None = None) -> P
     target = path if path is not None else BASELINE_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     document = build_baseline(cards)
-    target.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return target
 
 
@@ -156,8 +239,7 @@ class Regression:
     def reason(self) -> str:
         tag = "SAFETY-SUITE regression" if self.is_safety else "regression"
         return (
-            f"{self.suite}/{self.metric}: {tag} "
-            f"{self.current:.6g} < baseline {self.baseline:.6g}"
+            f"{self.suite}/{self.metric}: {tag} {self.current:.6g} < baseline {self.baseline:.6g}"
         )
 
 
@@ -244,8 +326,11 @@ __all__ = [
     "BASELINE_PATH",
     "Regression",
     "RegressionReport",
+    "baseline_tag_failures",
     "build_baseline",
     "compare_to_baseline",
+    "live_run_blocks_baseline",
     "load_baseline",
+    "tag_in_git_history",
     "write_baseline",
 ]

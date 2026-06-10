@@ -30,6 +30,10 @@ from wattwise_core.observability.logging import (
 from wattwise_core.security.credentials import InMemoryCredentialStore
 from wattwise_core.security.crypto import EnvelopeCipher
 
+# QA-LOG-R1: the central-redaction contract is part of the gated `logging` tier
+# (CI-R1 item 11 / `just test-logging`), not an unmarked stray.
+pytestmark = pytest.mark.logging
+
 
 def _redact(event: dict[str, object]) -> dict[str, object]:
     """Run the central redactor exactly as the emit boundary does."""

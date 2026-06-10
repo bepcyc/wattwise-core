@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from wattwise_core.eval.budget import BudgetGrade
+from wattwise_core.eval.load_review_suite import LoadReviewGrade
 from wattwise_core.eval.plan_suite import PlanGrade
 
 if TYPE_CHECKING:
@@ -181,11 +182,7 @@ class IntentPlanGrade:
         if self.total == 0:
             return True
         floor = INTENT_PLAN_MIN_ACCURACY
-        return (
-            self.precision >= floor
-            and self.recall >= floor
-            and self.intent_accuracy >= floor
-        )
+        return self.precision >= floor and self.recall >= floor and self.intent_accuracy >= floor
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,15 +309,14 @@ class SuiteGrades:
     """The aggregate of every grader for one suite run (EVAL-R9 machine-readable)."""
 
     grounding: GroundingGrade = field(default_factory=lambda: GroundingGrade(0, 0, 0))
-    abstention: AbstentionGrade = field(
-        default_factory=lambda: AbstentionGrade(0, 0, 0)
-    )
+    abstention: AbstentionGrade = field(default_factory=lambda: AbstentionGrade(0, 0, 0))
     schema: SchemaGrade = field(default_factory=lambda: SchemaGrade(0, 0))
     injection: InjectionGrade = field(default_factory=lambda: InjectionGrade(0, 0))
     termination: TerminationGrade = field(default_factory=lambda: TerminationGrade(0, 0))
     intent_plan: IntentPlanGrade = field(default_factory=lambda: IntentPlanGrade(0, 1.0, 1.0))
     judge: JudgeGrade = field(default_factory=lambda: JudgeGrade(0, 0, 1.0))
     readiness: ReadinessGrade = field(default_factory=lambda: ReadinessGrade(0, 0, 0, 0))
+    load_review: LoadReviewGrade = field(default_factory=lambda: LoadReviewGrade(0, 0))
     plan: PlanGrade = field(default_factory=lambda: PlanGrade(0, 0, 0, 0))
     voice: VoiceGrade = field(default_factory=lambda: VoiceGrade(0, 0))
     self_cert: SelfCertGrade = field(default_factory=lambda: SelfCertGrade(0, 0))
@@ -337,6 +333,7 @@ class SuiteGrades:
             and self.intent_plan.passed
             and self.judge.passed
             and self.readiness.passed
+            and self.load_review.passed
             and self.plan.passed
             and self.voice.passed
             and self.self_cert.passed

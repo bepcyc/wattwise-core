@@ -100,9 +100,9 @@ def _day_bounds_for_tz(
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise MissingReferenceTimezone(f"unresolvable reference timezone: {tz_name!r}") from exc
     lo = _dt.datetime.combine(from_date, _dt.time.min, zone).astimezone(_dt.UTC)
-    hi = _dt.datetime.combine(
-        to_date + _dt.timedelta(days=1), _dt.time.min, zone
-    ).astimezone(_dt.UTC)
+    hi = _dt.datetime.combine(to_date + _dt.timedelta(days=1), _dt.time.min, zone).astimezone(
+        _dt.UTC
+    )
     return lo, hi
 
 
@@ -135,9 +135,7 @@ def _activity_local_date(activity: Activity, athlete: Athlete) -> _dt.date:
     metadata"), passing the stored value as the as-of prior so a relocation never re-buckets.
     Fails closed (no tz) via :class:`localdate.MissingReferenceTimezone`, never a UTC default.
     """
-    return project_local_date(
-        activity.start_time, athlete, prior_local_date=activity.local_date
-    )
+    return project_local_date(activity.start_time, athlete, prior_local_date=activity.local_date)
 
 
 async def _activities_in_local_range(
@@ -187,13 +185,21 @@ async def _load_wellness_rr(
 
 async def _load_wellness_hrv_summary(
     session: AsyncSession, athlete_id: str, local_date: _dt.date
-) -> float | None:
+) -> tuple[float | None, float | None, float | None]:
+    """Load the day's typed HRV summary scalars ``(rmssd_ms, sdnn_ms, pnn50_pct)``.
+
+    Each variant is surfaced independently so an SDNN-only or pNN50-only summary still
+    reaches the ``summary_only`` HRV tier in its own statistic/unit (ANL-T-R1.8) — the
+    summary path is never gated on RMSSD presence.
+    """
     stmt = select(DailyWellness).where(
         DailyWellness.athlete_id == _uid(athlete_id),
         DailyWellness.local_date == local_date,
     )
     dw = (await session.execute(stmt)).scalar_one_or_none()
-    return None if dw is None else _f(dw.hrv_rmssd_ms)
+    if dw is None:
+        return (None, None, None)
+    return (_f(dw.hrv_rmssd_ms), _f(dw.hrv_sdnn_ms), _f(dw.hrv_pnn50_pct))
 
 
 async def _load_wellness_hrv_baseline(
@@ -227,9 +233,7 @@ def _hrv_baseline_midpoint(low: float | None, high: float | None) -> float | Non
     return sum(bounds) / len(bounds)
 
 
-async def _load_earliest_activity_date(
-    session: AsyncSession, athlete_id: str
-) -> _dt.date | None:
+async def _load_earliest_activity_date(session: AsyncSession, athlete_id: str) -> _dt.date | None:
     """The athlete-LOCAL date of the first-ever activity, or ``None`` if none (GBO-R35).
 
     The earliest activity by UTC ``start_time`` is also the earliest local instant, but its
@@ -341,9 +345,7 @@ async def _load_activity_channels(
     session: AsyncSession, activity_id: str
 ) -> dict[StreamChannelName, Stream]:
     """Load the activity's stream channels as analytic streams, keyed by channel."""
-    stmt = select(ActivityStreamSet).where(
-        ActivityStreamSet.activity_id == _uid(activity_id)
-    )
+    stmt = select(ActivityStreamSet).where(ActivityStreamSet.activity_id == _uid(activity_id))
     stream_set = (await session.execute(stmt)).scalar_one_or_none()
     if stream_set is None:
         return {}
@@ -356,9 +358,7 @@ async def _load_activity_channels(
     return {c.channel: _channel_to_stream(c, rate) for c in channels}
 
 
-def _better_mmp(
-    candidate: Computed[_mmp.MMPWindow], current: MetricResult[_mmp.MMPWindow]
-) -> bool:
+def _better_mmp(candidate: Computed[_mmp.MMPWindow], current: MetricResult[_mmp.MMPWindow]) -> bool:
     """True if ``candidate`` is a higher mean power than the current best (MMP-R4)."""
     if not is_computed(current):
         return True
@@ -380,7 +380,6 @@ def _curve_point(
             f"no computed MMP point at {duration_s} s in the gather window",
         )
     return Computed(value=float(res.value.mean_power_w))
-
 
 
 __all__ = [

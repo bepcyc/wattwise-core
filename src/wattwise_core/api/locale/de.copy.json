@@ -1,0 +1,32 @@
+{
+  "validation.check_value": {
+    "kind": "validation",
+    "code": "invalid",
+    "text": "Prüf den Wert und versuch es noch einmal."
+  },
+  "validation.range_reversed": {
+    "kind": "validation",
+    "code": "out_of_range",
+    "text": "Das Startdatum muss am oder vor dem Enddatum liegen."
+  },
+  "validation.signature_type_required": {
+    "kind": "validation",
+    "code": "signature_type_required",
+    "text": "Sag uns, um welche Art von Signatur es sich handelt, und versuch es noch einmal."
+  },
+  "connection.credential_rejected": {
+    "kind": "error",
+    "code": "invalid_credential",
+    "text": "Der Schlüssel hat nicht funktioniert — prüf ihn und versuch es noch einmal."
+  },
+  "connection.key_archetype_only": {
+    "kind": "validation",
+    "code": "unsupported_archetype",
+    "text": "Diese Quelle wird nicht über einen Schlüssel verbunden."
+  },
+  "sync.unknown_source": {
+    "kind": "error",
+    "code": "unknown_source",
+    "text": "Das hast du noch nicht verbunden."
+  }
+}

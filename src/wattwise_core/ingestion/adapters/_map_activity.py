@@ -97,12 +97,18 @@ def start_time(asbo: ActivityAsbo) -> _dt.datetime | None:
     session_start = as_dt(asbo.session.get("start_time"))
     if session_start is not None:
         return session_start
+    # Record/lap fallbacks route through the SAME naive==UTC normalization as the
+    # session field, so every instant the map emits or subtracts is UTC-aware
+    # (TIER-R5 mapping-fuzz distilled failure: a naive record timestamp must never
+    # surface as a naive canonical start_time or poison a datetime subtraction).
     for rec in asbo.records:
-        if rec.timestamp is not None:
-            return rec.timestamp
+        normalized = as_dt(rec.timestamp)
+        if normalized is not None:
+            return normalized
     for lap in asbo.laps:
-        if lap.start_time is not None:
-            return lap.start_time
+        normalized = as_dt(lap.start_time)
+        if normalized is not None:
+            return normalized
     return None
 
 
@@ -136,7 +142,12 @@ def build_laps(asbo: ActivityAsbo, session_start: _dt.datetime) -> list[dict[str
     """Build canonical contiguous 0-based laps with relative offsets (MAP-R2/R3)."""
     laps: list[dict[str, Any]] = []
     for lap in asbo.laps:
-        offset = lap.start_time - session_start if lap.start_time is not None else None
+        # Normalize the lap instant through the same naive==UTC convention as every
+        # other decoded instant (``as_dt``): a decoder emitting a NAIVE lap start next
+        # to an aware session start must yield a typed offset, never a TypeError from
+        # naive-aware subtraction (TIER-R5 mapping-fuzz distilled failure).
+        lap_start = as_dt(lap.start_time)
+        offset = lap_start - session_start if lap_start is not None else None
         laps.append(
             {
                 "lap_index": lap.lap_index,

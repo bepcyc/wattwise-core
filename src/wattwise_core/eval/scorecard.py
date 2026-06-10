@@ -143,6 +143,11 @@ def _engine_blobs(g: SuiteGrades) -> dict[str, Any]:
             "passed": g.readiness.passed,
             "failures": list(g.readiness.failures),
         },
+        "load_review": {
+            "consistency_rate": g.load_review.consistency_rate,
+            "passed": g.load_review.passed,
+            "failures": list(g.load_review.failures),
+        },
         "plan": {
             "grounding_rate": g.plan.grounding_rate,
             "progression_rate": g.plan.progression_rate,

@@ -23,6 +23,8 @@ into images. A required secret being absent fails the boot **closed** (RUN-R4.1)
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import tomllib
 from collections.abc import Mapping
@@ -329,6 +331,8 @@ class Settings(BaseSettings):
     agent__eval__median_cost_usd: float = Field(gt=0)
     agent__eval__p95_latency_ms: float = Field(gt=0)
     agent__eval__cost_per_1k_tokens_usd: float = Field(gt=0)
+    # QA-EVAL-R12(b): live-mode max INFRA_ERROR rate before alert + blocked promotion.
+    agent__eval__max_infra_error_rate: float = Field(gt=0, le=1)
     agent__metric_aliases: dict[str, str]
 
     # --- retention ---
@@ -496,6 +500,7 @@ def _require_strong_signing_key(self: Settings) -> None:
             "the service refuses to start (SEC-R3)"
         )
 
+
 def _reject_wildcard_cors_with_credentials(self: Settings) -> None:
     """Reject the wildcard-origin + credentials configuration cliff (SEC-R10 / SEC-R10-AC).
 
@@ -534,6 +539,9 @@ _EVAL_BUDGET_KEYS: tuple[str, ...] = (
     "agent__eval__median_cost_usd",
     "agent__eval__p95_latency_ms",
     "agent__eval__cost_per_1k_tokens_usd",
+    # The live-mode max infrastructure-error rate (QA-EVAL-R12(b)): the fraction of live
+    # cases allowed to land INFRA_ERROR before the run alerts and blocks promotion.
+    "agent__eval__max_infra_error_rate",
 )
 
 
@@ -568,3 +576,45 @@ def load_eval_budget() -> dict[str, float]:
             raise ConfigError(f"fail-closed: eval-budget {key} must be > 0 (got {value})")
         out[key] = value
     return out
+
+
+# The config keys whose values the recorded eval fixtures were captured under
+# (QA-EVAL-R12(a)): the pinned model identifier plus every coach prompt/persona/language
+# content key. A change to ANY of these without re-recording the fixtures is the
+# "stale cassette" condition the eval gate fails on.
+_RECORDED_PIN_PREFIXES: tuple[str, ...] = (
+    "agent__coach__system_prompt",
+    "agent__coach__prompts",
+    "agent__coach__languages",
+)
+
+
+def load_recorded_pins() -> dict[str, str]:
+    """Resolve the prompt/model pins the recorded eval fixtures depend on (QA-EVAL-R12(a)).
+
+    Returns ``{"model": <pinned model id>, "prompt_sha256": <digest>}`` where the digest
+    covers the resolved compose system prompt, every prompt fragment, and every language
+    pack — the content whose change invalidates recorded model outputs. Resolved from the
+    SAME layered config as the full settings (defaults -> operator file -> env override),
+    WITHOUT the secret fail-close (TIER-R1: the offline eval tier carries no secrets).
+    A missing model pin fails closed (CFG-R1a).
+    """
+    config_file_env = os.environ.get("WATTWISE_CONFIG_FILE")
+    config_file = Path(config_file_env) if config_file_env else None
+    merged: dict[str, Any] = {}
+    _flatten("", _read_toml(_DEFAULTS_PATH), merged)
+    if config_file is not None:
+        if not config_file.is_file():
+            raise ConfigError(f"WATTWISE_CONFIG_FILE does not exist: {config_file}")
+        _flatten("", _read_toml(config_file), merged)
+    model = os.environ.get("WATTWISE_AGENT__MODEL", merged.get("agent__model"))
+    if not model:
+        raise ConfigError(
+            "fail-closed: required config is missing: WATTWISE_AGENT__MODEL / [agent].model "
+            "(the recorded-fixture model pin, QA-EVAL-R12(a))"
+        )
+    content = {key: merged[key] for key in sorted(merged) if key.startswith(_RECORDED_PIN_PREFIXES)}
+    digest = hashlib.sha256(
+        json.dumps(content, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    return {"model": str(model), "prompt_sha256": digest}

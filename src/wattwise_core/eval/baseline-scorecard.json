@@ -1,5 +1,6 @@
 {
   "baseline_format_version": "1.0.0",
+  "release_tag": null,
   "suites": {
     "abstention": {
       "dataset_version": "1.0.0",
@@ -41,6 +42,13 @@
       "dataset_version": "1.0.0",
       "metrics": {
         "judge.passed_cases": 2.0
+      },
+      "passed": true
+    },
+    "load_review": {
+      "dataset_version": "1.0.0",
+      "metrics": {
+        "load_review.consistency_rate": 1.0
       },
       "passed": true
     },

@@ -19,6 +19,7 @@ from typing import Any
 from wattwise_core.eval import budget as budget_mod
 from wattwise_core.eval import reflection_suite, self_cert_suite, suites, voice_suite
 from wattwise_core.eval.grading import SuiteGrades, TerminationGrade
+from wattwise_core.eval.load_review_suite import grade_load_review
 from wattwise_core.eval.passk import degenerate_pass_k
 from wattwise_core.eval.plan_suite import grade_plan
 from wattwise_core.eval.scorecard import EvalMode, Scorecard
@@ -37,6 +38,7 @@ ENGINE_SUITES: frozenset[str] = frozenset(
         "multilingual",
         "judge",
         "readiness",
+        "load_review",
         "plan",
         "voice",
         "self_certification",
@@ -51,14 +53,15 @@ def _sync_engine_grades(name: str) -> SuiteGrades | None:
     """The SYNC engine grades, or ``None`` when ``name`` needs the async path below."""
     if name == "readiness":
         return SuiteGrades(readiness=suites.grade_readiness())
+    if name == "load_review":
+        # QA-EVAL-R2.3: the weekly load review certified against the SHIPPED PMC oracle.
+        return SuiteGrades(load_review=grade_load_review())
     if name == "plan":
         return SuiteGrades(plan=grade_plan())
     if name == "multilingual":
         # A parity check expressed via the all-or-nothing termination grade shape.
         total, failures = suites.grade_multilingual()
-        return SuiteGrades(
-            termination=TerminationGrade(total, total - len(failures), failures)
-        )
+        return SuiteGrades(termination=TerminationGrade(total, total - len(failures), failures))
     return None
 
 

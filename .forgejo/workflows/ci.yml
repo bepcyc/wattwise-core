@@ -22,6 +22,8 @@ on:
     tags: ["v*"]   # the v*-tag push triggers the release job (CI-R10/CI-R12)
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "30 2 * * *"   # nightly leg (CI-R4): live eval+smoke, deep fuzz, T-MUT
 
 env:
   UV_FROZEN: "1"
@@ -282,6 +284,45 @@ jobs:
       - run: just install-boot-check    # CI-R1 item 20
       - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         with: { name: dist, path: dist/ }
+
+  # ----------------------------------------------------------------- CONDITIONAL + NIGHTLY
+  mutation:
+    name: T-MUT (conditional)
+    # CI-R1 item 17 (TIER-R6): runs ONLY on PRs; the recipe itself decides from the
+    # diff whether the mutated packages changed (zero gate logic here, CI-R0).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
+      - run: just install
+      - run: just test-mut-pr origin/${{ github.base_ref }}
+
+  nightly:
+    name: Nightly live eval + live smoke + deep fuzz + T-MUT (CI-R4)
+    # CI-R4: live-mode T-EVAL + live-provider smoke nightly, alerting on regression
+    # (a red scheduled run is the forge's failure notification), without blocking PRs.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      WATTWISE_LLM_API_KEY: ${{ secrets.WATTWISE_LLM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
+      - run: just install
+      - run: just eval-live          # QA-EVAL-R9 live mode + INFRA_ERROR gate (QA-EVAL-R12(b))
+      - run: just test-llm           # live-provider smoke (CI-R4)
+      - run: just test-fuzz-nightly  # TIER-R5 mode (b) extended campaign
+      - run: just test-mut           # TIER-R6 nightly mutation campaign
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4   # CI-R6
+        if: always()
+        with: { name: nightly-reports, path: reports/ }
 
   # ----------------------------------------------------------------- RELEASE
   # FORGE_PROVIDER=forgejo selects the Forgejo release + its built-in OCI

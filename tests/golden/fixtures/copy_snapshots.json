@@ -1,0 +1,26 @@
+{
+  "de": {
+    "connection.credential_rejected": "Der Schlüssel hat nicht funktioniert — prüf ihn und versuch es noch einmal.",
+    "connection.key_archetype_only": "Diese Quelle wird nicht über einen Schlüssel verbunden.",
+    "sync.unknown_source": "Das hast du noch nicht verbunden.",
+    "validation.check_value": "Prüf den Wert und versuch es noch einmal.",
+    "validation.range_reversed": "Das Startdatum muss am oder vor dem Enddatum liegen.",
+    "validation.signature_type_required": "Sag uns, um welche Art von Signatur es sich handelt, und versuch es noch einmal."
+  },
+  "en": {
+    "connection.credential_rejected": "That key didn't work — double-check it and try again.",
+    "connection.key_archetype_only": "This source isn't connected with a key.",
+    "sync.unknown_source": "You haven't connected that yet.",
+    "validation.check_value": "Check that value and try again.",
+    "validation.range_reversed": "The start date needs to be on or before the end date.",
+    "validation.signature_type_required": "Tell us which kind of signature this is and try again."
+  },
+  "ru": {
+    "connection.credential_rejected": "Этот ключ не подошёл — проверь его и попробуй ещё раз.",
+    "connection.key_archetype_only": "Этот источник подключается не по ключу.",
+    "sync.unknown_source": "Это ещё не подключено.",
+    "validation.check_value": "Проверь значение и попробуй ещё раз.",
+    "validation.range_reversed": "Дата начала должна быть не позже даты окончания.",
+    "validation.signature_type_required": "Укажи, какой это тип сигнатуры, и попробуй ещё раз."
+  }
+}

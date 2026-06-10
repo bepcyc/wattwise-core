@@ -37,6 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.api.auth import Scope, require_scopes
+from wattwise_core.api.copy import message as _copy
 from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.persistence.models import Connection, SourceDescriptor
@@ -215,7 +216,7 @@ async def _owned_connection_by_source(
             errors=[
                 FieldError(
                     code="unknown_source",
-                    message="You haven't connected that yet.",
+                    message=_copy("sync.unknown_source"),
                     pointer="/source",
                 )
             ],

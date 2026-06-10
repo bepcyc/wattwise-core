@@ -53,6 +53,7 @@ from wattwise_core.eval.grading import (
     TerminationGrade,
 )
 from wattwise_core.eval.intent_plan_suite import grade_intent_plan  # re-export (EVAL-R3)
+from wattwise_core.eval.prose_checks import MAX_FK_GRADE, detect_language, flesch_kincaid_grade
 
 _DATASETS_DIR = Path(__file__).parent / "datasets"
 _INTERNAL_TOKEN = re.compile(r"(ctl|atl|tsb|rmssd|coverage_gaps|__truncated__)", re.IGNORECASE)
@@ -65,9 +66,7 @@ _SUMMARY_NUMBER_RE = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?(?![\w.])")
 _FIRST_SENTENCE_RE = re.compile(r"^[^.!?]*")
 # A numeric "readiness score" is forbidden: readiness is a typed STATE, not a number
 # (SCHEMA-R3). Catch "readiness score", "readiness: <n>", "readiness <n>", "readiness=<n>".
-_READINESS_SCORE_RE = re.compile(
-    r"readiness\s*(?:score|[:=]\s*[+-]?\d|\s+[+-]?\d)", re.IGNORECASE
-)
+_READINESS_SCORE_RE = re.compile(r"readiness\s*(?:score|[:=]\s*[+-]?\d|\s+[+-]?\d)", re.IGNORECASE)
 # An HRV-unavailable summary must SAY HRV/heart-rate-variability is unknown (GROUND-R7).
 _HRV_MENTION_RE = re.compile(r"\bhrv\b|heart[- ]rate[- ]variability", re.IGNORECASE)
 # The HRV-absent phrasing the grader accepts. FIX 7: the REAL prod clause
@@ -365,7 +364,9 @@ def grade_multilingual() -> tuple[int, tuple[str, ...]]:
     language ``switch`` (the SAME grounded numbers + citation persist across the switch) and
     an unsupported-language ``fallback`` (fall back to English AND carry a human-readable
     notice). Both reuse the number/citation-parity core; ``fallback`` additionally asserts
-    the fallback locale rendered and the notice tokens are present.
+    the fallback locale rendered and the notice tokens are present. Every render is ALSO
+    language-detected programmatically (:func:`detect_language`): an answer authored in the
+    wrong language fails even when its numbers are right (QA-EVAL-R2.8 (a)).
     """
     cases = _load("multilingual")["cases"]
     failures: list[str] = []
@@ -380,9 +381,7 @@ def _multilingual_parity_failures(case: dict[str, Any]) -> list[str]:
     """Number/citation parity + jargon-free checks shared by every multilingual case."""
     failures: list[str] = []
     renders = case["renders"]
-    numbers = {
-        lang: sorted(re.findall(r"-?\d+(?:\.\d+)?", text)) for lang, text in renders.items()
-    }
+    numbers = {lang: sorted(re.findall(r"-?\d+(?:\.\d+)?", text)) for lang, text in renders.items()}
     first = next(iter(numbers.values()))
     if any(nums != first for nums in numbers.values()):
         failures.append(f"{case['id']}: numbers differ across languages {numbers}")
@@ -391,6 +390,11 @@ def _multilingual_parity_failures(case: dict[str, Any]) -> list[str]:
         # localized render (EVAL-R7a jargon-free); the en render may name a metric in prose.
         if _INTERNAL_TOKEN.search(text) and lang != "en":
             failures.append(f"{case['id']}/{lang}: leaked internal token")
+        # QA-EVAL-R2.8 (a): the answer must be AUTHORED in the selected language — checked
+        # programmatically (QA-EVAL-R3), never assumed from the render key.
+        detected = detect_language(text)
+        if detected != lang:
+            failures.append(f"{case['id']}/{lang}: output language detected as {detected!r}")
     if sorted(case["expected_citations"]) != sorted(case.get("citations", [])):
         failures.append(f"{case['id']}: citations changed across languages")
     return failures
@@ -446,8 +450,18 @@ async def grade_judge() -> JudgeGrade:
         verdict = await model.structured(system="judge", data=case["body"], schema=JudgeVerdict)
         scores = [getattr(verdict, dim) for dim in _JUDGE_DIMS]
         lowest = min(lowest, *scores)
-        if all(s >= _JUDGE_MIN for s in scores):
+        # Deterministic reading-level dimension (QUAL-R13(h)/(i)): the athlete-facing
+        # body must stay at or under the plain-language ceiling - graded by code, not
+        # by the LLM judge, so a jargon-dense regression trips the gate mechanically.
+        grade_level = flesch_kincaid_grade(str(case["body"]))
+        reading_ok = grade_level <= MAX_FK_GRADE
+        if all(s >= _JUDGE_MIN for s in scores) and reading_ok:
             passed += 1
+        elif not reading_ok:
+            failures.append(
+                f"{case['id']}: reading level {grade_level:.1f} exceeds the "
+                f"plain-language ceiling ({MAX_FK_GRADE:.0f}th grade)"
+            )
         else:
             failures.append(f"{case['id']}: a rubric dimension scored below {_JUDGE_MIN}")
     return JudgeGrade(len(cases), passed, lowest, tuple(failures))

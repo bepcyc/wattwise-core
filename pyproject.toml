@@ -90,6 +90,7 @@ dev = [
   "asyncpg>=0.30",
   "aiomysql>=0.2",
   "pytest-xdist>=3.8.0",
+  "mutmut>=3.6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -121,6 +122,31 @@ markers = [
   "logging: logging-contract / redaction tests (QA-LOG-R*)",
   "llm: live-LLM tier (real model; skipped unless WATTWISE_LLM_API_KEY is set; never in the offline gate)",
 ]
+
+# T-MUT mutation tier (TIER-R6 / CI-R1 item 17): mutmut over the correctness core —
+# the analytics package and the ASBO->GBO adapter layer. Runs NIGHTLY and on PRs that
+# modify these packages (just test-mut / test-mut-pr), never on every push. The
+# per-package score floors (analytics >= 90%, adapters >= 85%) are enforced by
+# tools/mutation_gate.py over `mutmut results`.
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = [
+  "src/wattwise_core/analytics/*",
+  "src/wattwise_core/ingestion/adapters/*",
+]
+# The mutant-killing tiers are the offline correctness tiers (ANL-T/GOLD/CON property,
+# golden, contract, unit, fuzz) — the repo-introspection/integration legs are excluded
+# (they assert repo layout, not analytics/adapter behaviour, and cannot kill mutants).
+pytest_add_cli_args = [
+  "-m", "unit or property or golden or contract or fuzz",
+  "-q",
+  # mutmut's in-process runner rebinds stdout, breaking this one stream-capture
+  # assertion (an observability-plumbing test that cannot kill an analytics/adapter
+  # mutant anyway) - deselected ONLY inside the mutation runner.
+  "--deselect", "tests/unit/test_observability_runtrace.py::test_log_line_in_run_is_reconstructable_from_the_stream",
+]
+pytest_add_cli_args_test_selection = ["tests/"]
+also_copy = ["tools/", "scripts/", "migrations/", "alembic.ini", "justfile"]
 
 [tool.coverage.run]
 branch = true
