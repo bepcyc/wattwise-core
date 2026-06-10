@@ -139,6 +139,14 @@ atl_time_constant_days = 7
 # from a LOWER-fidelity equivalence-class member (substituted), so the day is never presented
 # at full fidelity. A factor in (0,1]; lives here (CFG-R1a), never baked into code.
 training_load_confidence_penalty = 0.7
+# Readiness record-sufficiency edges (GROUND-R6 sufficiency axis), in whole days. The hard
+# floor is keyed to the ATL time constant (= 2*tau_ATL = 14 with PMC-R1's tau = 7): past it
+# the assumed-rest tail dominates ATL and the verdict abstains; between fresh and max the
+# record is stale-disclosed (DEGRADED + caveat, never an aggressive GO). The sync edge is
+# the MNAR corroborator: a still-connected source silent this long reads as silently broken.
+readiness_fresh_staleness_days = 2
+readiness_max_staleness_days = 14
+readiness_sync_stale_after_days = 3
 # GBO-R28: a stored MODELED fitness signature whose fit quality (R^2) is below this
 # threshold is REFUSED by signature resolution (fail-closed: a typed gap surfaces
 # instead of thresholds derived from a bad fit). A modeled signature carrying NO

@@ -201,13 +201,22 @@ READINESS_MIN_FITNESS_CTL: Final = 1.0  # GROUND-R6 / PMC-R3/R5
 #                              is untrustworthy => abstain (fail-closed, GROUND-R6).
 # The gap is inherently MISSING-NOT-AT-RANDOM (sync breaks during travel/illness), so we widen
 # caution rather than impute the gap into a confident number. Overridable like the bands above.
-READINESS_FRESH_STALENESS_DAYS: Final = 2  # gap <= this => data current, no freshness caveat
-READINESS_MAX_STALENESS_DAYS: Final = 14  # gap > this (= 2*tau_ATL) => abstain on stale record
+READINESS_FRESH_STALENESS_DAYS: Final[int] = int(
+    _analytics_default("readiness_fresh_staleness_days")
+)  # gap <= this => data current, no freshness caveat
+# The hard floor is KEYED to the ATL time constant (2*tau_ATL): the config carries the
+# value (CFG-R1a) and a unit test pins the 2*tau coupling, so a tau change can never
+# silently strand the floor — drifting apart is an explicit, tested decision.
+READINESS_MAX_STALENESS_DAYS: Final[int] = int(
+    _analytics_default("readiness_max_staleness_days")
+)  # gap > this => abstain on a stale record
 # A connector that should auto-deliver but whose last successful sync is older than this is treated
 # as silently failing — the corroboration that turns an observed-data gap from "legitimate taper"
 # into "data likely MISSING". Pull connectors typically sync at least daily; a few days of silence
 # on a still-"connected" source is the soft signal a withdrawn/expired credential leaves behind.
-READINESS_SYNC_STALE_AFTER_DAYS: Final = 3
+READINESS_SYNC_STALE_AFTER_DAYS: Final[int] = int(
+    _analytics_default("readiness_sync_stale_after_days")
+)
 
 # --- generic numeric tolerance ---
 DEFAULT_CLOSED_FORM_ABS_TOL: Final = 1e-9  # ANL-R31 (× max(1,|x|))  # noqa: RUF003 - math notation

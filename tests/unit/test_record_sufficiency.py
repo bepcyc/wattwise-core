@@ -13,6 +13,7 @@ import datetime as _dt
 
 import pytest
 
+from wattwise_core.analytics import constants
 from wattwise_core.analytics.sufficiency import RecordSufficiency, assess_record_sufficiency
 
 pytestmark = pytest.mark.unit
@@ -104,3 +105,13 @@ def test_substituted_fresh_record_is_partial_not_full() -> None:
     assert not suff.insufficient
     assert suff.substituted
     assert suff.fidelity == "partial"
+
+
+def test_hard_floor_stays_keyed_to_the_atl_time_constant() -> None:
+    """The stale-abstain floor is 2x tau_ATL (PMC-R1); drifting apart is an explicit decision.
+
+    The value itself lives in config (CFG-R1a); this pin makes a change to EITHER the ATL
+    time constant or the configured floor a loud, deliberate edit instead of a silent skew
+    of the sufficiency model's scientific keying.
+    """
+    assert int(2 * constants.ATL_TIME_CONSTANT_DAYS) == constants.READINESS_MAX_STALENESS_DAYS
