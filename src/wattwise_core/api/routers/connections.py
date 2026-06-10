@@ -170,9 +170,7 @@ class FileUploadNextStep(BaseModel):
 
 #: The archetype-discriminated next-step union (SCHEMA-R10): a typed client branches on
 #: ``kind`` (the OpenAPI ``discriminator``) without guessing the union member.
-ConnectionNextStep = Annotated[
-    ApiKeyNextStep | FileUploadNextStep, Field(discriminator="kind")
-]
+ConnectionNextStep = Annotated[ApiKeyNextStep | FileUploadNextStep, Field(discriminator="kind")]
 
 
 class ApiKeyCompleteRequest(BaseModel):
@@ -313,9 +311,7 @@ async def reconnect(
     """
     athlete_uuid = uuid.UUID(principal.athlete_id)
     connection = await _owned_connection(session, athlete_uuid, connection_id)
-    entry = CATALOG_BY_SOURCE.get(
-        await _source_key_for(session, connection.source_descriptor_id)
-    )
+    entry = CATALOG_BY_SOURCE.get(await _source_key_for(session, connection.source_descriptor_id))
     if entry is None or entry.auth_archetype is not AuthArchetype.API_KEY:
         raise _wrong_archetype(connection.auth_archetype)
     await _run_probe(probe, entry.source, body.api_key)

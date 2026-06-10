@@ -181,4 +181,4 @@ def test_expected_head_resolves_the_newest_migration_revision() -> None:
     """
     head = expected_head()
     assert head is not None
-    assert head >= "0012"  # the refresh-token migration is at or behind the head
+    assert head >= "0014"  # the auth/ops agent-state migration is at or behind the head

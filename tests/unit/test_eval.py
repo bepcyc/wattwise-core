@@ -455,10 +455,7 @@ def test_readiness_prod_hrv_clause_satisfies_voice_check() -> None:
     # Teeth (FIX 7): the EXACT prod HRV-unavailable clause MUST satisfy the voice grader's
     # HRV-unavailable check, so the gate matches a LIVE narration, not only hand fixtures.
     case = {"id": "teeth-prod-hrv-clause", "expects_hrv_unavailable_statement": True}
-    summary = (
-        "You're in a steady place today, so train as planned. "
-        f"{HRV_UNAVAILABLE_CLAUSE}"
-    )
+    summary = f"You're in a steady place today, so train as planned. {HRV_UNAVAILABLE_CLAUSE}"
     failures = readiness_voice_failures(case, summary)
     assert failures == [], f"prod HRV clause must clear the voice check, got {failures}"
 
@@ -793,8 +790,7 @@ async def test_self_certification_regression_trips_non_regression_gate(
     report = compare_to_baseline(cards, path=path)
     assert not report.passed
     assert any(
-        r.suite == "self_certification" and r.metric == "self_cert.rate"
-        for r in report.regressions
+        r.suite == "self_certification" and r.metric == "self_cert.rate" for r in report.regressions
     )
 
 

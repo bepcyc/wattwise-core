@@ -186,9 +186,7 @@ def grade_budget(
             f"median cost-per-task {median_cost} exceeds budget {budget.median_cost_usd}"
         )
     if p95_latency > budget.p95_latency_ms:
-        failures.append(
-            f"p95 latency {p95_latency}ms exceeds budget {budget.p95_latency_ms}ms"
-        )
+        failures.append(f"p95 latency {p95_latency}ms exceeds budget {budget.p95_latency_ms}ms")
     return BudgetGrade(
         total=len(costs),
         total_tokens=total_tokens,

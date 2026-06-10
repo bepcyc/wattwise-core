@@ -3,12 +3,14 @@
 The cohesive helper functions the canonical ingest facade
 (:class:`wattwise_core.ingestion.ingest.IngestService`) composes, factored to a sibling
 module so the facade stays within the QUAL-R9 size ceilings WITHOUT changing its public
-API: batch landing + per-record fault isolation (ING-UPS-R1/R3), the two-leg identity
-resolution (MAP-R9..R12 strong-fingerprint, DEDUP-R7 windowed fuzzy), the canonical
+API: batch landing + per-record fault isolation (ING-UPS-R1/R3), the canonical
 activity/wellness writes through the atomic upsert seam (UPS-R2, CONF-R2/R3), the
-local-day projection (GBO-R33/R35), and original-file capture (ING-R8/FIL-R1). Each
-function takes the service (its session / injected resolver / object store) explicitly;
-all behavior is unchanged from the pre-split module.
+local-day projection (GBO-R33/R35), and original-file capture (ING-R8/FIL-R1). The
+two-leg identity resolution (MAP-R9..R12 strong-fingerprint, DEDUP-R7 windowed fuzzy)
+and the contributing-candidate selection live in the focused
+:mod:`wattwise_core.ingestion._ingest_identity` sibling (QUAL-R9 size split) and are
+re-exported here. Each function takes the service (its session / injected resolver /
+object store) explicitly; all behavior is unchanged from the pre-split module.
 """
 
 from __future__ import annotations
@@ -17,12 +19,13 @@ import datetime as _dt
 import uuid
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import Table, select
+from sqlalchemy import Table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import GboType
 from wattwise_core.ingestion import _canonical as _cw
+from wattwise_core.ingestion import _canonical_streams as _cs
 from wattwise_core.ingestion._candidate_store import (
     persist_candidates_bulk,
     persist_quarantined,
@@ -30,8 +33,9 @@ from wattwise_core.ingestion._candidate_store import (
 )
 from wattwise_core.ingestion._canonical import OriginalFile
 from wattwise_core.ingestion._ingest_identity import (
-    _contributing,
+    _activity_candidates,
     _resolve_activity_id,
+    _wellness_candidates,
 )
 from wattwise_core.ingestion._mapping import (
     _ACTIVITY_SCALARS,
@@ -230,7 +234,7 @@ async def _write_activity_canonical(
     await svc._session.flush()
     # Streams resolve PER CHANNEL under each channel's effective tier (CONF-R3/SF-3);
     # an empty policy makes this the candidate's adapter tier (the prior behaviour).
-    streams = _cw.resolve_streams(candidates, policy)
+    streams = _cs.resolve_streams(candidates, policy)
     # PRIV-R2: honour the athlete's raw-GPS opt-out — drop the precise-location channel
     # before canonical landing; derived non-locating metrics in the other channels land.
     if not svc._store_raw_gps:
@@ -238,7 +242,7 @@ async def _write_activity_canonical(
     best = _highest_trust(candidates)
     laps = cast("list[dict[str, Any]]", best.payload.get("laps") or [])
     if streams:
-        await _cw.upsert_stream_set(svc._session, activity_id, streams)
+        await _cs.upsert_stream_set(svc._session, activity_id, streams)
     await _cw.upsert_laps(svc._session, activity_id, laps, _LAP_SCALARS)
 
 
@@ -306,34 +310,6 @@ async def _capture_original(
         original=original,
         fetched_at=fetched_at,
     )
-
-
-async def _activity_candidates(
-    session: AsyncSession, athlete: uuid.UUID, activity_id: uuid.UUID
-) -> list[SourceCandidate]:
-    """All CONTRIBUTING activity candidates resolved to ``activity_id`` (the resolution set)."""
-    stmt = _contributing(
-        select(SourceCandidate).where(
-            SourceCandidate.athlete_id == athlete,
-            SourceCandidate.gbo_type == GboType.ACTIVITY,
-            SourceCandidate.resolved_activity_id == activity_id,
-        )
-    )
-    return list((await session.execute(stmt)).scalars().all())
-
-
-async def _wellness_candidates(
-    session: AsyncSession, athlete: uuid.UUID, local_date: _dt.date
-) -> list[SourceCandidate]:
-    """All CONTRIBUTING daily-wellness candidates for ``local_date`` (the resolution set)."""
-    stmt = _contributing(
-        select(SourceCandidate).where(
-            SourceCandidate.athlete_id == athlete,
-            SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
-        )
-    )
-    rows = (await session.execute(stmt)).scalars().all()
-    return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
 
 
 __all__ = [

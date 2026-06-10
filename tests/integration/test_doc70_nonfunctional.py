@@ -8,6 +8,7 @@ RUN-R11, RUN-R13, OBS-R6.2.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import json
 from datetime import UTC
@@ -25,6 +26,7 @@ from wattwise_core.api.auth import Scope, issue_access_token
 from wattwise_core.config import Settings, load_settings
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import ActivityFileFormat, Fidelity
+from wattwise_core.identity import OWNER_ATHLETE_ID
 from wattwise_core.ingestion.ingest import IngestService, OriginalFile
 from wattwise_core.persistence.base import Base
 from wattwise_core.persistence.migrations_state import _ALEMBIC_VERSION
@@ -150,7 +152,7 @@ def test_service_auth_header_verified_constant_time_and_never_replaces_bearer(
     bearer token (the factor is additional, never a replacement: with the service
     header alone and no bearer, a protected route still 401s).
     """
-    client = _client(tmp_path, service_auth_secret="service-" + "s3cr3t-" * 8)
+    client = _client(tmp_path, security__service_auth_secret="service-" + "s3cr3t-" * 8)
     try:
         access = _sign_in(client)["access_token"]
         bearer = {"Authorization": f"Bearer {access}"}
@@ -168,10 +170,18 @@ def test_service_auth_header_verified_constant_time_and_never_replaces_bearer(
 
 
 def test_service_auth_header_with_no_provisioned_secret_is_rejected(tmp_path: Path) -> None:
-    """Presenting X-Service-Auth when no service principal is provisioned → 401 (SEC-R4)."""
-    client = _client(tmp_path)  # no service_auth_secret configured
+    """Presenting X-Service-Auth when no service principal is provisioned → 401 (SEC-R4).
+
+    The factor is UNVERIFIABLE when no secret is configured, so it fails closed even
+    alongside an otherwise-valid owner bearer token (never silently ignored).
+    """
+    client = _client(tmp_path)  # no security__service_auth_secret configured
     try:
-        resp = client.get(f"{API_PREFIX}/system/status", headers={"X-Service-Auth": "anything"})
+        access = _sign_in(client)["access_token"]
+        resp = client.get(
+            f"{API_PREFIX}/system/status",
+            headers={"Authorization": f"Bearer {access}", "X-Service-Auth": "anything"},
+        )
         assert resp.status_code == 401, resp.text
     finally:
         client.__exit__(None, None, None)
@@ -325,9 +335,32 @@ async def test_original_file_purge_deletes_object_and_reference_not_canonical(
 # ------------------------------------------------------------------------- PRIV-R9 export
 
 
+def _seed_owner_row(tmp_path: Path) -> None:
+    """Seed the canonical OWNER athlete row the initial migration would provision.
+
+    The app-level tests stamp the migration head over an ORM-created schema (no real
+    migration run), so the migration-seeded owner row (GBO-R13) is inserted here.
+    """
+
+    async def _run() -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'doc70.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+        try:
+            async with factory() as session:
+                session.add(
+                    Athlete(athlete_id=OWNER_ATHLETE_ID, sex="male", reference_timezone="UTC")
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
 def test_export_streams_athlete_canonical_data_as_ndjson(tmp_path: Path) -> None:
     """``GET /v1/users/me/export`` returns the owner's canonical rows as NDJSON (PRIV-R9)."""
     client = _client(tmp_path)
+    _seed_owner_row(tmp_path)
     try:
         access = _sign_in(client)["access_token"]
         resp = client.get(
@@ -336,9 +369,12 @@ def test_export_streams_athlete_canonical_data_as_ndjson(tmp_path: Path) -> None
         assert resp.status_code == 200, resp.text
         assert resp.headers["content-type"].startswith("application/x-ndjson")
         lines = [json.loads(line) for line in resp.text.splitlines() if line]
-        # The owner's refresh-token credential row is athlete-scoped data and exports.
+        # Every emitted line is the documented {"table", "row"} shape, and the owner's
+        # canonical athlete row itself is part of the exported inventory. (Refresh-token
+        # credentials live on the SEPARATE agent-state store — amended ARCH-R13 — so they
+        # are operational state, not part of the canonical-data export surface.)
         assert all({"table", "row"} <= set(line) for line in lines)
-        assert any(line["table"] == "auth_refresh_token" for line in lines)
+        assert any(line["table"] == "athlete" for line in lines)
     finally:
         client.__exit__(None, None, None)
 

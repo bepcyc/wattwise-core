@@ -34,7 +34,11 @@ from wattwise_core.persistence.upsert import upsert_many
 # idempotent no-op refresh and a changed restatement inserts a NEW version, never a
 # check-then-write (UPS-R2/R3); only fetch metadata is refreshed on the no-op collision.
 _CANDIDATE_KEY = (
-    "athlete_id", "source_descriptor_id", "source_native_id", "gbo_type", "content_hash",
+    "athlete_id",
+    "source_descriptor_id",
+    "source_native_id",
+    "gbo_type",
+    "content_hash",
 )
 _CANDIDATE_REFRESH = ("fetched_at", "ingest_run_id")
 
@@ -187,9 +191,7 @@ async def persist_candidate(
     metadata (UPS-R3); a CHANGED re-ingest inserts a NEW version, supersedes the prior,
     and carries its ``resolved_activity_id`` forward (PRV-R2/ING-R6).
     """
-    prepared = await _prepare_candidate(
-        session, athlete, descriptor, cand, connection_id, run_id
-    )
+    prepared = await _prepare_candidate(session, athlete, descriptor, cand, connection_id, run_id)
     rows = await persist_candidates_bulk(session, athlete, descriptor, [prepared])
     return rows[cand.source_native_id]
 

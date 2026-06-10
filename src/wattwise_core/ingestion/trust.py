@@ -112,9 +112,7 @@ class TrustPolicy:
             return override
         # 3 + 4: descriptor-declared base (specific channel, then "*"/default_fidelity).
         profile, default_fidelity = self.profiles.get(descriptor_id, ({}, None))
-        declared = _profile_tier(profile, channel) or _profile_tier(
-            profile, WHOLE_SOURCE_CHANNEL
-        )
+        declared = _profile_tier(profile, channel) or _profile_tier(profile, WHOLE_SOURCE_CHANNEL)
         if declared is None and default_fidelity is not None:
             declared = _coerce_fidelity(default_fidelity)
         if declared is not None:

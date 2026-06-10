@@ -178,12 +178,7 @@ def _resolve_window(window: tuple[int, int] | None, n: int) -> tuple[int, int]:
     if window is None:
         return 0, n - 1
     d0, d1 = window
-    out_of_range = (
-        d0 < 0
-        or d1 < d0
-        or (n > 0 and d1 >= n)
-        or (n == 0 and (d0 != 0 or d1 != -1))
-    )
+    out_of_range = d0 < 0 or d1 < d0 or (n > 0 and d1 >= n) or (n == 0 and (d0 != 0 or d1 != -1))
     if out_of_range:
         raise ValueError("window indices out of range of the daily grid")
     return d0, d1

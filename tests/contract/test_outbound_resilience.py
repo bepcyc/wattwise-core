@@ -115,7 +115,10 @@ async def test_backoff_is_exponential_with_full_jitter() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RetryExhaustedError):
             await resilient_get(
-                client, _URL, budget=_budget(max_attempts=4), clock=clock,
+                client,
+                _URL,
+                budget=_budget(max_attempts=4),
+                clock=clock,
                 jitter=lambda: 1.0,
             )
     # Three backoffs between four attempts; ceiling = min(1*2**i, 8) = 1, 2, 4.
@@ -132,7 +135,10 @@ async def test_full_jitter_draws_a_fraction_of_the_ceiling() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RetryExhaustedError):
             await resilient_get(
-                client, _URL, budget=_budget(max_attempts=3), clock=clock,
+                client,
+                _URL,
+                budget=_budget(max_attempts=3),
+                clock=clock,
                 jitter=lambda: 0.5,
             )
     # Ceilings 1, 2 -> half each: 0.5, 1.0 (full jitter in [0, ceiling]).
@@ -168,8 +174,7 @@ async def test_retry_stops_at_max_elapsed_budget() -> None:
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RetryExhaustedError):
-            await resilient_get(client, _URL, budget=budget, clock=clock,
-                                jitter=lambda: 1.0)
+            await resilient_get(client, _URL, budget=budget, clock=clock, jitter=lambda: 1.0)
     # Elapsed budget (3s), not the 100-attempt cap, bounds the loop.
     assert clock.now <= 3.0 + 1e-9
     assert calls["n"] < 100
@@ -232,8 +237,7 @@ async def test_429_respects_retry_after_header() -> None:
 
     clock = _FakeClock()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        resp = await resilient_get(client, _URL, budget=_budget(), clock=clock,
-                                   jitter=lambda: 1.0)
+        resp = await resilient_get(client, _URL, budget=_budget(), clock=clock, jitter=lambda: 1.0)
     assert resp.status_code == 200
     # Retry-After (5s) overrides the computed backoff (which would be ~1s).
     assert clock.slept == [5.0]
@@ -254,12 +258,8 @@ async def test_token_bucket_waits_when_exhausted() -> None:
 
 def test_token_bucket_key_is_source_plus_credential() -> None:
     """The limiter is keyed per source+credential so swapping the key is a new bucket (CLI-R10)."""
-    assert TokenBucket.key("intervals_icu", "cred-A") != TokenBucket.key(
-        "intervals_icu", "cred-B"
-    )
-    assert TokenBucket.key("intervals_icu", "cred-A") == TokenBucket.key(
-        "intervals_icu", "cred-A"
-    )
+    assert TokenBucket.key("intervals_icu", "cred-A") != TokenBucket.key("intervals_icu", "cred-B")
+    assert TokenBucket.key("intervals_icu", "cred-A") == TokenBucket.key("intervals_icu", "cred-A")
 
 
 # -------------------------------------------------- CLI-R11 adaptive issue-rate reduction
@@ -452,6 +452,7 @@ async def test_client_retries_transient_5xx_then_succeeds() -> None:
 
 async def test_client_schema_drift_raises_typed_fetch_error() -> None:
     """A wellness row missing the required id raises FetchError(schema_mismatch) (CLI-R2)."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[{"restingHR": 50}])  # the required ``id`` is absent
 

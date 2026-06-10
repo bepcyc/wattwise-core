@@ -38,8 +38,8 @@ from wattwise_core.agent.contracts import (
     GroundDecision,
     GroundVerdict,
 )
-from wattwise_core.agent.engine_services import _ClaimSchema
 from wattwise_core.agent.grounding import ground
+from wattwise_core.agent.grounding_evidence import _ClaimSchema
 from wattwise_core.agent.model import FakeModel
 from wattwise_core.eval import budget as budget_mod
 from wattwise_core.eval import engine_suites, injection
@@ -212,9 +212,7 @@ async def _ground_case(
     schema_valid: bool,
 ) -> RunnerOutcome:
     """Ground claims through the PRODUCTION grounder and assemble the outcome (GROUND-R8)."""
-    metrics: dict[str, float] = {
-        str(k): float(v) for k, v in evidence.get("metrics", {}).items()
-    }
+    metrics: dict[str, float] = {str(k): float(v) for k, v in evidence.get("metrics", {}).items()}
     allowed_urls = {str(u) for u in evidence.get("allowed_urls", [])}
     names = {str(k): str(v) for k, v in evidence.get("names", {}).items()}
     ev = _EvalEvidence(metrics, allowed_urls, names)
@@ -228,9 +226,7 @@ async def _ground_case(
     result = ground(draft, claims, ev, allowed_urls)
 
     survivors = {
-        _claim_key(gc.claim)
-        for gc in result.claims
-        if gc.verdict is GroundVerdict.GROUNDED
+        _claim_key(gc.claim) for gc in result.claims if gc.verdict is GroundVerdict.GROUNDED
     }
     scrubbed = {
         _scrub_key(gc.claim, metrics)

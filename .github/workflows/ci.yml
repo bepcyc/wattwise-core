@@ -187,6 +187,14 @@ jobs:
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
+      - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        run: |
+          ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+          echo "::add-mask::$ROOT_KEY"
+          echo "::add-mask::$SIGNING_KEY"
+          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
+          echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
       - run: just test-integration      # CI-R1 item 4
 
@@ -229,6 +237,14 @@ jobs:
       # Bootstrap-acceptance (BOOT-R1, E4-T3): clean checkout -> migrate ->
       # health-serving instance. The bootstrap recipe runs uvicorn in the
       # foreground, so here we start it backgrounded, poll health, then tear down.
+      - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        run: |
+          ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+          echo "::add-mask::$ROOT_KEY"
+          echo "::add-mask::$SIGNING_KEY"
+          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
+          echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - name: Bootstrap acceptance (health endpoint serves)
         run: |
           just migrate
@@ -236,9 +252,9 @@ jobs:
             uv run uvicorn --factory wattwise_core.api.app:create_app \
             --host 127.0.0.1 --port 8000 &
           for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 1;
+            curl -fsS http://127.0.0.1:8000/healthz && break || sleep 1;
           done
-          curl -fsS http://127.0.0.1:8000/health
+          curl -fsS http://127.0.0.1:8000/healthz
       - run: just test-unit && just test-property && just test-golden && just test-contract
       - run: just test-db-portable      # CI-R1 item 13 (BOOT-R1/R2/R3)
 
@@ -265,6 +281,14 @@ jobs:
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
+      - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        run: |
+          ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+          echo "::add-mask::$ROOT_KEY"
+          echo "::add-mask::$SIGNING_KEY"
+          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
+          echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
       - run: just test-e2e              # CI-R1 item 12
 

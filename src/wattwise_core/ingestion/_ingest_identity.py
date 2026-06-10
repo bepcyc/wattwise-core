@@ -1,11 +1,13 @@
-"""Candidate -> canonical-activity identity resolution (MAP-R9..R12, DEDUP-R7).
+"""Ingest identity resolution + contributing-candidate selection (MAP-R9..R12, DEDUP-R7).
 
-The two-leg identity resolver the ingest write path runs for every NEW activity
-candidate, factored out of ``_ingest_steps`` so each module stays within the QUAL-R9
-size ceilings without behavior change: the cross-window STRONG-FINGERPRINT leg
-(MAP-R10), the conservative ±2h WINDOWED fuzzy leg (DEDUP-R7), the MAP-R12 decision
-record, and the shared CONTRIBUTING-candidate filter (UPS-R5 / MAP-R6 / EVOL-R2) the
-candidate reads compose.
+The focused sibling of :mod:`wattwise_core.ingestion._ingest_steps` (QUAL-R9 size split) that
+owns the two-leg activity identity resolution — the cross-window MAP-R10 strong-fingerprint leg
+and the conservative ±2h windowed fuzzy leg (DEDUP-R7) with its MAP-R12 decision record — plus
+the CONTRIBUTING-candidate selection shared by the canonical writes and the re-resolution path
+(superseded/tombstoned/quarantined/deactivated rows never contribute, UPS-R5 / MAP-R6 / EVOL-R2).
+Each function takes the service (its session / injected resolver) explicitly; all behavior is
+unchanged from the pre-split module, and ``_ingest_steps`` re-exports the shared names so every
+historical ``from wattwise_core.ingestion._ingest_steps import ...`` path stays stable.
 """
 
 from __future__ import annotations
@@ -19,8 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import GboType
-from wattwise_core.ingestion._mapping import _parse_start_time
-from wattwise_core.persistence.models import Activity, SourceCandidate, SourceDescriptor
+from wattwise_core.ingestion._mapping import _parse_date, _parse_start_time
+from wattwise_core.persistence.models import (
+    Activity,
+    SourceCandidate,
+    SourceDescriptor,
+)
 from wattwise_core.persistence.types import uuid7
 
 if TYPE_CHECKING:
@@ -168,6 +174,34 @@ def _contributing(stmt: Any) -> Any:
     )
 
 
+async def _activity_candidates(
+    session: AsyncSession, athlete: uuid.UUID, activity_id: uuid.UUID
+) -> list[SourceCandidate]:
+    """All CONTRIBUTING activity candidates resolved to ``activity_id`` (the resolution set)."""
+    stmt = _contributing(
+        select(SourceCandidate).where(
+            SourceCandidate.athlete_id == athlete,
+            SourceCandidate.gbo_type == GboType.ACTIVITY,
+            SourceCandidate.resolved_activity_id == activity_id,
+        )
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def _wellness_candidates(
+    session: AsyncSession, athlete: uuid.UUID, local_date: _dt.date
+) -> list[SourceCandidate]:
+    """All CONTRIBUTING daily-wellness candidates for ``local_date`` (the resolution set)."""
+    stmt = _contributing(
+        select(SourceCandidate).where(
+            SourceCandidate.athlete_id == athlete,
+            SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
+        )
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
+
+
 def _window_score(a: _dt.datetime, b: _dt.datetime) -> float:
     """A [0,1] closeness score for a windowed match (MAP-R12 decision record).
 
@@ -177,3 +211,10 @@ def _window_score(a: _dt.datetime, b: _dt.datetime) -> float:
     delta = abs((a - b).total_seconds())
     window = _IDENTITY_WINDOW.total_seconds()
     return max(0.0, 1.0 - delta / window)
+
+
+__all__ = [
+    "_activity_candidates",
+    "_resolve_activity_id",
+    "_wellness_candidates",
+]

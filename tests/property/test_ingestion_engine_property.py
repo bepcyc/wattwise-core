@@ -59,9 +59,7 @@ pytestmark = pytest.mark.property
 UTC = _dt.UTC
 _START = _dt.datetime(2026, 6, 1, 8, 0, tzinfo=UTC)
 _FETCHED = _dt.datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
-_SETTINGS = settings(
-    max_examples=15, deadline=None, suppress_health_check=[HealthCheck.too_slow]
-)
+_SETTINGS = settings(max_examples=15, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 
 
 def _candidate(
@@ -130,9 +128,7 @@ def test_reingest_converges_to_identical_canonical_state(watts: float, repeats: 
 
 
 @_SETTINGS
-@given(
-    offsets=st.lists(st.integers(min_value=0, max_value=10_000), min_size=1, max_size=8)
-)
+@given(offsets=st.lists(st.integers(min_value=0, max_value=10_000), min_size=1, max_size=8))
 def test_watermark_high_water_is_monotonic(offsets: list[int]) -> None:
     """SYN-R3: the high-water cursor equals the running max — a re-run never regresses it."""
 
@@ -144,8 +140,12 @@ def test_watermark_high_water_is_monotonic(offsets: list[int]) -> None:
                 for off in offsets:
                     instant = _START + _dt.timedelta(seconds=off)
                     await advance_watermark(
-                        session, athlete, descriptor, GboType.ACTIVITY,
-                        high_water_at=instant, content_hint=None,
+                        session,
+                        athlete,
+                        descriptor,
+                        GboType.ACTIVITY,
+                        high_water_at=instant,
+                        content_hint=None,
                     )
                     row = await watermark_for(session, athlete, descriptor, GboType.ACTIVITY)
                     assert row is not None and row.high_water_at is not None
@@ -169,7 +169,9 @@ def test_map_failures_are_exactly_token_precise(data: st.DataObject) -> None:
     ids = data.draw(
         st.lists(
             st.text(alphabet="abcdef0123456789", min_size=4, max_size=8),
-            min_size=1, max_size=6, unique=True,
+            min_size=1,
+            max_size=6,
+            unique=True,
         )
     )
     failing = set(data.draw(st.sets(st.sampled_from(ids))))
@@ -215,9 +217,7 @@ def test_conflict_resolution_is_order_invariant(truth_watts: float, order: list[
         try:
             for idx in order:
                 async with maker() as session:
-                    await IngestService(session).ingest(
-                        str(athlete), str(descriptor), [cands[idx]]
-                    )
+                    await IngestService(session).ingest(str(athlete), str(descriptor), [cands[idx]])
             async with maker() as session:
                 acts = (await session.execute(select(Activity))).scalars().all()
                 assert len(acts) == 1  # same start/duration/sport -> ONE resolved entity
@@ -229,10 +229,29 @@ def test_conflict_resolution_is_order_invariant(truth_watts: float, order: list[
 
 
 _CANONICAL_ACTIVITY_KEYS = {
-    "start_time", "sport", "sub_sport", "elapsed_time_s", "moving_time_s", "distance_m",
-    "total_work_j", "energy_kj", "avg_power_w", "max_power_w", "avg_hr_bpm", "max_hr_bpm",
-    "avg_cadence_rpm", "avg_speed_mps", "elevation_gain_m", "avg_temp_c", "device_class",
-    "has_power", "has_hr", "has_gps", "has_cadence", "streams", "laps",
+    "start_time",
+    "sport",
+    "sub_sport",
+    "elapsed_time_s",
+    "moving_time_s",
+    "distance_m",
+    "total_work_j",
+    "energy_kj",
+    "avg_power_w",
+    "max_power_w",
+    "avg_hr_bpm",
+    "max_hr_bpm",
+    "avg_cadence_rpm",
+    "avg_speed_mps",
+    "elevation_gain_m",
+    "avg_temp_c",
+    "device_class",
+    "has_power",
+    "has_hr",
+    "has_gps",
+    "has_cadence",
+    "streams",
+    "laps",
 }
 
 

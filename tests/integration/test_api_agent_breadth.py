@@ -76,6 +76,7 @@ class _FakeBreadthEngine:
 
     diagnosis: AgentDiagnosis
     digest_body: Digest
+    history: list[Digest] = field(default_factory=list)
     memory: dict[str, list[RecalledItem]] = field(default_factory=dict)
     seen_athlete_id: str | None = None
 
@@ -83,11 +84,16 @@ class _FakeBreadthEngine:
         self.seen_athlete_id = athlete_id
         return self.diagnosis
 
-    async def digest(
-        self, *, athlete_id: str, week_end: str, entitlement: Any = None
-    ) -> Digest:
+    async def digest(self, *, athlete_id: str, week_end: str, entitlement: Any = None) -> Digest:
         self.seen_athlete_id = athlete_id
         return self.digest_body
+
+    async def digest_history(
+        self, *, athlete_id: str, limit: int = 50, before_week_end: str | None = None
+    ) -> Sequence[Digest]:
+        self.seen_athlete_id = athlete_id
+        rows = [d for d in self.history if before_week_end is None or d.week_end < before_week_end]
+        return rows[:limit]
 
     async def list_memory(
         self, *, athlete_id: str, limit: int, offset: int
@@ -95,9 +101,7 @@ class _FakeBreadthEngine:
         self.seen_athlete_id = athlete_id
         return self.memory.get(athlete_id, [])[offset : offset + limit]
 
-    async def get_memory(
-        self, *, athlete_id: str, memory_item_id: str
-    ) -> RecalledItem | None:
+    async def get_memory(self, *, athlete_id: str, memory_item_id: str) -> RecalledItem | None:
         self.seen_athlete_id = athlete_id
         for item in self.memory.get(athlete_id, []):
             if item.memory_item_id == memory_item_id:
@@ -198,6 +202,7 @@ def _build_app(engine: _FakeBreadthEngine, session: AsyncSession, athlete_id: st
     app.dependency_overrides[agent_routes.require_agent_scope] = lambda: None
     app.dependency_overrides[agent_routes.current_athlete_id] = lambda: athlete_id
     app.dependency_overrides[agent_routes.agent_engine] = lambda: engine
+    app.dependency_overrides[agent_routes.persisted_locale] = lambda: None
     app.dependency_overrides[agent_routes.current_session] = _session
     return app
 
@@ -217,9 +222,7 @@ async def env() -> AsyncIterator[_Env]:
         await session.commit()
         fake = _FakeBreadthEngine(diagnosis=_diagnosis(present=True), digest_body=_digest())
         app = _build_app(fake, session, athlete_id)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield _Env(client, fake, session, athlete_id)
     await engine.dispose()
 
@@ -253,29 +256,29 @@ def _no_forbidden(body: dict[str, object]) -> None:
 # --- POST /v1/agent/diagnose (API-R15) -------------------------------------------
 
 
-async def test_diagnose_completed_reports_coverage_no_number(env: _Env) -> None:
-    """A present athlete -> completed coverage lines, no athlete-facing number (VOICE-R7)."""
+async def test_diagnose_completed_reports_checks_no_number(env: _Env) -> None:
+    """A present athlete -> AgentDiagnosis checks[{code,ok,detail}] + overall_ok (API-R15)."""
     resp = await env.client.post("/v1/agent/diagnose", headers=_auth())
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "completed"
-    keys = {i["key"]: i for i in body["inputs"]}
-    assert keys["training_load"]["status"] == "present"
-    assert keys["hrv"]["status"] == "missing"
+    checks = {c["code"]: c for c in body["checks"]}
+    assert checks["training_load"]["ok"] is True
+    assert checks["hrv"]["ok"] is False
+    assert checks["hrv"]["detail"]  # a human narration, never empty
+    assert body["overall_ok"] is False  # one failed check fails the roll-up closed
     assert "value" not in json.dumps(body)  # a diagnosis reports coverage, never a metric value
     assert env.engine.seen_athlete_id == env.athlete_id  # server-derived identity (AUTH-R3)
     _no_forbidden(body)
 
 
-async def test_diagnose_degraded_carries_typed_caveat(env: _Env) -> None:
-    """No canonical coverage -> degraded + typed no_canonical_coverage caveat (OUTCOME-R3)."""
+async def test_diagnose_overall_ok_requires_every_check(env: _Env) -> None:
+    """overall_ok is the fail-closed roll-up: ANY failed check -> False (API-R15)."""
     env.engine.diagnosis = _diagnosis(present=False)
     resp = await env.client.post("/v1/agent/diagnose", headers=_auth())
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "degraded"
-    assert body["coverage_caveat"]["reason"] == "no_canonical_coverage"
-    assert "hrv" in body["coverage_caveat"]["inputs_unavailable"]
+    assert body["overall_ok"] is False
+    assert [c["code"] for c in body["checks"]] == ["hrv"]
 
 
 # --- GET /v1/agent/digest/last (API-R14) -----------------------------------------
@@ -317,14 +320,14 @@ async def test_subscribe_persists_then_lists_then_cancels(env: _Env) -> None:
         json={"cadence": "weekly", "weekday": "mon", "hour_local": 7, "channels": ["web"]},
         headers=_auth(),
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 201  # created (API-R14)
     sub = resp.json()
     assert sub["cadence"] == "weekly"
     assert sub["weekday"] == "mon"
     assert sub["status"] == "active"
     sub_id = sub["subscription_id"]
-    # it lists for the owner
-    listed = await env.client.get("/v1/agent/digest/list", headers=_auth())
+    # it lists for the owner (the subscription CRUD list surface)
+    listed = await env.client.get("/v1/agent/digest/subscriptions", headers=_auth())
     assert listed.status_code == 200
     assert [s["subscription_id"] for s in listed.json()["data"]] == [sub_id]
     # delete -> 204 and the row is terminally cancelled (GBO-R47)
@@ -341,7 +344,7 @@ async def test_resubscribe_replaces_keeping_one_active_row(env: _Env) -> None:
         json={"cadence": "weekly", "weekday": "mon", "hour_local": 7, "channels": ["web"]},
         headers=_auth(),
     )
-    assert first.status_code == 200
+    assert first.status_code == 201
     first_id = first.json()["subscription_id"]
     # a SECOND subscribe with different settings must replace the standing schedule, not add a row
     second = await env.client.post(
@@ -349,23 +352,27 @@ async def test_resubscribe_replaces_keeping_one_active_row(env: _Env) -> None:
         json={"cadence": "daily", "hour_local": 18, "channels": ["web"]},
         headers=_auth(),
     )
-    assert second.status_code == 200
+    assert second.status_code == 201
     # the same standing row is updated in place (same id), now carrying the new settings
     assert second.json()["subscription_id"] == first_id
     assert second.json()["cadence"] == "daily"
     assert second.json()["hour_local"] == 18
     # exactly ONE active row exists for the owner (GBO-R46 — one standing schedule)
     rows = (
-        await env.session.execute(
-            select(DigestSubscription).where(
-                DigestSubscription.athlete_id == uuid.UUID(env.athlete_id),
-                DigestSubscription.status == DigestStatus.ACTIVE,
+        (
+            await env.session.execute(
+                select(DigestSubscription).where(
+                    DigestSubscription.athlete_id == uuid.UUID(env.athlete_id),
+                    DigestSubscription.status == DigestStatus.ACTIVE,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 1
     # and the list surfaces exactly one schedule
-    listed = await env.client.get("/v1/agent/digest/list", headers=_auth())
+    listed = await env.client.get("/v1/agent/digest/subscriptions", headers=_auth())
     assert len(listed.json()["data"]) == 1
 
 
@@ -393,9 +400,7 @@ async def test_subscribe_weekly_without_weekday_is_422(env: _Env) -> None:
 
 async def test_delete_unknown_subscription_is_404(env: _Env) -> None:
     """Cancelling an unknown / non-UUID subscription id is 404 not-found (API-R51)."""
-    unknown = await env.client.delete(
-        f"/v1/agent/digest/subscribe/{uuid.uuid4()}", headers=_auth()
-    )
+    unknown = await env.client.delete(f"/v1/agent/digest/subscribe/{uuid.uuid4()}", headers=_auth())
     assert unknown.status_code == 404
     assert unknown.json()["type"].endswith("/not-found")
     bad = await env.client.delete("/v1/agent/digest/subscribe/not-a-uuid", headers=_auth())
@@ -436,8 +441,67 @@ async def test_subscribe_email_channel_refused_until_verified(env: _Env) -> None
         json={"cadence": "daily", "hour_local": 7, "channels": ["email"]},
         headers=_auth(),
     )
-    assert allowed.status_code == 200
+    assert allowed.status_code == 201
     assert allowed.json()["channels"] == ["email"]
+
+
+# --- GET /v1/agent/digest/list — the paginated weekly-review history (API-R14) ----
+
+
+async def test_digest_list_pages_stored_history_newest_first(env: _Env) -> None:
+    """digest/list pages the STORED weekly reviews behind a signed cursor (API-R14 / §5)."""
+    env.engine.history = [
+        _digest(),  # week_end 2026-06-07
+        Digest(
+            status=RunStatus.COMPLETED,
+            thread_id="owner:digest:2026-05-31",
+            week_end="2026-05-31",
+            digest_html="<p>Prior week.</p>",
+            digest_text="Prior week.",
+        ),
+        Digest(
+            status=RunStatus.COMPLETED,
+            thread_id="owner:digest:2026-05-24",
+            week_end="2026-05-24",
+            digest_html="<p>Older week.</p>",
+            digest_text="Older week.",
+        ),
+    ]
+    page1 = await env.client.get("/v1/agent/digest/list", params={"limit": 2}, headers=_auth())
+    assert page1.status_code == 200
+    body = page1.json()
+    assert [d["week_end"] for d in body["data"]] == ["2026-06-07", "2026-05-31"]
+    assert body["page"]["has_more"] is True
+    assert body["page"]["next_cursor"]
+    _no_forbidden(body)
+    page2 = await env.client.get(
+        "/v1/agent/digest/list",
+        params={"limit": 2, "cursor": body["page"]["next_cursor"]},
+        headers=_auth(),
+    )
+    assert page2.status_code == 200
+    body2 = page2.json()
+    assert [d["week_end"] for d in body2["data"]] == ["2026-05-24"]
+    assert body2["page"]["has_more"] is False
+    assert body2["page"]["next_cursor"] is None
+
+
+async def test_digest_list_rejects_nonpositive_limit(env: _Env) -> None:
+    """limit < 1 on the history list is rejected 422, never defaulted (PAGE-R3)."""
+    resp = await env.client.get("/v1/agent/digest/list", params={"limit": 0}, headers=_auth())
+    assert resp.status_code == 422
+
+
+async def test_memory_list_is_rate_limited(env: _Env) -> None:
+    """The non-LLM memory list still debits the agent request bucket -> 429 (LIMIT-R1)."""
+    last = None
+    for _ in range(25):  # the agent bucket default is 20/min (LIMIT-R2)
+        last = await env.client.get("/v1/agent/memory", headers=_auth())
+        if last.status_code == 429:
+            break
+    assert last is not None and last.status_code == 429
+    assert last.json()["type"].endswith("/rate-limited")
+    assert "Retry-After" in last.headers
 
 
 # --- GET/DELETE /v1/agent/memory (API-R15a / MEM-R3 MUST) ------------------------
@@ -451,7 +515,7 @@ async def test_memory_list_is_owner_scoped(env: _Env) -> None:
     }
     resp = await env.client.get("/v1/agent/memory", headers=_auth())
     assert resp.status_code == 200
-    contents = [r["content"] for r in resp.json()["data"]]
+    contents = [r["summary_text"] for r in resp.json()["data"]]
     assert contents == ["prefers morning rides", "hates the trainer"]
     assert "foreign secret" not in contents
     _no_forbidden(resp.json())
@@ -463,12 +527,15 @@ async def test_memory_get_and_erase_then_regets_404(env: _Env) -> None:
     env.engine.memory = {env.athlete_id: [item]}
     got = await env.client.get(f"/v1/agent/memory/{item.memory_item_id}", headers=_auth())
     assert got.status_code == 200
-    assert got.json()["content"] == "prefers tempo work"
-    assert "value" not in json.dumps(got.json())  # personalization only, never a number (MEM-R1)
-    # erase -> the row is gone (residual-row erasure, PRIV-R8)
+    body = got.json()
+    assert body["summary_text"] == "prefers tempo work"
+    assert body["memory_id"] == item.memory_item_id
+    assert body["created_at"] and body["updated_at"]  # the spec MemoryItem instants (API-R15a)
+    assert "value" not in json.dumps(body)  # personalization only, never a number (MEM-R1)
+    # erase -> 204 no body (API-R15a) and the row is gone (residual-row erasure, PRIV-R8)
     erased = await env.client.delete(f"/v1/agent/memory/{item.memory_item_id}", headers=_auth())
-    assert erased.status_code == 200
-    assert erased.json()["status"] == "erased"
+    assert erased.status_code == 204
+    assert erased.content == b""
     # PRIV-R8: a re-GET of the erased id is 404 (the residual row is truly gone)
     regot = await env.client.get(f"/v1/agent/memory/{item.memory_item_id}", headers=_auth())
     assert regot.status_code == 404

@@ -78,8 +78,16 @@ def resolve_length(body: PlanRequest) -> ResponseLength:
     return body.response_length or "detailed"
 
 
-def resolve_locale(body: PlanRequest, accept_language: str | None) -> str:
-    """Resolve the response language: body ``language`` -> Accept-Language -> ``en`` (API-R37)."""
+def resolve_locale(
+    body: PlanRequest, accept_language: str | None, persisted: str | None = None
+) -> str:
+    """Resolve the response language per the API-R37 precedence chain.
+
+    Body ``language`` -> ``Accept-Language`` -> the PERSISTED setting (the language
+    subtag of ``athlete.primary_locale``, loaded server-side) -> the engine ``en``
+    baseline — identical to the agent path so the plan surface honors the stored
+    default (API-R37) without a per-call override mutating it.
+    """
     if body.language is not None:
         return body.language
     if accept_language:
@@ -87,6 +95,8 @@ def resolve_locale(body: PlanRequest, accept_language: str | None) -> str:
             tag = part.split(";", 1)[0].strip().lower()[:2]
             if tag in PHASE_GATED_BY_LOCALE:
                 return tag
+    if persisted in PHASE_GATED_BY_LOCALE:
+        return persisted
     return "en"
 
 

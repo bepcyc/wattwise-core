@@ -72,15 +72,18 @@ def _digest_terminal() -> AgentState:
                 "observation_id": "obs-load-ramp",
                 "text": "Your load ramped up faster than usual this week.",
                 "citations": [
-                    {"record_id": "pmc-2026-06-06", "metric": "ramp", "value": 8.0,
-                     "as_of": "2026-06-06"},
+                    {
+                        "record_id": "pmc-2026-06-06",
+                        "metric": "ramp",
+                        "value": 8.0,
+                        "as_of": "2026-06-06",
+                    },
                 ],
             }
         ],
         "citations": [
             {"record_id": "act-101", "metric": "tss", "value": 95.0, "as_of": "2026-06-02"},
-            {"record_id": "pmc-2026-06-06", "metric": "ctl", "value": 62.0,
-             "as_of": "2026-06-06"},
+            {"record_id": "pmc-2026-06-06", "metric": "ctl", "value": 62.0, "as_of": "2026-06-06"},
         ],
         "coverage_caveat": None,
     }
@@ -117,8 +120,9 @@ async def test_weekly_digest_cites_canonical_records() -> None:
     assert digest.observations[0] == Observation(
         observation_id="obs-load-ramp",
         text="Your load ramped up faster than usual this week.",
-        citations=(Citation(record_id="pmc-2026-06-06", metric="ramp", value=8.0,
-                             as_of="2026-06-06"),),
+        citations=(
+            Citation(record_id="pmc-2026-06-06", metric="ramp", value=8.0, as_of="2026-06-06"),
+        ),
     )
     assert digest.week_end == "2026-06-06"
 
@@ -151,8 +155,23 @@ async def test_weekly_digest_abstains_on_missing_data() -> None:
 
 # VOICE-R2 forbidden internals (must never appear in any athlete-facing follow-up copy).
 _FORBIDDEN_WORDS = (
-    "api", "endpoint", "database", "schema", "token", "model", "tier", "flash", "pro",
-    "frontier", "checkpoint", "thread", "mcp", "grounding", "scrub", "coverage", "budget",
+    "api",
+    "endpoint",
+    "database",
+    "schema",
+    "token",
+    "model",
+    "tier",
+    "flash",
+    "pro",
+    "frontier",
+    "checkpoint",
+    "thread",
+    "mcp",
+    "grounding",
+    "scrub",
+    "coverage",
+    "budget",
 )
 
 
@@ -213,9 +232,7 @@ async def test_only_citations_with_record_ids_survive() -> None:
             {"metric": "phantom", "value": 999.0, "as_of": "2026-06-06"},  # no record_id
         ],
     }
-    answer = await answer_question(
-        FakeGraph(terminal), "a", "How is my fitness?", locale="en"
-    )
+    answer = await answer_question(FakeGraph(terminal), "a", "How is my fitness?", locale="en")
     assert answer.citations == (
         Citation(record_id="ctl-1", metric="ctl", value=60.0, as_of="2026-06-06"),
     )

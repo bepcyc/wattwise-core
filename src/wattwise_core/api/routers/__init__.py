@@ -12,12 +12,18 @@ from fastapi import APIRouter
 
 from wattwise_core.api.routers import (
     activities,
+    admin,
     agent_routes,
     athlete,
+    auth_flows,
     connections,
     connections_management,
+    dashboard,
+    data_health,
     export,
+    exports,
     goals,
+    help,
     imports,
     onboarding,
     performance,
@@ -31,6 +37,7 @@ from wattwise_core.api.routers import (
 #: Every feature router, in mount order. Each already carries its full ``/v1/...``
 #: prefix, so the factory includes them verbatim (no extra prefix).
 ROUTERS: list[APIRouter] = [
+    auth_flows.router,
     export.router,
     performance.router,
     performance_history.router,
@@ -44,8 +51,14 @@ ROUTERS: list[APIRouter] = [
     connections.router,
     connections_management.router,
     imports.router,
+    exports.router,
     sync.router,
     onboarding.router,
+    dashboard.router,
+    data_health.router,
+    help.router,
+    admin.router,
+    admin.system_router,
 ]
 
 __all__ = ["ROUTERS"]

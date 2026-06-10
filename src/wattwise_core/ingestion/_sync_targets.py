@@ -175,9 +175,7 @@ class _ConnectionTarget:
         )
 
 
-def resolve_api_key(
-    credentials: CredentialStore | None, target: _ConnectionTarget
-) -> str | None:
+def resolve_api_key(credentials: CredentialStore | None, target: _ConnectionTarget) -> str | None:
     """Resolve the opaque ``credential_ref`` to the live secret (CLI-R13, SEC-R7).
 
     Only ``api_key`` connections carry a usable key; it is decrypted in-memory at

@@ -21,12 +21,17 @@ This module depends only on the observability layer (no agent sibling imports, A
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from wattwise_core.observability import metrics as obs_metrics
 from wattwise_core.observability.logging import get_logger
+
+#: Strict IETF BCP-47-shaped tag gate for prompt interpolation (INJECT-R1): primary
+#: subtag + optional alphanumeric subtags only — nothing else reaches the directive.
+_IETF_TAG_RE = re.compile(r"[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*")
 
 _logger = get_logger(__name__)
 
@@ -79,16 +84,32 @@ class LocalePolicy:
 
     packs: Mapping[str, LanguagePack] = field(default_factory=dict)
     default_language: str = _BASELINE_DEFAULT_LANGUAGE
+    #: Config-gated generic any-language pass-through (accepted deviation from LANG-R1's
+    #: packs-only reading): when enabled AND a requested language has no loaded pack, the compose
+    #: prompt layers ``passthrough_directive`` (a config TEMPLATE; code interpolates the
+    #: ``{language_tag}``/``{locale}`` placeholders) instead of the default pack's variant, so the
+    #: coach answers IN the requested language. The LANG-R4 fallback is still RECORDED, loaded
+    #: packs stay authoritative, and grounding/abstention copy are untouched.
+    passthrough_enabled: bool = False
+    passthrough_directive: str = ""
 
     @classmethod
     def from_config(
-        cls, languages: Mapping[str, Mapping[str, Any]], default_language: str
+        cls,
+        languages: Mapping[str, Mapping[str, Any]],
+        default_language: str,
+        *,
+        passthrough_enabled: bool = False,
+        passthrough_directive: str = "",
     ) -> LocalePolicy:
         """Build from the loaded ``[agent.coach.languages.*]`` tables (config content, LANG-R1).
 
         ``default_language`` (the bundle's LANG-R4 fallback) MUST itself be a loaded language —
         otherwise the fallback path would resolve to a language with no variant, so the bundle
         fails closed at load (SKILL-R4 spirit: never a partially-loaded behavior bundle).
+        ``passthrough_enabled``/``passthrough_directive`` are the config-gated generic
+        any-language pass-through (see the class attributes; both default OFF/empty so a caller
+        wiring no pass-through keeps the strict packs-only behaviour).
         """
         packs = {
             _primary_subtag(lang): LanguagePack(
@@ -99,10 +120,13 @@ class LocalePolicy:
         }
         default = _primary_subtag(default_language) or _BASELINE_DEFAULT_LANGUAGE
         if packs and default not in packs:
-            raise ValueError(
-                f"default_language {default!r} has no loaded language pack (LANG-R4)"
-            )
-        return cls(packs=packs, default_language=default)
+            raise ValueError(f"default_language {default!r} has no loaded language pack (LANG-R4)")
+        return cls(
+            packs=packs,
+            default_language=default,
+            passthrough_enabled=passthrough_enabled,
+            passthrough_directive=passthrough_directive,
+        )
 
     def resolve(self, requested: str | None) -> tuple[str, bool]:
         """Resolve a requested locale to ``(language, fallback_used)`` (LANG-R4).
@@ -126,11 +150,53 @@ class LocalePolicy:
         and appends ONE resolved language's compose directive after the persona (SKILL-R3
         layering; one language per deliverable — never mixed). With no pack for the resolved
         language (the empty policy) the persona is returned unchanged.
+
+        When the config-gated generic pass-through is ON and the requested language has no
+        loaded pack, the templated pass-through directive (interpolated with the requested
+        tag/locale) is layered INSTEAD of the default pack's variant — the coach answers in the
+        requested language while the fallback is still recorded and everything else (grounding,
+        abstention copy, loaded packs) stays authoritative (accepted deviation from LANG-R1's
+        packs-only reading).
         """
-        lang = self.resolve_recorded(requested, surface="compose")
-        directive = self.packs.get(lang, LanguagePack()).compose_directive
+        directive = self._passthrough_directive(requested)
+        if directive is None:
+            lang = self.resolve_recorded(requested, surface="compose")
+            directive = self.packs.get(lang, LanguagePack()).compose_directive
+        else:
+            # Still a LANG-R4 fallback event (no loaded pack for the request): record it for
+            # observability even though the SURFACE answers in the requested language.
+            self.resolve_recorded(requested, surface="compose")
         parts = [p for p in (persona, directive) if p]
         return "\n\n".join(parts)
+
+    def _passthrough_directive(self, requested: str | None) -> str | None:
+        """The interpolated pass-through directive, or ``None`` when the gate does not apply.
+
+        Applies ONLY when: the gate is on, a template is loaded, the request names a language,
+        packs are loaded (a no-bundle caller keeps the historical behaviour), and the requested
+        language has NO loaded pack (loaded packs stay authoritative). A template whose
+        placeholders fail to interpolate yields ``None`` (fail-closed to the default-pack path,
+        never a half-rendered prompt).
+        """
+        lang = _primary_subtag(requested)
+        if (
+            not self.passthrough_enabled
+            or not self.passthrough_directive
+            or not lang
+            or not self.packs
+            or lang in self.packs
+        ):
+            return None
+        # INJECT-R1/AGT-SEC: the requested tag is UNTRUSTED input headed for the system
+        # prompt — only a strictly-valid IETF language tag is ever interpolated; anything
+        # else (embedded newlines, prose, control text) collapses to the safe primary
+        # subtag, so no caller-controlled instruction line can enter the directive.
+        full_tag = (requested or "").strip()
+        safe_locale = full_tag if _IETF_TAG_RE.fullmatch(full_tag) else lang
+        try:
+            return self.passthrough_directive.format(language_tag=lang, locale=safe_locale)
+        except (KeyError, IndexError, ValueError):
+            return None
 
     def resolve_recorded(self, requested: str | None, *, surface: str) -> str:
         """Resolve a locale and RECORD any fallback for observability (LANG-R4, §15)."""
@@ -156,6 +222,13 @@ class LocalePolicy:
         pack carries one (the no-bundle seam) — never an empty or mixed-language body. The
         EMPTY policy (no packs) keys the floor on the REQUESTED language directly, preserving
         the engine's historical localized floor for an isolated caller.
+
+        PASS-THROUGH languages (no pack) deliberately receive the DEFAULT language's copy: the
+        abstain path is deterministic and model-free by design (GROUND-R6 — a failed run may
+        not call the model again), so an any-language limitation cannot be generated here. The
+        abstaining deliverable body is the limitation alone (no localized prose beside it), so
+        no single deliverable mixes languages; the fallback is RECORDED (LANG-R4) like every
+        other one.
         """
         if not self.packs:
             requested_lang = _primary_subtag(requested)

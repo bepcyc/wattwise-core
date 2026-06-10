@@ -83,9 +83,7 @@ async def seeded() -> AsyncIterator[Env]:
     async with factory() as session:
         athlete_id = await _seed(session)
         app = _build_app(session, athlete_id, write_allowed=True)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield Env(client, app, session, athlete_id)
     await engine.dispose()
 
@@ -125,23 +123,36 @@ async def _seed(session: AsyncSession) -> str:
     await session.flush()
     aid = athlete.athlete_id
     activity = Activity(
-        athlete_id=aid, start_time=_START, sport="cycling", elapsed_time_s=3600,
-        moving_time_s=3600, avg_power_w=250.0, max_power_w=400.0,
-        has_power=True, has_hr=False, has_gps=False,
+        athlete_id=aid,
+        start_time=_START,
+        sport="cycling",
+        elapsed_time_s=3600,
+        moving_time_s=3600,
+        avg_power_w=250.0,
+        max_power_w=400.0,
+        has_power=True,
+        has_hr=False,
+        has_gps=False,
     )
     session.add(activity)
     await session.flush()
     stream_set = ActivityStreamSet(
-        activity_id=activity.activity_id, sample_basis=SampleBasis.TIME, sample_rate_hz=1.0,
-        sample_count=3600, t0=_START,
+        activity_id=activity.activity_id,
+        sample_basis=SampleBasis.TIME,
+        sample_rate_hz=1.0,
+        sample_count=3600,
+        t0=_START,
     )
     session.add(stream_set)
     await session.flush()
     session.add(
         StreamChannel(
-            stream_set_id=stream_set.stream_set_id, set_kind=StreamSetKind.ACTIVITY,
-            channel=StreamChannelName.POWER_W, sample_basis=SampleBasis.TIME,
-            values=[250.0] * 3600, coverage={},
+            stream_set_id=stream_set.stream_set_id,
+            set_kind=StreamSetKind.ACTIVITY,
+            channel=StreamChannelName.POWER_W,
+            sample_basis=SampleBasis.TIME,
+            values=[250.0] * 3600,
+            coverage={},
         )
     )
     await session.commit()

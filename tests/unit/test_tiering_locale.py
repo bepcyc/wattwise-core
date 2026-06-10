@@ -233,8 +233,6 @@ def test_default_language_without_a_pack_fails_closed_at_load() -> None:
 async def test_compose_node_uses_the_run_locale_variant() -> None:
     """The graph compose node selects the localized variant from the run state (LANG-R3)."""
     model = _RecordingModel()
-    node = make_compose(
-        object(), model, "persona", SingleModelRoutingPolicy(), _packs(), None
-    )
+    node = make_compose(object(), model, "persona", SingleModelRoutingPolicy(), _packs(), None)
     await node({"athlete_id": "ath-1", "request_text": "wie geht's", "locale": "de"})
     assert model.compose_calls and "Antworte auf Deutsch." in model.compose_calls[0]

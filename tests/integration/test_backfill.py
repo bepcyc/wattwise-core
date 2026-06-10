@@ -57,7 +57,6 @@ async def session_factory() -> AsyncIterator[Any]:
     await engine.dispose()
 
 
-
 class WindowRecordingAdapter(FakeApiAdapter):
     """A fake that records every fetched window and can fail/cancel a given window."""
 

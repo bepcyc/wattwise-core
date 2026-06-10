@@ -224,7 +224,13 @@ def _make_ground(svc: AgentServices) -> GraphNode:
         athlete_id = gs.athlete_id(state)
         draft = state.get("draft") or ""
         result = await svc.grounder.ground(
-            athlete_id=athlete_id, draft=draft, retrieved=gs.read_retrieved(state)
+            athlete_id=athlete_id,
+            draft=draft,
+            retrieved=gs.read_retrieved(state),
+            # The athlete's own request text: a number the USER supplied there is a sayable
+            # echo (the request's constraint, e.g. "5-7 hours a week"), never a canonical-data
+            # claim the grounder must fail closed on.
+            request_text=state.get("request_text"),
         )
         obs.record_grounding(result)
         citations = [gc.citation for gc in result.survivors if gc.citation is not None]
@@ -347,6 +353,7 @@ def _spine_nodes(
     model_routing: tiering.ModelRoutingPolicy,
     locales: LocalePolicy,
     context_token_budget: int | None,
+    detailed_compose_directive: str,
 ) -> dict[str, GraphNode]:
     """Construct every spine node implementation, keyed by node name (GRAPH-R2/R4)."""
     return {
@@ -357,7 +364,13 @@ def _spine_nodes(
         "reflect": make_reflect(model, reflect_system, model_routing),
         "redraft_tick": routing.make_redraft_tick(),
         "compose": make_compose(
-            svc, model, coach_system, model_routing, locales, context_token_budget
+            svc,
+            model,
+            coach_system,
+            model_routing,
+            locales,
+            context_token_budget,
+            detailed_compose_directive,
         ),
         "ground": _make_ground(svc),
         "interrupt_gate": _make_interrupt_gate(recorder),
@@ -377,6 +390,7 @@ def build_graph(
     model_routing: tiering.ModelRoutingPolicy | None = None,
     locales: LocalePolicy | None = None,
     context_token_budget: int | None = None,
+    detailed_compose_directive: str = "",
 ) -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
     """Assemble and compile the agent graph (GRAPH-R1/R2/R3/R5).
 
@@ -421,12 +435,36 @@ def build_graph(
     policy = model_routing if model_routing is not None else tiering.SingleModelRoutingPolicy()
     packs = locales if locales is not None else EMPTY_LOCALE_POLICY
     nodes = _spine_nodes(
-        svc, model, coach_system, reflect_system, recorder, ceiling, policy, packs,
+        svc,
+        model,
+        coach_system,
+        reflect_system,
+        recorder,
+        ceiling,
+        policy,
+        packs,
         context_token_budget,
+        detailed_compose_directive,
     )
     for node_name, node_fn in nodes.items():
         builder.add_node(node_name, obs.traced(node_name, node_fn), input_schema=AgentState)
+    _wire_spine_edges(builder, ceiling, tool_bound)
+    return builder.compile(checkpointer=checkpointer)
 
+
+def _wire_spine_edges(
+    builder: StateGraph[AgentState, Any, AgentState, AgentState],
+    ceiling: int,
+    tool_bound: int,
+) -> None:
+    """Wire the fixed node spine + the three bounded recovery cycles (GRAPH-R2/R3).
+
+    Extracted from :func:`build_graph` (QUAL-R9 function ceiling); the edge set is byte-identical
+    to the inline wiring it replaces. The only cycles are coverage recovery
+    (``assess_coverage -> reflect -> plan_retrieval``), redraft recovery (``ground -> compose``
+    via ``redraft_tick``), and re-plan recovery (``ground -> reflect -> plan_retrieval``); every
+    ceiling/tool-bound breach routes to a graceful terminal, never a raise (GRAPH-R3/R5).
+    """
     # Fixed spine (GRAPH-R2). Admission-refused short-circuits ingest -> finalize (COST-R4).
     builder.add_edge(START, "ingest_request")
     builder.add_conditional_edges(
@@ -469,8 +507,6 @@ def build_graph(
     # Gate -> single sink (GRAPH-R2 / OUTCOME-R1).
     builder.add_edge("interrupt_gate", "finalize")
     builder.add_edge("finalize", END)
-
-    return builder.compile(checkpointer=checkpointer)
 
 
 __all__ = [

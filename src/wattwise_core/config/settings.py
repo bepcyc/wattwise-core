@@ -166,9 +166,9 @@ class Settings(BaseSettings):
     # Access-token lifetime MUST be <= 60 minutes and a 0/negative/unbounded lifetime is
     # rejected AT CONFIG LOAD (SEC-R2.3): ``ge=1`` refuses 0/negative and ``le=3600`` refuses
     # an unbounded/over-an-hour lifetime — never interpreted as "never expires". Refresh is a
-    # SEPARATE, revocable opaque token whose own finite window is bounded the same way.
+    # SEPARATE, revocable opaque token whose own finite window (``auth__refresh_ttl_seconds``,
+    # declared with the auth-flow settings below) is bounded the same way.
     auth__access_ttl_seconds: int = Field(ge=1, le=3600)
-    auth__refresh_ttl_days: int = Field(ge=1, le=365)
 
     # --- privacy (PRIV-R2): athlete opt-out of storing raw GPS coordinates ---
     # When false, ingestion drops the raw ``latlng`` channel before canonical landing while
@@ -199,6 +199,12 @@ class Settings(BaseSettings):
     # Security-header values (SEC-R10.1): HSTS max-age, the Referrer-Policy, and the CSP
     # for any HTML surface. Loaded content (CFG-R1a), never a code literal.
     security__hsts_max_age_seconds: int = Field(ge=0)
+    # --- AUTH-R8a / SEC-R4: the first-party service-principal shared secret ---
+    # A high-entropy secret a first-party service (bot runtime, BFF) presents in the
+    # dedicated ``X-Service-Auth`` header IN ADDITION to the per-athlete bearer token.
+    # Secret material: env-only (CFG-R2), ``None`` = the factor is not configured and
+    # any presented header fails closed (it can never be verified).
+    security__service_auth_secret: SecretStr | None = None
     security__referrer_policy: str
     security__content_security_policy: str
 
@@ -213,6 +219,15 @@ class Settings(BaseSettings):
     entitlement__wall_clock_seconds: float = Field(gt=0)
     entitlement__max_tool_iterations: int = Field(ge=1)
     entitlement__request_rate_per_minute: int = Field(ge=1)
+
+    # --- auth: refresh-token + account-link lifetimes (API-R23 / AUTH-R8, CFG-R1a) ---
+    # The rotating refresh-token family lifetime and the single-use link-challenge
+    # lifetime. Loaded content (CFG-R1a) — never a code literal.
+    auth__refresh_ttl_seconds: int = Field(ge=60)
+    auth__link_ttl_seconds: int = Field(ge=30)
+
+    # --- exports: the signed-download-URL lifetime (API-R34; short-lived, <= 5 min) ---
+    exports__signed_url_ttl_seconds: int = Field(ge=1, le=300)
 
     # --- rate-limit: the READ / MUTATING per-minute request ceilings (LIMIT-R2, CFG-R1a) ---
     # The per-athlete per-minute request ceilings for the read + mutating endpoint classes
@@ -287,6 +302,10 @@ class Settings(BaseSettings):
     analytics__endurance_score_window_days: int = Field(ge=1)
     analytics__endurance_score_long_duration_s: int = Field(ge=1)
     analytics__endurance_score_short_duration_s: int = Field(ge=1)
+    # CP-R3/R4 pre-fit power-degeneracy epsilon (relative MMP power spread below which
+    # the fit refuses with INSUFFICIENT_DATA before any regression); the VALUE lives in
+    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraint.
+    analytics__cp_power_spread_epsilon: float = Field(gt=0, lt=1)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str
@@ -352,6 +371,14 @@ class Settings(BaseSettings):
     # (LANG-R1). Shape-only here; resolution + the default-language fallback are owned by
     # ``LocalePolicy.from_config`` (the manifest's ``default_language`` is the LANG-R4 fallback).
     agent__coach__languages: dict[str, dict[str, str]]
+    # Generic any-language pass-through (accepted deviation from LANG-R1's packs-only reading,
+    # LANG-R4 fallback still recorded): when ON and a requested locale has no loaded pack, the
+    # compose prompt layers the templated directive (code interpolates {language_tag}/{locale})
+    # instead of the default pack's variant, so the coach answers in the requested language.
+    # Loaded packs stay authoritative; grounding/abstention are untouched. Schema only — the
+    # values live in defaults.toml (CFG-R1a).
+    agent__coach__language_passthrough: bool
+    agent__coach__language_passthrough_directive: str
     # Offline-eval cost/latency budgets (QA-EVAL-R8): the median cost-per-task and p95
     # latency the eval gate enforces, plus the price per 1k tokens used to cost a recorded
     # (network-free) run. Loaded content (CFG-R1a), never a gate hardcode; strictly positive.
@@ -394,13 +421,6 @@ class Settings(BaseSettings):
     encryption_root_key: SecretStr | None = None
     token_signing_key: SecretStr | None = None
     llm_api_key: SecretStr | None = None
-    # SEC-R4: the OPTIONAL high-entropy service-principal shared secret a first-party
-    # service runtime (e.g. the Telegram bot) presents in the dedicated ``X-Service-Auth``
-    # header — compared in constant time, carried OUTSIDE ``Authorization``, and presented
-    # IN ADDITION to the athlete bearer token, never as a replacement. Env/secret-store
-    # only (CFG-R2); unset means no service principal is provisioned.
-    service_auth_secret: SecretStr | None = None
-
     def canonical_write_dsn(self) -> str | None:
         """The canonical-WRITE DSN (Ingestion/Sync role, ARCH-R3); ``None`` if unset."""
         return None if self.database_dsn is None else self.database_dsn.get_secret_value()

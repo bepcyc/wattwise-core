@@ -24,9 +24,7 @@ class _StubSvc:
     async def _earliest_activity_date(self, athlete_id: str) -> _dt.date:
         return _dt.date(2026, 1, 1)
 
-    async def pmc(
-        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
-    ) -> list[object]:
+    async def pmc(self, athlete_id: str, from_date: _dt.date, to_date: _dt.date) -> list[object]:
         return []  # no computable PMC day
 
     async def current_sport(self, athlete_id: str) -> None:

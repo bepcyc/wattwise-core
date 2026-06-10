@@ -186,7 +186,5 @@ def readiness_consistent(
     verdict is ``None`` (form unavailable) this returns ``False``: no verdict can be
     certified against a missing form (GROUND-R6).
     """
-    assessment = assess_readiness(
-        form=form, hrv_rmssd=hrv_rmssd, hrv_baseline=hrv_baseline
-    )
+    assessment = assess_readiness(form=form, hrv_rmssd=hrv_rmssd, hrv_baseline=hrv_baseline)
     return assessment.verdict is not None and verdict == assessment.verdict

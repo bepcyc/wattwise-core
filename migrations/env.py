@@ -20,6 +20,9 @@ from alembic import context
 from sqlalchemy.engine import Connection
 
 from wattwise_core.agent import memory as _agent_memory  # noqa: F401 (registers MemoryItem)
+from wattwise_core.agent import digest_history as _agent_digest  # noqa: F401 (registers AgentDigestRecord)
+from wattwise_core.agent import auth_state as _agent_auth  # noqa: F401 (registers auth state tables)
+from wattwise_core.agent import ops_jobs as _agent_ops  # noqa: F401 (registers import/export job tables)
 from wattwise_core.agent.state_store import AgentStateBase
 from wattwise_core.config import get_settings
 from wattwise_core.persistence.engine import create_engine_from_settings, normalize_dsn

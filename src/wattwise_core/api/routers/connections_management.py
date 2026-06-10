@@ -106,9 +106,7 @@ class ConnectionList(BaseModel):
     operation_id="listConnections",
     dependencies=[Depends(require_scopes(Scope.READ))],
 )
-async def list_connections(
-    principal: CurrentPrincipal, session: DbSession
-) -> ConnectionList:
+async def list_connections(principal: CurrentPrincipal, session: DbSession) -> ConnectionList:
     """List the athlete's source connections (API-R27).
 
     The one consumer list where a named ``source`` is a legitimate field (the AUTH-R15
@@ -179,9 +177,7 @@ async def disconnect_connection(
     await session.flush()
 
 
-async def _athlete_first_sync_state(
-    session: AsyncSession, athlete_id: uuid.UUID
-) -> FirstSyncState:
+async def _athlete_first_sync_state(session: AsyncSession, athlete_id: uuid.UUID) -> FirstSyncState:
     """The athlete's onboarding first-sync progression (API-R46), reused for API-R47.
 
     Derived from the SAME canonical state as ``OnboardingStatus`` (the athlete's
