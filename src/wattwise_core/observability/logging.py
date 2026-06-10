@@ -89,6 +89,17 @@ _ALLOWED_KEYS: frozenset[str] = frozenset(
         "connection_id",
         "schema",
         "requested_at",
+        # AGT-OBS-R5 / MODEL-R2: a tier-escalation decision is logged explicitly with its
+        # node, the chosen tier/effort labels, and the policy-recorded reason. LANG-R4: a
+        # language-fallback event is logged with the requested + resolved language tags.
+        # All are bounded operational descriptors (enum labels / policy-authored reason /
+        # BCP-47-ish tags) — never athlete content or PII.
+        "node",
+        "tier",
+        "reasoning_effort",
+        "reason",
+        "requested_language",
+        "resolved_language",
     }
 )
 

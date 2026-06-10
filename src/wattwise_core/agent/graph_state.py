@@ -33,11 +33,16 @@ from wattwise_core.agent.contracts import (
     turn_records,
 )
 
+# The loaded language packs + config-driven default-language fallback (LANG-R1/-R4) live in the
+# LEAF :mod:`locale` module; the abstain limitation copy resolves through them.
+from wattwise_core.agent.locale import EMPTY_LOCALE_POLICY, LocalePolicy
+
 # Re-export the COACH-R8 stable-id observation projection from its focused LEAF module
 # (:mod:`observations`, QUAL-R9 size split) so the existing ``gs.build_observations`` call site in
 # the ``ground`` node keeps resolving unchanged (ARCH-R21: the leaf depends only on contracts).
 from wattwise_core.agent.observations import build_observations
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
+from wattwise_core.agent.tiering import TokenCounter, estimate_tokens
 from wattwise_core.observability import runtrace
 
 # Bounded recovery budgets (REFLECT-R4), shared with the graph for routing decisions.
@@ -251,16 +256,15 @@ async def reflect_decision(
 
 # --- compose context: INJECT-R1 envelope + MODEL-R3 token budget ---
 
-# A coarse input-token budget for the assembled context (MODEL-R3). The OSS engine ships
-# no provider tokenizer offline, so the default counter is a deterministic word/char
-# estimate; a deployment injects the real tokenizer via the same seam. Overflow trims
-# the lowest-relevance retrieved records FIRST and records the trim in coverage_gaps.
+# Fallback input-token budget for a caller that injects NO budget (MODEL-R3). The PRODUCTION
+# budget is computed by the engine from loaded config — the model's context window minus the
+# reserved output headroom (``agent__context_window_tokens`` - the entitlement's output-token
+# bound) — and threaded into :func:`render_context` via ``build_graph``; this constant only
+# bounds an isolated caller (a bare unit-test graph). Overflow trims the lowest-relevance
+# retrieved records FIRST and records the trim in coverage_gaps — never silent mid-record
+# truncation. The injectable counter seam (:data:`~wattwise_core.agent.tiering.TokenCounter`)
+# lives with the model-routing seam in :mod:`tiering`.
 _CONTEXT_TOKEN_BUDGET = 6000
-
-
-def estimate_tokens(text: str) -> int:
-    """Deterministic token estimate (MODEL-R3 default; ~4 chars/token, words floor)."""
-    return max(len(text) // 4, len(text.split()))
 
 
 def context_relevance(record: Any) -> float:
@@ -278,8 +282,16 @@ def render_context(
     *,
     active_goals: Sequence[Mapping[str, Any]] | None = None,
     recalled_memory: Sequence[Mapping[str, Any]] | None = None,
+    token_counter: TokenCounter | None = None,
+    token_budget: int | None = None,
 ) -> tuple[str, bool]:
     """Serialise canonical evidence within a measured token budget (MODEL-R3, INJECT-R1, MEM-R4).
+
+    ``token_counter`` is the MODEL-R3 tokenizer seam (the model's own tokenizer when it exposes
+    one — see :func:`model_token_counter`; the deterministic estimate otherwise) and
+    ``token_budget`` the input budget the engine computed from the configured context window
+    minus the reserved output headroom; ``None`` falls back to the module defaults (a bare
+    caller).
 
     Untrusted content (the user request, every retrieved record body, the athlete's active-goal
     labels/notes, AND any recalled durable-memory items) is wrapped in an explicit delimited
@@ -294,6 +306,9 @@ def render_context(
     are dropped FIRST and a flag is returned so the caller records the trim in coverage_gaps.
     Returns ``(context, trimmed)``.
     """
+    count = token_counter if token_counter is not None else estimate_tokens
+    over = token_budget is not None and token_budget > 0
+    budget = token_budget if over and token_budget is not None else _CONTEXT_TOKEN_BUDGET
     header = f"request:\n<untrusted-data>\n{request_text or ''}\n</untrusted-data>"
     rendered: list[str] = [header]
     trimmed = False
@@ -310,7 +325,7 @@ def render_context(
     )
     for key, value in items:
         candidate = f"{key}:\n<untrusted-data>\n{value}\n</untrusted-data>"
-        if estimate_tokens("\n".join([*rendered, candidate])) > _CONTEXT_TOKEN_BUDGET:
+        if count("\n".join([*rendered, candidate])) > budget:
             trimmed = True
             continue
         rendered.append(candidate)
@@ -387,24 +402,17 @@ def safe_html(text: str) -> str:
     return f"<p>{_html.escape(text)}</p>" if text else ""
 
 
-# Deterministic, jargon-free limitation copy for an abstaining run (GROUND-R6, VOICE-R2/R3).
-# This is the fail-closed safety floor the engine guarantees when grounding cannot verify
-# enough to answer; a loaded coach persona MAY re-voice it, but the engine never ships the
-# scrubbed draft as if it were an answer. No internal terms; warm + truthful.
-_LIMITATION_TEXT = {
-    "en": "I don't have enough confirmed data to answer that reliably yet. "
-    "Sync your sources and I'll take another look.",
-    "de": "Mir fehlen noch genug gesicherte Daten, um das verlaesslich zu beantworten. "
-    "Synchronisiere deine Quellen und ich schaue noch einmal.",
-    "ru": "Poka nedostatochno podtverzhdyonnyh dannyh, chtoby otvetit' nadyozhno. "
-    "Sinhroniziruj istochniki i ya posmotryu snova.",
-}
+def limitation_text(state: AgentState, locales: LocalePolicy | None = None) -> str:
+    """The localized fail-closed limitation statement for an abstaining run (GROUND-R6).
 
-
-def limitation_text(state: AgentState) -> str:
-    """The localized fail-closed limitation statement for an abstaining run (GROUND-R6)."""
-    locale = (state.get("locale") or "en").split("-", 1)[0].lower()
-    return _LIMITATION_TEXT.get(locale, _LIMITATION_TEXT["en"])
+    Delegates to the loaded :class:`~wattwise_core.agent.locale.LocalePolicy` (LANG-R1/-R4:
+    the copy is CONFIG content per language, and an unsupported language resolves to the
+    config-driven ``default_language`` with the fallback recorded). A caller wiring no policy
+    (the bare test graph) degrades to the deterministic in-code floor keyed on the requested
+    locale — the historical behaviour, never an empty body.
+    """
+    policy = locales if locales is not None else EMPTY_LOCALE_POLICY
+    return policy.limitation(state.get("locale"))
 
 
 # --- terminal status + coverage caveat (OUTCOME-R1/-R4/-R5; no self-grading) ---
@@ -479,7 +487,6 @@ __all__ = [
     "build_observations",
     "context_relevance",
     "cost_rollup",
-    "estimate_tokens",
     "is_new_turn",
     "last_ground_decision",
     "last_plan_requests",

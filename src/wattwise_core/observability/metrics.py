@@ -37,6 +37,8 @@ REFLECTIONS = "wattwise_agent_reflections_total"
 REFLECTION_EXHAUSTIONS = "wattwise_agent_reflection_exhaustions_total"
 REFUSALS = "wattwise_agent_refusals_total"
 INJECTION_ANOMALIES = "wattwise_agent_injection_anomalies_total"
+TIER_ESCALATIONS = "wattwise_agent_tier_escalations_total"  # labelled by node+tier (MODEL-R2)
+LANGUAGE_FALLBACKS = "wattwise_agent_language_fallbacks_total"  # labelled by requested (LANG-R4)
 RUN_TERMINAL = "wattwise_agent_run_terminal_total"  # labelled by terminal status
 RUN_COST_USD = "wattwise_agent_run_cost_usd"  # summary (per-run cost)
 RUN_LATENCY_SECONDS = "wattwise_agent_run_latency_seconds"  # summary (per-run latency)
@@ -188,12 +190,14 @@ __all__ = [
     "GROUNDING_RUNS",
     "GROUNDING_SCRUBS",
     "INJECTION_ANOMALIES",
+    "LANGUAGE_FALLBACKS",
     "REFLECTIONS",
     "REFLECTION_EXHAUSTIONS",
     "REFUSALS",
     "RUN_COST_USD",
     "RUN_LATENCY_SECONDS",
     "RUN_TERMINAL",
+    "TIER_ESCALATIONS",
     "VALIDATION_FAILURES",
     "MetricsRegistry",
     "get_registry",

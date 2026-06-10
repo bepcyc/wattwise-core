@@ -23,6 +23,7 @@ from wattwise_core.agent.state_db import (
     AgentStateDatabase,
     build_agent_state_database,
 )
+from wattwise_core.agent.tiering import SingleModelRoutingPolicy
 from wattwise_core.entitlement import OssEntitlementResolver
 from wattwise_core.identity import OWNER_SUBJECT
 from wattwise_core.persistence import Database
@@ -55,6 +56,14 @@ def build_agent_engine(database: Database, settings: Any) -> GraphAgentEngine | 
         coach=CoachBundle.from_settings(settings),
         entitlement=entitlement,
         dedup_window_seconds=settings.agent__idempotency_dedup_window_seconds,
+        # The OSS single-model routing policy carrying the config tier/effort labels
+        # (MODEL-R1/-R2, CFG-R1a): every node resolves to the one configured model; an
+        # invalid configured label fails closed here at boot.
+        model_routing=SingleModelRoutingPolicy.from_labels(
+            settings.agent__tier, settings.agent__reasoning_effort
+        ),
+        # The model context window for the MODEL-R3 input budget (window - output headroom).
+        context_window_tokens=settings.agent__context_window_tokens,
     )
 
 
