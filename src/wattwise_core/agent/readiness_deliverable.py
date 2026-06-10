@@ -39,6 +39,14 @@ from pydantic import BaseModel
 from wattwise_core.agent.contracts import GroundingResult, RunStatus
 from wattwise_core.agent.observations import build_observations
 from wattwise_core.agent.projection import project_observations
+from wattwise_core.agent.readiness_sufficiency import (
+    STALE_ABSTAIN_SENTENCE as _STALE_ABSTAIN_SENTENCE,
+)
+from wattwise_core.agent.readiness_sufficiency import (
+    STALE_DATA_CLAUSE,
+    freshness_blocks_verdict,
+    sufficiency_coverage_fields,
+)
 from wattwise_core.agent.voice import (
     Citation,
     Observation,
@@ -58,6 +66,8 @@ from wattwise_core.analytics.readiness import (
 )
 from wattwise_core.analytics.sufficiency import RecordSufficiency
 from wattwise_core.domain.enums import ReadinessVerdict
+
+_STALE_DATA_CLAUSE = STALE_DATA_CLAUSE
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,22 +164,6 @@ _VERDICT_STATE_SENTENCE: Mapping[ReadinessVerdict, str] = {
 #: number, an honest state sentence rather than a guessed readiness call.
 _ABSTAIN_SENTENCE = "There isn't enough recent data to read your readiness yet."
 
-#: The truthful abstain lead when the form number EXISTS but the record behind it has gone stale
-#: (GROUND-R6, sufficiency axis): the most recent OBSERVED data is old enough that the verdict would
-#: be read off an EWMA tail of assumed-rest days, which can be real rest OR a silently-broken sync —
-#: data alone cannot tell (MNAR). Honest under BOTH branches: it asks the athlete to check sync
-#: without asserting it, and emits no verdict/number. Carries no digit (VOICE-R7).
-_STALE_ABSTAIN_SENTENCE = (
-    "I haven't seen any recent training data, so I can't read your readiness right now — "
-    "if you've been training, it's worth checking that your data sync is still connected."
-)
-
-#: The honest staleness clause appended to a delivered verdict in the disclose zone (FRESH < gap <=
-#: MAX): the verdict still ships (and is only ever a less-aggressive, safe-side call there — GO is
-#: blocked upstream) but its currency is disclosed. Digit-free so it never trips the number cap and
-#: keeps the precise staleness only in the structured coverage caveat (VOICE-R7).
-STALE_DATA_CLAUSE = "I haven't seen new training data in a few days, so this may lag where you are."
-_STALE_DATA_CLAUSE = STALE_DATA_CLAUSE
 
 #: The honest HRV-unavailable clause appended to the state sentence when the verdict came
 #: from form alone (GROUND-R7: say HRV is missing rather than emit a placeholder). PUBLIC so
@@ -224,7 +218,7 @@ async def readiness_assessment(
     verdict = assessment.verdict
     if verdict is None:
         return _abstain_readiness(assessment, as_of)
-    if sufficiency is not None and _freshness_blocks_verdict(sufficiency, verdict):
+    if sufficiency is not None and freshness_blocks_verdict(sufficiency, verdict):
         return _stale_abstain_readiness(assessment, as_of, sufficiency)
     return await _narrate_readiness(
         athlete_id,
@@ -238,19 +232,6 @@ async def readiness_assessment(
         response_length=response_length,
         sufficiency=sufficiency,
     )
-
-
-def _freshness_blocks_verdict(sufficiency: RecordSufficiency, verdict: ReadinessVerdict) -> bool:
-    """True iff record staleness forbids emitting ``verdict`` at all (asymmetric fail-closed).
-
-    Two fail-closed conditions, mirroring the one-directional HRV nudge (which may only push toward
-    caution): the record is INSUFFICIENT (past the hard floor / never observed) so no current-state
-    verdict can be read; OR the oracle's call is the most-aggressive ``go`` on a merely STALE record
-    — telling a fatigued athlete to go hard off a record that cannot see the last several days is
-    exactly the manufactured-freshness failure, so ``go`` is never emitted on stale data. A
-    less-aggressive verdict on a stale record is safe-side and still ships (DEGRADED + caveated).
-    """
-    return sufficiency.insufficient or (sufficiency.stale and verdict is ReadinessVerdict.GO)
 
 
 def _abstain_readiness(assessment: ReadinessAssessment, as_of: str | None) -> Readiness:
@@ -485,9 +466,8 @@ def _coverage_map(
     (truthful, never guessed). ``override`` records that the model proposed a verdict the
     metrics did not support, so the canonical verdict was substituted (COACH-R3 / EVAL-R5)
     — the audit trail for the fail-closed decision, mirroring grounding's GROUND-R3 caveat.
-    ``sufficiency`` adds the source-agnostic record-freshness caveat (OUTCOME-R4): the
-    machine-readable ``staleness_days`` + the ``stale``/``substituted`` flags + the resulting
-    ``fidelity`` (the precise day count lives ONLY here, never in athlete-facing prose, VOICE-R7).
+    ``sufficiency`` adds the source-agnostic record-freshness caveat (OUTCOME-R4) via
+    :func:`~wattwise_core.agent.readiness_sufficiency.sufficiency_coverage_fields`.
     """
     coverage: dict[str, Any] = {
         "inputs_used": list(assessment.inputs_used),
@@ -497,12 +477,7 @@ def _coverage_map(
     if override:
         coverage["verdict_override"] = "model_inconsistent_with_metrics"
     if sufficiency is not None:
-        coverage["fidelity"] = sufficiency.fidelity
-        coverage["staleness_days"] = sufficiency.staleness_days
-        if sufficiency.stale:
-            coverage["stale"] = True
-        if sufficiency.substituted:
-            coverage["substituted"] = True
+        coverage.update(sufficiency_coverage_fields(sufficiency))
     return coverage
 
 
