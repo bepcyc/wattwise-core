@@ -241,6 +241,17 @@ class Settings(BaseSettings):
     # sized for reasoning models (reasoning tokens are billed against the completion
     # budget and emitted before the answer), so a small allowance starves the answer.
     agent__model: str
+    # The observability tier + reasoning effort the run is tagged with on every model span
+    # (AGT-OBS-R2). The OSS engine runs ONE model (MODEL-R4: no escalation), so these are the
+    # single configured tier/effort labels — loaded content (CFG-R1a), never a code literal; a
+    # commercial deployment with multiple tiers overrides per route through the same fields.
+    agent__tier: str
+    agent__reasoning_effort: str
+    # Per-token pricing (USD per million tokens) the AGT-OBS-R2 per-span/per-run cost is COMPUTED
+    # from. Loaded config content (CFG-R1a) — the engine bakes no price into code; a deployment
+    # sets its provider's real rates. Non-negative; 0 reports cost as 0 (a free local model).
+    agent__cost__input_per_million_usd: float = Field(ge=0.0)
+    agent__cost__output_per_million_usd: float = Field(ge=0.0)
     agent__temperature: float = Field(ge=0.0, le=2.0)
     agent__max_output_tokens: int = Field(ge=1)
     agent__grounding_min_coverage: float = Field(ge=0.0, le=1.0)

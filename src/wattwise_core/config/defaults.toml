@@ -128,6 +128,11 @@ training_load_confidence_penalty = 0.7
 # It is 2026: the default is a contemporary reasoning-capable model (MODEL-R5a).
 base_url = "https://openrouter.ai/api/v1"
 model = "deepseek/deepseek-v4-flash"
+# Observability tier + reasoning effort tagged on every model span (AGT-OBS-R2). The OSS engine
+# runs ONE model (MODEL-R4, no escalation), so the default tier is the cheap-bulk "flash" tier and
+# the effort is "low"; loaded content (CFG-R1a), never a code literal.
+tier = "flash"
+reasoning_effort = "low"
 temperature = 0.0
 # Sized for reasoning models: reasoning tokens are billed against the completion
 # budget and emitted BEFORE the answer, so a small allowance yields an empty answer
@@ -149,6 +154,14 @@ idempotency_dedup_window_seconds = 60
 # is LOADED policy content (CFG-R1a), never a code-baked host literal; the operator/private
 # bundle may extend it. A TOML array flattens to one ``agent__allowed_hosts`` list setting.
 allowed_hosts = ["wattwise.app", "www.wattwise.app", "docs.wattwise.app"]
+
+[agent.cost]
+# Per-token pricing (USD per MILLION tokens) the AGT-OBS-R2 per-run cost is COMPUTED from. Loaded
+# config content (CFG-R1a) — no price literal lives in the engine; a deployment sets its provider's
+# real rates. The OSS default tracks the cheap-bulk flash tier (deepseek-v4-flash: $0.14 in / $0.28
+# out per M, the model-cost lever the unit economics depend on). Non-negative; 0 = free/local model.
+input_per_million_usd = 0.14
+output_per_million_usd = 0.28
 
 [agent.coach]
 # The OSS default coach-config bundle (SKILL-R1 / §16): the engine embeds NO persona

@@ -32,6 +32,7 @@ from importlib import import_module
 from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Depends, FastAPI
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,7 +48,7 @@ from wattwise_core.api.auth import (
 )
 from wattwise_core.api.deps import AppSettings, get_db, get_rate_limiter
 from wattwise_core.api.errors import ProblemError, install_error_handlers
-from wattwise_core.api.middleware import JSONBodySizeLimitMiddleware
+from wattwise_core.api.middleware import EndpointMetricsMiddleware, JSONBodySizeLimitMiddleware
 from wattwise_core.api.openapi import install_openapi
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers import activities as activities_router
@@ -74,6 +75,7 @@ from wattwise_core.config import Settings, get_settings
 from wattwise_core.entitlement import OssEntitlementResolver, validate_plan
 from wattwise_core.identity import OWNER_SUBJECT
 from wattwise_core.observability.logging import configure_logging
+from wattwise_core.observability.metrics import get_registry
 from wattwise_core.persistence import Database
 
 #: The WWW-Authenticate challenge returned with an invalid sign-in (AUTH-R1/API-R23).
@@ -131,8 +133,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     install_security_middleware(app, resolved)
     app.add_middleware(JSONBodySizeLimitMiddleware)
+    # Added LAST so it is the OUTERMOST middleware: it times the WHOLE request (including a
+    # body-size rejection or a security-middleware short-circuit) and reads the matched route the
+    # router binds into the shared scope, recording the OBS-R5 per-endpoint request/latency/error
+    # metrics onto the /metrics surface for every request.
+    app.add_middleware(EndpointMetricsMiddleware)
     install_error_handlers(app)
     _mount_liveness(app)
+    _mount_metrics(app)
     mount_readiness(app)
     app.include_router(_public_router())
     app.include_router(_auth_router())
@@ -329,6 +337,24 @@ def _mount_liveness(app: FastAPI) -> None:
     async def healthz() -> dict[str, str]:
         """Liveness: the process is up and its event loop is responsive (OBS-R6.1)."""
         return {"status": "alive"}
+
+
+def _mount_metrics(app: FastAPI) -> None:
+    """Mount ``GET /metrics`` — the production metrics scrape surface (OBS-R5/-R4, AGT-OBS-R7).
+
+    Deliberately OUTSIDE ``/v1`` (an operational route, like ``/healthz``): the platform's
+    metrics collector scrapes it. It exposes the process-local registry in Prometheus text
+    format — operational metrics (per-endpoint request/latency) AND the agent quality/health
+    signals (grounding-scrub, structured-validation-failure, reflection-exhaustion,
+    ``degraded``/``budget_exceeded`` rates, p50/p95 latency, cost per run) — so a sustained
+    regression in any signal is alertable in production (AGT-OBS-R7), not only in CI (CI-R8).
+    It carries no per-athlete payload and leaks no internal detail (OBS-R6.3).
+    """
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> PlainTextResponse:
+        """Render the process metrics registry in Prometheus text format (OBS-R5)."""
+        return PlainTextResponse(get_registry().render())
 
 
 def _public_router() -> APIRouter:

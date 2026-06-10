@@ -21,11 +21,14 @@ reproducible (MODEL-R5, the eval-suite stability requirement).
 
 from __future__ import annotations
 
+from typing import Any
+
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from wattwise_core.api.redaction import redact_text
 from wattwise_core.config import Settings, get_settings
+from wattwise_core.observability import runtrace
 from wattwise_core.observability.logging import get_logger
 
 _VERDICT_TEMPERATURE = 0.0  # MODEL-R5: zero temperature for verdicts / span extraction.
@@ -90,6 +93,13 @@ class OpenAICompatibleModel:
         # provider call (``structured``/``compose``) masks its payload first; the flag carries
         # through ``with_output_budget`` because that view shares the same ``settings``.
         self._redact_send = cfg.agent__redact_provider_payloads
+        # Observability span labels + cost rates (AGT-OBS-R2), all config-loaded (CFG-R1a): the
+        # single configured tier/effort the OSS model runs at and the per-million-token USD rates
+        # the per-span/per-run cost is COMPUTED from. No price/tier literal lives in the engine.
+        self._tier = cfg.agent__tier
+        self._reasoning_effort = cfg.agent__reasoning_effort
+        self._input_rate = cfg.agent__cost__input_per_million_usd
+        self._output_rate = cfg.agent__cost__output_per_million_usd
         self._settings = cfg
         self._client = client if client is not None else _build_client(cfg)
 
@@ -101,6 +111,37 @@ class OpenAICompatibleModel:
         the third-party provider. Idempotent (the central redactor re-masks to a fixed token).
         """
         return redact_text(text) if self._redact_send else text
+
+    def _record_usage(
+        self, span: runtrace.Span | None, completion: Any, *, schema_id: str | None
+    ) -> None:
+        """Record a model span's AGT-OBS-R2 usage from the provider response.
+
+        Reads prompt/completion token counts from the REAL provider ``usage`` object (never an
+        estimate), tags the model/tier/effort + structured-output schema id, and computes the
+        cost from the config-loaded per-token rates. A call outside a graph run has no span
+        (``None``) and records nothing — observability is a no-op for an isolated direct call.
+        """
+        if span is None:
+            return
+        usage = getattr(completion, "usage", None)
+        prompt = getattr(usage, "prompt_tokens", None) if usage is not None else None
+        out = getattr(usage, "completion_tokens", None) if usage is not None else None
+        span.record_usage(
+            model=self._model,
+            tier=self._tier,
+            reasoning_effort=self._reasoning_effort,
+            schema_id=schema_id,
+            prompt_tokens=prompt,
+            completion_tokens=out,
+            cost_usd=self._cost_usd(prompt, out),
+        )
+
+    def _cost_usd(self, prompt: int | None, completion: int | None) -> float:
+        """Compute call cost from tokens + the config-loaded per-million rates (AGT-OBS-R2)."""
+        in_cost = (prompt or 0) / 1_000_000 * self._input_rate
+        out_cost = (completion or 0) / 1_000_000 * self._output_rate
+        return in_cost + out_cost
 
     def with_output_budget(self, max_output_tokens: int) -> OpenAICompatibleModel:
         """A view of this model whose per-call output budget is ``max_output_tokens`` (AGT-ENT-R1).
@@ -132,17 +173,23 @@ class OpenAICompatibleModel:
         (INJECT-R1). A refusal or an unparsed message raises :class:`ModelResponseError`
         (a ``ValueError``) so the caller's bounded retry handles it (STRUCT-R2) — there
         is no free-text fallback.
+
+        The provider call runs inside a ``model`` span (AGT-OBS-R1) and records the
+        AGT-OBS-R2 fields (model/tier/effort, prompt/completion tokens from the real provider
+        usage, computed cost, latency, the structured-output schema id) on it.
         """
-        completion = await self._client.chat.completions.parse(
-            model=self._model,
-            temperature=_VERDICT_TEMPERATURE,
-            max_completion_tokens=self._max_output_tokens,
-            response_format=schema,
-            messages=[
-                {"role": "system", "content": self._outbound(system)},
-                {"role": "user", "content": self._outbound(data)},
-            ],
-        )
+        with runtrace.span("model.structured") as span:
+            completion = await self._client.chat.completions.parse(
+                model=self._model,
+                temperature=_VERDICT_TEMPERATURE,
+                max_completion_tokens=self._max_output_tokens,
+                response_format=schema,
+                messages=[
+                    {"role": "system", "content": self._outbound(system)},
+                    {"role": "user", "content": self._outbound(data)},
+                ],
+            )
+            self._record_usage(span, completion, schema_id=schema.__name__)
         message = completion.choices[0].message
         if message.refusal:
             raise ModelResponseError(f"provider refused structured output for {schema.__name__!r}")
@@ -165,15 +212,17 @@ class OpenAICompatibleModel:
         # output tokens on its thinking trace before the answer, so a small per-call cap starved
         # compose to empty (MODEL-R5a); this budget holds reasoning trace + answer.
         bound = min(max_tokens, self._max_output_tokens)
-        completion = await self._client.chat.completions.create(
-            model=self._model,
-            temperature=self._compose_temperature,
-            max_completion_tokens=bound,
-            messages=[
-                {"role": "system", "content": self._outbound(system)},
-                {"role": "user", "content": self._outbound(context)},
-            ],
-        )
+        with runtrace.span("model.compose") as span:
+            completion = await self._client.chat.completions.create(
+                model=self._model,
+                temperature=self._compose_temperature,
+                max_completion_tokens=bound,
+                messages=[
+                    {"role": "system", "content": self._outbound(system)},
+                    {"role": "user", "content": self._outbound(context)},
+                ],
+            )
+            self._record_usage(span, completion, schema_id=None)
         return completion.choices[0].message.content or ""
 
 

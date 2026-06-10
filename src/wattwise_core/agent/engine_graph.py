@@ -32,6 +32,7 @@ from wattwise_core.agent.projection import (
     new_conversation_id,
     thread_id_for,
 )
+from wattwise_core.observability import runtrace
 
 # The compiled-graph type the deliverables drive through the ``CoachGraph`` seam.
 _CompiledGraph = CompiledStateGraph[AgentState, Any, AgentState, AgentState]
@@ -44,6 +45,19 @@ _CompiledGraph = CompiledStateGraph[AgentState, Any, AgentState, AgentState]
 # path.
 NODE_VISIT_CEILING = DEFAULT_NODE_VISIT_CEILING
 RECURSION_LIMIT = NODE_VISIT_CEILING + 20
+
+
+def _thread_id_of(config: RunnableConfig) -> str | None:
+    """The durable ``thread_id`` carried in a run config, or ``None`` (CKPT-R3).
+
+    The thread id is the checkpointer key under ``configurable`` (the SAME key
+    :meth:`CompiledCoachGraph.run` sets). It is read defensively so a resume can bind its run
+    trace to the paused run's id (AGT-OBS-R1); an absent key yields ``None`` and the trace mints a
+    fresh opaque id rather than silently emitting into no trace.
+    """
+    configurable = config.get("configurable") or {}
+    thread_id = configurable.get("thread_id")
+    return thread_id if isinstance(thread_id, str) and thread_id else None
 
 
 def conversation_id_for(athlete_id: str, thread_id: str | None) -> str:
@@ -205,26 +219,40 @@ class CompiledCoachGraph:
         # No wall-clock deadline on the pausable approval-gated plan path: the pause window could
         # otherwise orphan the ``live`` interrupt row ``interrupt_gate`` commits before suspending.
         timeout = None if plan_requires_approval(state) else self._wall_clock_seconds
-        try:
-            result = await asyncio.wait_for(
-                self._compiled.ainvoke(state, config=config),
-                timeout=timeout,
-            )
-        except TimeoutError:  # asyncio.TimeoutError is an alias of builtin TimeoutError (3.11+)
-            # Fail closed GRACEFULLY (AGT-ENT-R4 wall-clock guard): the run exceeded its time
-            # budget, so project a degraded terminal answer instead of bubbling the timeout. The
-            # durable checkpoint is untouched (the cancelled ainvoke wrote no terminal state); a
-            # follow-up may resume the same thread.
-            return wall_clock_degraded(state)
-        return cast(AgentState, result)
+        # Bind the single run trace tied to the durable thread_id (AGT-OBS-R1): every node + model
+        # span and every log line for this run correlate under one trace_id == thread_id, and the
+        # run is reconstructable from the log stream (LOG-R3). The trace stays bound across the
+        # wait_for so the spans the nodes open belong to it.
+        with runtrace.run_trace(thread_id):
+            try:
+                result = await asyncio.wait_for(
+                    self._compiled.ainvoke(state, config=config),
+                    timeout=timeout,
+                )
+            except TimeoutError:  # asyncio.TimeoutError is an alias of builtin TimeoutError (3.11+)
+                # Fail closed GRACEFULLY (AGT-ENT-R4 wall-clock guard): the run exceeded its time
+                # budget, so project a degraded terminal answer instead of bubbling the timeout. The
+                # durable checkpoint is untouched (the cancelled ainvoke wrote no terminal state); a
+                # follow-up may resume the same thread.
+                return wall_clock_degraded(state)
+            return cast(AgentState, result)
 
     async def resume(self, command: Command[Any], config: RunnableConfig) -> AgentState:
         """Resume a paused run with ``Command(resume=...)`` on the SAME durable thread (CKPT-R2).
 
         The head node does NOT re-run (no recompute, no fresh turn_id); the pre-interrupt nodes
         replay from the checkpoint rather than re-executing. Returns the terminal state.
+
+        Like the initial :meth:`run`, the resumed invoke MUST be fully traced (AGT-OBS-R1): the
+        post-resume nodes/model calls emit spans + log lines that correlate under one ``trace_id``
+        tied to the run's durable ``thread_id`` (LOG-R3). The thread id is recovered from the
+        resume config (the checkpointer key, CKPT-R3) so the resume's trace shares the same id as
+        the paused run's trace; without this binding the resumed run's spans drop into a ``None``
+        trace and its log lines carry no correlation context.
         """
-        result = await self._compiled.ainvoke(command, config=config)
+        thread_id = _thread_id_of(config)
+        with runtrace.run_trace(thread_id):
+            result = await self._compiled.ainvoke(command, config=config)
         return cast(AgentState, result)
 
 

@@ -50,6 +50,7 @@ from wattwise_core.agent.skills import CoachManifest, load_manifest
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
 from wattwise_core.agent.voice import VoicePresentation
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.observability import runtrace
 from wattwise_core.persistence.types import utcnow
 
 
@@ -168,7 +169,16 @@ class RegistryGateway:
     async def gather(
         self, *, athlete_id: str, requests: Sequence[RetrievalRequest]
     ) -> Mapping[str, Any]:
+        """Resolve the requests and EMIT every scope-override anomaly (TOOL-R1, AGT-OBS-R5a).
+
+        ``gather`` constructs a typed :class:`AnomalyEvent` for each attempted cross-athlete
+        scope override it ignored (PLAN-R5). This production seam — the one the live graph calls
+        — EMITS each one onto the run trace and counts it in metrics (AGT-OBS-R5a); it does NOT
+        discard them, so injection-neutralization is monitorable in production, not only in CI.
+        Identity stays the server-derived ``athlete_id`` (the override is ignored); records return.
+        """
         result = await gather(self._svc, athlete_id, list(requests))
+        runtrace.record_scope_anomalies(result.anomalies)
         return result.records
 
 

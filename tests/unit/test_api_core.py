@@ -41,6 +41,7 @@ from wattwise_core.api.auth import (
 from wattwise_core.api.deps import require_scope
 from wattwise_core.api.errors import PROBLEM_BASE_URI, PROBLEM_MEDIA_TYPE
 from wattwise_core.config import Settings, load_settings
+from wattwise_core.observability import metrics as obs_metrics
 
 pytestmark = pytest.mark.unit
 
@@ -259,6 +260,44 @@ def test_healthz_is_200_liveness() -> None:
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json()["status"] == "alive"
+
+
+def test_metrics_exposes_prometheus_text_surface() -> None:
+    """GET /metrics is a public Prometheus-text operational surface (OBS-R5, AGT-OBS-R7, CI-R8)."""
+    obs_metrics.get_registry().increment(obs_metrics.GROUNDING_RUNS)
+    client = _app_with_probe_routes()
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    # The recorded grounding-run counter is exposed in the scrape body (OBS-R4 monitorable).
+    assert obs_metrics.GROUNDING_RUNS in resp.text
+
+
+def test_endpoint_request_and_latency_metrics_are_recorded() -> None:
+    """A request records the OBS-R5 per-endpoint request counter + latency summary.
+
+    OBS-R5 (70:556) MUST expose request rate/latency/error rate PER ENDPOINT. The
+    ``ENDPOINT_REQUESTS`` / ``ENDPOINT_LATENCY_SECONDS`` metric names existed but were never
+    recorded (permanently-zero ghosts) until the EndpointMetricsMiddleware was wired into
+    ``create_app``. This drives a real request through the assembled app and asserts the counter
+    for that route+outcome incremented and a latency sample landed. A revert that removes the
+    middleware registration leaves both flat, failing this test.
+    """
+    registry = obs_metrics.get_registry()
+    labels = {"endpoint": f"{API_PREFIX}/system/status", "outcome": "ok"}
+    before = registry.counter_value(obs_metrics.ENDPOINT_REQUESTS, labels=labels)
+    latency_before = registry.summary(obs_metrics.ENDPOINT_LATENCY_SECONDS).count
+    client = _app_with_probe_routes()
+
+    resp = client.get(f"{API_PREFIX}/system/status")
+    assert resp.status_code == 200
+
+    after = registry.counter_value(obs_metrics.ENDPOINT_REQUESTS, labels=labels)
+    assert after == before + 1.0  # OBS-R5 request rate per endpoint, labelled by route template
+    latency_after = registry.summary(
+        obs_metrics.ENDPOINT_LATENCY_SECONDS, labels={"endpoint": f"{API_PREFIX}/system/status"}
+    ).count
+    assert latency_after >= latency_before + 1  # OBS-R5 latency per endpoint observed
 
 
 def test_system_status_is_public_and_carries_no_user_data() -> None:

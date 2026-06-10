@@ -38,6 +38,7 @@ from wattwise_core.agent.contracts import (
 # the ``ground`` node keeps resolving unchanged (ARCH-R21: the leaf depends only on contracts).
 from wattwise_core.agent.observations import build_observations
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
+from wattwise_core.observability import runtrace
 
 # Bounded recovery budgets (REFLECT-R4), shared with the graph for routing decisions.
 MAX_REFLECTIONS = 2
@@ -448,13 +449,24 @@ def build_caveat(
 
 
 def cost_rollup(state: AgentState, status: RunStatus) -> dict[str, Any]:
-    """Per-run cost/latency rollup carried on every outcome (OUTCOME-R2)."""
+    """Per-run cost/latency rollup carried on every outcome (OUTCOME-R2, AGT-OBS-R2).
+
+    Carries the node-visit + cost-event counts (OUTCOME-R2) AND, when a run trace is active, the
+    AGT-OBS-R2 per-run rollup read from the recorded model/tool spans: total prompt/completion
+    tokens, total cost, total latency, the model-tier mix, the reflection count, and the scrub
+    count — read from the real provider usage, never fabricated. Outside a run (no active trace)
+    only the deterministic counts are present.
+    """
     events = state.get("cost_events", [])
-    return {
+    rollup: dict[str, Any] = {
         "node_visits": state.get("node_visits", 0),
         "cost_event_count": len(events),
         "status": status.value,
     }
+    trace = runtrace.active_trace()
+    if trace is not None:
+        rollup.update(trace.rollup(status.value))
+    return rollup
 
 
 __all__ = [

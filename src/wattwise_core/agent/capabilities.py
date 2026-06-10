@@ -34,6 +34,7 @@ from wattwise_core.agent.contracts import Capability, RetrievalRequest
 from wattwise_core.agent.metric_equivalence import MetricEquivalence
 from wattwise_core.analytics.result import MetricResult, is_computed
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.observability import runtrace
 from wattwise_core.persistence.types import utcnow
 
 # --- typed capability parameter schemas (PLAN-R2: typed, never source/table names) ---
@@ -263,27 +264,50 @@ async def gather(
                     authenticated_scope=athlete_id,
                 )
             )
-        out[req.capability] = await _resolve_one(svc, athlete_id, req)
+        # Each capability resolution is one tool call (PLAN-R3, 1:1 to a canonical-service
+        # call): open a span so the call is traced with start/end, status, and parent linkage
+        # under the run trace (AGT-OBS-R1). The span is a no-op outside a bound run, so the
+        # deterministic/offline path is unchanged. Status flips to ``error`` only if the
+        # underlying call raises; a fail-closed coverage GAP is a neutralized call, not an error.
+        with runtrace.span(req.capability):
+            record, anomaly = await _resolve_one(svc, athlete_id, req)
+        out[req.capability] = record
+        if anomaly is not None:
+            anomalies.append(anomaly)
     return GatherResult(records=out, anomalies=tuple(anomalies))
 
 
-async def _resolve_one(svc: AnalyticsService, athlete_id: str, req: RetrievalRequest) -> Any:
+async def _resolve_one(
+    svc: AnalyticsService, athlete_id: str, req: RetrievalRequest
+) -> tuple[Any, AnomalyEvent | None]:
     """Resolve one request fail-closed: unknown capability / bad params -> typed gap.
 
     Scope-shaped keys are stripped from the params before validation so a model-supplied
     ``athlete_id`` can never reach the capability schema; identity is ``athlete_id`` only
-    (PLAN-R5). The detection + anomaly emission happens in :func:`gather`.
+    (PLAN-R5). The scope-override detection + its anomaly emission happen in :func:`gather`.
+
+    Returns the resolved record (or a typed coverage GAP, TOOL-R5) PLUS an optional
+    :class:`AnomalyEvent`: an out-of-registry capability request (PLAN-R3) is a named
+    injection/anomaly case the engine MUST emit (AGT-OBS-R5a) — it is not a silent gap. The
+    caller threads the returned anomaly onto the run trace + metrics via the production gateway.
     """
     capability = CAPABILITY_BY_KEY.get(req.capability)
     resolver = RESOLVERS.get(req.capability)
     if capability is None or resolver is None:
-        return _gap("unknown_capability", req.capability)
+        anomaly = AnomalyEvent(
+            kind="out_of_registry_capability",
+            capability=req.capability,
+            attempted_keys=(req.capability,),
+            ignored_override={"capability": req.capability},
+            authenticated_scope=athlete_id,
+        )
+        return _gap("unknown_capability", req.capability), anomaly
     clean_params = {k: v for k, v in req.params.items() if k.casefold() not in _SCOPE_SHAPED_KEYS}
     try:
         params = capability.param_schema.model_validate(clean_params)
     except ValueError as exc:
-        return _gap("invalid_params", type(exc).__name__)
-    return await resolver(svc, athlete_id, params)
+        return _gap("invalid_params", type(exc).__name__), None
+    return await resolver(svc, athlete_id, params), None
 
 
 # --- canonical grounding evidence (GROUND-R7: VERBATIM numbers + first-party URLs) ---

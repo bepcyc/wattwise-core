@@ -23,6 +23,7 @@ from wattwise_core.agent.model import (
 )
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
 from wattwise_core.config import load_settings
+from wattwise_core.observability import runtrace
 
 pytestmark = pytest.mark.unit
 
@@ -272,3 +273,55 @@ async def test_openai_model_compose_handles_empty_content() -> None:
 def test_openai_model_satisfies_chatmodel_protocol() -> None:
     completions = _RecordingCompletions(parse_message=_StubMessage(parsed=None), create_content="")
     assert isinstance(_make_model(completions), ChatModel)
+
+
+class _Usage:
+    def __init__(self, prompt_tokens: int, completion_tokens: int) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
+class _UsageCompletions:
+    """Returns a structured completion carrying a real provider ``usage`` object (no network)."""
+
+    def __init__(self, parsed: BaseModel, usage: _Usage) -> None:
+        self._parsed = parsed
+        self._usage = usage
+
+    async def parse(self, **kwargs: Any) -> Any:
+        """Return a parsed completion whose ``usage`` reports provider token counts."""
+        completion = _StubCompletion(_StubMessage(parsed=self._parsed))
+        completion.usage = self._usage  # type: ignore[attr-defined]
+        return completion
+
+
+async def test_structured_records_provider_usage_and_computed_cost_on_span() -> None:
+    """A model span records model/tier/effort + provider token usage + computed cost (AGT-OBS-R2).
+
+    The cost is COMPUTED from the config-loaded per-million rates (flash default: $0.14 in /
+    $0.28 out per M). Reading provider usage instead of discarding it is what this asserts —
+    reverting to the prior code (no usage read) leaves the span fields all ``None``.
+    """
+    settings = load_settings(
+        app__environment="development",
+        database_dsn="sqlite+aiosqlite:///:memory:",
+        agent__model="deepseek/deepseek-v4-flash",
+    )
+    completions = _UsageCompletions(_Verdict(decision="proceed", score=4), _Usage(1000, 500))
+    model = OpenAICompatibleModel(
+        settings=settings,
+        client=_StubClient(completions),  # type: ignore[arg-type]
+    )
+    with runtrace.run_trace("athlete:conv"):
+        await model.structured(system="s", data="d", schema=_Verdict)
+        trace = runtrace.active_trace()
+        assert trace is not None
+        span = trace.spans[-1]
+    assert span.model == "deepseek/deepseek-v4-flash"
+    assert span.tier == "flash"
+    assert span.reasoning_effort == "low"
+    assert span.schema_id == "_Verdict"
+    assert span.prompt_tokens == 1000
+    assert span.completion_tokens == 500
+    # cost = 1000/1e6 * 0.14 + 500/1e6 * 0.28 = 0.00014 + 0.00014 = 0.00028
+    assert span.cost_usd == pytest.approx(0.00028)
