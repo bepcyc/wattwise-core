@@ -116,7 +116,7 @@ filterwarnings = [
   # (b) a connection worker thread delivering its final result after the test's event loop
   #     closed — a teardown race inside the library, after our engines are disposed.
   "ignore:There is no current event loop:DeprecationWarning:aiosqlite.core",
-  "ignore:Exception in thread .*_connection_worker_thread:pytest.PytestUnhandledThreadExceptionWarning",
+  "ignore:Exception in thread .*_connection_worker_thread[\\s\\S]*Event loop is closed:pytest.PytestUnhandledThreadExceptionWarning",
 ]
 markers = [
   "unit: fast isolated unit tests",
