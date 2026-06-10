@@ -23,7 +23,7 @@ from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import FieldCandidate
-from wattwise_core.domain.coverage import Coverage
+from wattwise_core.domain.coverage import Coverage, Substitution
 from wattwise_core.domain.enums import (
     ActivityFileFormat,
     Fidelity,
@@ -32,7 +32,8 @@ from wattwise_core.domain.enums import (
     StreamSetKind,
     trust_rank,
 )
-from wattwise_core.ingestion.dedup import resolve_field
+from wattwise_core.domain.equivalence import substitution_for
+from wattwise_core.ingestion.dedup import ResolvedField, resolve_field
 from wattwise_core.ingestion.trust import TrustPolicy
 from wattwise_core.persistence.models import (
     ActivityFile,
@@ -82,7 +83,12 @@ def dispute_tolerance(field_name: str) -> float | None:
 
 
 def coverage_for(
-    present: bool, fidelity: Fidelity, *, disputed: bool, failed: bool = False
+    present: bool,
+    fidelity: Fidelity,
+    *,
+    disputed: bool,
+    failed: bool = False,
+    substitution: Substitution | None = None,
 ) -> Coverage:
     """A real :class:`Coverage` for a resolved canonical field (CONF-R5/GAP-R2/GAP-R3).
 
@@ -94,9 +100,20 @@ def coverage_for(
     open gap) versus ``absent_true`` (no source supplies it at all). The caller passes
     ``failed=True`` only when it holds a real fetch-failure signal; the default
     ``absent_true`` is the honest state for a field no contributor provided.
+
+    A non-``None`` ``substitution`` (DM-SUB-R4: the winner sits below its declared
+    equivalence-class top tier) forces ``fidelity=substituted`` and attaches the
+    ``{class, from_fidelity}`` marker so a client badges reduced precision.
     """
     if not present:
         return Coverage.absent(failed=failed)
+    if substitution is not None:
+        return Coverage(
+            present=True,
+            fidelity=Fidelity.SUBSTITUTED,
+            disputed=disputed,
+            substitution=substitution,
+        )
     return Coverage(present=True, fidelity=fidelity, disputed=disputed)
 
 
@@ -123,9 +140,25 @@ def field_candidates(
                 observed_at=c.observed_at,
                 fetched_at=c.fetched_at,
                 completeness=completeness,
+                candidate_id=str(c.source_candidate_id),  # LIN-R3 pointer
             )
         )
     return out
+
+
+def resolution_record(winner: ResolvedField) -> dict[str, object]:
+    """The LIN-R3 per-field resolution record for one resolved winner.
+
+    Pointers into ``source_candidate`` (winner + every considered candidate) plus the
+    CONF-R2 rule that decided — persisted beside the canonical value so any canonical
+    scalar is traceable to its origin and re-decidable WITHOUT copying the
+    source-shaped envelope onto the canonical record. Lineage-only (LIN-R4).
+    """
+    return {
+        "winner_candidate_id": winner.winning_candidate_id,
+        "considered_candidate_ids": list(winner.considered_candidate_ids),
+        "rule": winner.deciding_rule,
+    }
 
 
 def resolve_streams(
@@ -313,6 +346,7 @@ async def write_wellness_canonical(
     local_date: _dt.date,
     candidates: list[SourceCandidate],
     tier_of: Any,
+    policy_version: str | None = None,
 ) -> None:
     """Resolve daily-wellness across ALL candidates and write the row (CONF-R2/ING-UPS-R5).
 
@@ -332,6 +366,7 @@ async def write_wellness_canonical(
     }
     update_columns: list[str] = []
     coverage: dict[str, object] = {}
+    field_resolution: dict[str, object] = {}
     for fname in WELLNESS_SCALARS:
         contributors = field_candidates(candidates, fname, tier_of)
         winner = resolve_field(contributors, dispute_tolerance=dispute_tolerance(fname))
@@ -343,13 +378,22 @@ async def write_wellness_canonical(
             continue
         values[fname] = winner.value
         update_columns.append(fname)
-        # Badge the RESOLVED WINNER's tier, NOT an arbitrary scanned contributor (PRV-R6).
+        # Badge the RESOLVED WINNER's tier, NOT an arbitrary scanned contributor (PRV-R6);
+        # a winner below its declared equivalence-class top tier badges SUBSTITUTED with
+        # the displaced tier recorded (DM-SUB-R4), never the winner's own tier as-if-top.
         coverage[fname] = coverage_for(
-            True, winner.winning_trust_tier, disputed=winner.disputed
+            True,
+            winner.winning_trust_tier,
+            disputed=winner.disputed,
+            substitution=substitution_for(fname, winner.winning_trust_tier),
         ).to_jsonable()
+        field_resolution[fname] = resolution_record(winner)  # LIN-R3
     values["coverage"] = coverage
     if coverage:
         update_columns.append("coverage")
+    values["field_resolution"] = field_resolution
+    values["policy_version"] = policy_version  # CONF-R6: the policy that produced this
+    update_columns += ["field_resolution", "policy_version"]
     await upsert(
         session,
         cast("Table", DailyWellness.__table__),
@@ -415,6 +459,7 @@ __all__ = [
     "create_activity_file",
     "dispute_tolerance",
     "field_candidates",
+    "resolution_record",
     "resolve_streams",
     "upsert_laps",
     "upsert_stream_set",

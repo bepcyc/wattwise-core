@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime as _dt
 import uuid
 
-from sqlalchemy import Date, Index, UniqueConstraint
+from sqlalchemy import Date, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from wattwise_core.domain.enums import (
@@ -132,6 +132,11 @@ class DailyWellness(Base, TimestampMixin):
     readiness_external: Mapped[float | None] = numeric_column(nullable=True)
 
     coverage: Mapped[dict[str, object]] = json_column(nullable=False, default=dict)
+    # The conflict-resolution policy version that produced the resolved values (CONF-R6).
+    policy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Per-field resolution record (LIN-R3): candidate pointers + deciding rule; lineage
+    # only, never exposed through consumer reads (LIN-R4).
+    field_resolution: Mapped[dict[str, object] | None] = json_column(nullable=True)
 
 
 class WellnessStreamSet(Base, TimestampMixin):

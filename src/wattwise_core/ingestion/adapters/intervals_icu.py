@@ -296,10 +296,12 @@ def _wellness_payload(well: IntervalsWellnessAsbo, local_date: _dt.date) -> dict
         "sleep_score": well.sleepScore,
         "sleep_duration_s": well.sleepSecs,
         "steps": well.steps,
-        "weight_kg": well.weight,
-        "readiness": well.readiness,
-        "spo2_pct": well.spO2,
-        "respiration_rpm": well.respiration,
+        # Canonical column names ONLY (MAP-R2): the source's weight/readiness/spO2/
+        # respiration map onto the doc-20 daily_wellness fields, never source spellings.
+        "body_mass_kg": well.weight,
+        "readiness_external": well.readiness,
+        "spo2_avg_pct": well.spO2,
+        "respiration_avg_rpm": well.respiration,
         "vo2max": well.vo2max,
     }
 

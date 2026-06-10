@@ -33,13 +33,22 @@ DEFAULT_DURATION_TOL_S = 60.0  # or ±60 s, whichever is looser
 
 @dataclass(frozen=True, slots=True)
 class ResolvedField:
-    """The outcome of :func:`resolve_field` for one canonical field."""
+    """The outcome of :func:`resolve_field` for one canonical field.
+
+    ``winning_candidate_id`` / ``considered_candidate_ids`` are the LIN-R3 pointers
+    into the ``source_candidate`` store; ``deciding_rule`` names the CONF-R2 total-order
+    step that separated the winner from the runner-up (``sole_contributor`` when only
+    one candidate contributed) so the decision is auditable, not just reproducible.
+    """
 
     value: object
     winning_source_descriptor_id: str
     winning_trust_tier: Fidelity
     disputed: bool
     considered_source_ids: tuple[str, ...]
+    winning_candidate_id: str | None = None
+    considered_candidate_ids: tuple[str, ...] = ()
+    deciding_rule: str = "sole_contributor"
 
 
 def _sort_key(c: FieldCandidate) -> tuple[int, float, float, float, str]:
@@ -86,7 +95,31 @@ def resolve_field(
         winning_trust_tier=winner.trust_tier,
         disputed=disputed,
         considered_source_ids=considered,
+        winning_candidate_id=winner.candidate_id,
+        considered_candidate_ids=tuple(
+            c.candidate_id for c in ordered if c.candidate_id is not None
+        ),
+        deciding_rule=_deciding_rule(ordered),
     )
+
+
+# The CONF-R2 total-order step names, positional with ``_sort_key``'s tuple components.
+_RULE_NAMES = ("trust_tier", "confidence", "recency", "completeness", "stable_tiebreak")
+
+
+def _deciding_rule(ordered: list[FieldCandidate]) -> str:
+    """Name the CONF-R2 step that separated the winner from the runner-up (LIN-R3).
+
+    Compares the winner's and runner-up's sort keys component by component; the first
+    differing component IS the rule that decided. A sole contributor needs no rule.
+    """
+    if len(ordered) < 2:
+        return "sole_contributor"
+    a, b = _sort_key(ordered[0]), _sort_key(ordered[1])
+    for name, x, y in zip(_RULE_NAMES, a, b, strict=True):
+        if x != y:
+            return name
+    return _RULE_NAMES[-1]  # fully tied keys: the stable tiebreak held them in order
 
 
 def _is_disputed(ordered: list[FieldCandidate], tolerance: float | None) -> bool:

@@ -57,6 +57,9 @@ TRAINING_LOAD_CLASS: Final = "training_load"  # DM-SUB-R1 / DEGR-R2 equivalence-
 TRAINING_LOAD_CONFIDENCE_PENALTY: Final[float] = _analytics_default(
     "training_load_confidence_penalty"
 )
+# GBO-R28: the stated fit-quality floor below which a stored MODELED signature is
+# REFUSED by resolution (fail-closed, typed gap — never thresholds from a bad fit).
+SIGNATURE_MIN_FIT_R2: Final[float] = _analytics_default("signature_min_fit_r2")
 
 # --- Normalized Power / TSS ---
 NP_ROLLING_WINDOW_S: Final = 30  # NP-R1

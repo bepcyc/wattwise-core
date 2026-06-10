@@ -11,14 +11,15 @@ transaction (UPS-R6); re-ingesting unchanged content is a value-level no-op (UPS
 Ingestion (L3) is the ONLY writer to the canonical store (L4, ARCH-R3); it imports
 persistence inward toward the canonical core.
 
-Identity resolution here is WINDOWED-ONLY (conservative, DEDUP-R7): a NEW candidate is
-matched against existing activities whose ``start_time`` is within ``_IDENTITY_WINDOW``
-(±2h) via the fuzzy start/duration/sport path. Genuine cross-source strong-fingerprint
-matching REGARDLESS of the window (MAP-R10) requires a TYPED ``strong_fingerprint``
-distinct from ``source_native_id`` — a real shared device/file UUID, not the per-source
-dedup key (two unrelated sessions, or two stripped FITs yielding a degenerate file_id,
-can collide on ``source_native_id`` and must NOT merge). That typed cross-window
-fingerprint match is DEFERRED and is NOT implemented via the per-source native id.
+Identity resolution runs in two legs (MAP-R10): a TYPED ``strong_fingerprint`` (a real
+shared device/file UUID carried on the candidate — never the per-source
+``source_native_id`` dedup key, which can falsely collide across unrelated sessions)
+matches retained candidates REGARDLESS of the time window, still gated on sport
+compatibility; otherwise the conservative WINDOWED fuzzy path (DEDUP-R7) matches
+existing activities whose ``start_time`` is within ``_IDENTITY_WINDOW`` (±2h) on
+start/duration/sport. Every identity decision is recorded on the candidate row
+(rule fired, match score, matched ids — MAP-R12) so a merge is explainable and can be
+split later by the explicit ``reresolve.split_activity`` operation.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from wattwise_core.domain.enums import GboType
 from wattwise_core.ingestion import _canonical as _cw
 from wattwise_core.ingestion._candidate_store import (
     persist_candidates_bulk,
+    persist_quarantined,
     prepare_batch,
 )
 from wattwise_core.ingestion._canonical import OriginalFile
@@ -51,13 +53,19 @@ from wattwise_core.ingestion._mapping import (
     _whole_source_tier_of,
 )
 from wattwise_core.ingestion.trust import load_trust_policy
+from wattwise_core.ingestion.validation import validate_candidate
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
 from wattwise_core.persistence.localdate import (
     MissingReferenceTimezone,
     project_local_date,
     project_local_wall_clock,
 )
-from wattwise_core.persistence.models import Activity, Athlete, SourceCandidate
+from wattwise_core.persistence.models import (
+    Activity,
+    Athlete,
+    SourceCandidate,
+    SourceDescriptor,
+)
 from wattwise_core.persistence.types import uuid7
 from wattwise_core.persistence.upsert import upsert
 from wattwise_core.seams import ConflictResolver, DefaultConflictResolver
@@ -74,6 +82,9 @@ class IngestResult:
     wellness_written: int = 0
     candidates_persisted: int = 0
     candidates_failed: int = 0
+    # MAP-R6: candidates persisted to quarantine (failed validation, retained with the
+    # failing rule id, excluded from resolution) — distinct from hard failures.
+    candidates_quarantined: int = 0
     watermarks_advanced: int = 0
     gaps_closed: int = 0
 
@@ -165,29 +176,41 @@ class IngestService:
         if row.resolved_activity_id is not None:
             activity_id = row.resolved_activity_id  # ING-R6: reuse the resolved identity
         else:
-            activity_id = await self._resolve_activity_id(athlete, cand)
+            activity_id, decision = await self._resolve_activity_id(athlete, cand)
             row.resolved_activity_id = activity_id
+            # MAP-R12: persist the identity decision (rule fired, score, matched ids)
+            # so the merge is explainable and reversible by an explicit split.
+            row.identity_resolution = decision
             await self._session.flush()
         await self._write_activity_canonical(athlete, activity_id)
         return activity_id
 
-    async def _resolve_activity_id(self, athlete: uuid.UUID, cand: GboCandidate) -> uuid.UUID:
+    async def _resolve_activity_id(
+        self, athlete: uuid.UUID, cand: GboCandidate
+    ) -> tuple[uuid.UUID, dict[str, Any]]:
         """Resolve a NEW candidate to a canonical activity id (MAP-R9..R12, DEDUP-R7).
 
-        WINDOWED-ONLY (conservative): considers only existing activities whose
-        ``start_time`` is within ``_IDENTITY_WINDOW`` (±2h) of the candidate, in a stable
-        order (start_time, then activity_id), and runs the fuzzy start/duration/sport
-        matcher per windowed candidate; reuses the first match, else mints a new id.
+        Two legs, in order:
 
-        A cross-source strong-fingerprint match REGARDLESS of the window (MAP-R10) is
-        DEFERRED: it needs a TYPED ``strong_fingerprint`` (a real shared device/file UUID),
-        NOT the per-source ``source_native_id`` dedup key (which can falsely collide across
-        unrelated sessions). Same-source re-ingest is already handled upstream by
-        candidate-key id reuse (``resolved_activity_id``, ING-R6) BEFORE this runs.
+        1. STRONG-FINGERPRINT, regardless of the time window (MAP-R10): a candidate
+           carrying a TYPED ``strong_fingerprint`` (a real shared device/file UUID —
+           never the per-source ``source_native_id`` dedup key) is matched against
+           retained candidates with the SAME fingerprint; the resolver still gates on
+           sport compatibility before merging.
+        2. WINDOWED fuzzy match (conservative, DEDUP-R7): existing activities whose
+           ``start_time`` is within ``_IDENTITY_WINDOW`` (±2h), in a stable order
+           (start_time, then activity_id), through the fuzzy start/duration/sport
+           matcher; first match wins, else a new id is minted.
+
+        Returns ``(activity_id, decision)`` where ``decision`` is the MAP-R12 record
+        (rule that fired, match score, matched ids) persisted on the candidate row.
         """
         start = _parse_start_time(cand.payload["start_time"])
         duration = float(cast("float", cand.payload.get("elapsed_time_s") or 0))
         sport = str(cand.payload.get("sport") or "other")
+        matched = await self._fingerprint_match(athlete, cand, start, duration, sport)
+        if matched is not None:
+            return matched
         for act in await self._windowed_activities(athlete, start):
             # SQLite returns tz-naive datetimes; coerce to UTC for the matcher (GBO-R32).
             act_start = _parse_start_time(act.start_time)
@@ -195,8 +218,55 @@ class IngestService:
                 start, duration, sport, None,
                 act_start, float(act.elapsed_time_s or 0), act.sport, None,
             ):
-                return act.activity_id
-        return uuid7()
+                decision = {
+                    "rule": "windowed_fuzzy",
+                    "match_score": _window_score(start, act_start),
+                    "matched_activity_id": str(act.activity_id),
+                }
+                return act.activity_id, decision
+        return uuid7(), {"rule": "no_match_new_record", "match_score": 0.0}
+
+    async def _fingerprint_match(
+        self,
+        athlete: uuid.UUID,
+        cand: GboCandidate,
+        start: _dt.datetime,
+        duration: float,
+        sport: str,
+    ) -> tuple[uuid.UUID, dict[str, Any]] | None:
+        """The MAP-R10 strong-fingerprint leg: match retained candidates cross-window.
+
+        Considers only CONTRIBUTING candidates (not superseded/tombstoned/quarantined,
+        active descriptor) that carry the SAME typed fingerprint and already resolved to
+        a canonical activity, in a stable order. The resolver's sport gate still applies
+        (a shared fingerprint must never merge incompatible sports).
+        """
+        if cand.strong_fingerprint is None:
+            return None
+        stmt = _contributing(
+            select(SourceCandidate).where(
+                SourceCandidate.athlete_id == athlete,
+                SourceCandidate.gbo_type == GboType.ACTIVITY,
+                SourceCandidate.strong_fingerprint == cand.strong_fingerprint,
+                SourceCandidate.resolved_activity_id.is_not(None),
+            )
+        ).order_by(SourceCandidate.source_candidate_id)
+        for row in (await self._session.execute(stmt)).scalars().all():
+            row_start = _parse_start_time(row.payload.get("start_time"))
+            row_duration = float(cast("float", row.payload.get("elapsed_time_s") or 0))
+            row_sport = str(row.payload.get("sport") or "other")
+            if self._resolver.resolve_activity_identity(
+                start, duration, sport, cand.strong_fingerprint,
+                row_start, row_duration, row_sport, row.strong_fingerprint,
+            ):
+                decision = {
+                    "rule": "strong_fingerprint",
+                    "match_score": 1.0,
+                    "matched_activity_id": str(row.resolved_activity_id),
+                    "matched_candidate_ids": [str(row.source_candidate_id)],
+                }
+                return cast("uuid.UUID", row.resolved_activity_id), decision
+        return None
 
     async def _windowed_activities(
         self, athlete: uuid.UUID, start: _dt.datetime
@@ -234,12 +304,14 @@ class IngestService:
         if not candidates:
             return
         policy = await load_trust_policy(self._session, athlete, candidates)
-        scalars, coverage = _resolve_scalars(
+        scalars, coverage, field_resolution = _resolve_scalars(
             candidates, _ACTIVITY_SCALARS, policy, self._resolver
         )
         local_projection = await self._project_local(athlete, activity_id, scalars)
         values, update_columns = _activity_values(
-            activity_id, athlete, scalars, coverage, local_projection
+            activity_id, athlete, scalars, coverage, local_projection,
+            policy_version=policy.policy_version,  # CONF-R6: recorded with the values
+            field_resolution=field_resolution,  # LIN-R3: per-field resolution record
         )
         await upsert(
             self._session,
@@ -291,7 +363,9 @@ class IngestService:
         # Wellness fields resolve under the whole-source effective tier; an empty policy
         # makes this the candidate's adapter tier (byte-identical to the prior behaviour).
         await _cw.write_wellness_canonical(
-            self._session, athlete, local_date, candidates, _whole_source_tier_of(policy)
+            self._session, athlete, local_date, candidates,
+            _whole_source_tier_of(policy),
+            policy_version=policy.policy_version,  # CONF-R6
         )
 
     async def _capture_original(
@@ -337,8 +411,28 @@ async def _land_batch(
     SINGLE multi-row upsert round-trip (ING-UPS-R1 / PERF-R1), then each is resolved +
     canonical-written in its own ``SAVEPOINT`` so a resolution failure likewise isolates.
     """
+    # MAP-R2/MAP-R6 validation gate BEFORE persistence: a candidate carrying a
+    # non-canonical key or violating a canonical invariant is QUARANTINED — persisted
+    # with its lineage + the failing rule id, excluded from resolution, never partially
+    # written into the canonical store.
+    passing: list[GboCandidate] = []
+    for cand in batch:
+        rule_id = validate_candidate(cand)
+        if rule_id is None:
+            passing.append(cand)
+            continue
+        try:
+            async with svc._session.begin_nested():
+                await persist_quarantined(
+                    svc._session, athlete, descriptor, cand, connection_id, run_id,
+                    rule_id,
+                )
+        except Exception:
+            result.candidates_failed += 1  # ING-UPS-R3 record isolation; keep the run
+        else:
+            result.candidates_quarantined += 1
     prepared, failed = await prepare_batch(
-        svc._session, athlete, descriptor, batch, connection_id, run_id,
+        svc._session, athlete, descriptor, passing, connection_id, run_id,
         validate=_validate_payload,
     )
     result.candidates_failed += failed
@@ -386,15 +480,39 @@ async def _resolve_candidate(
     result.candidates_persisted += 1
 
 
+def _contributing(stmt: Any) -> Any:
+    """Restrict a candidate select to rows allowed to CONTRIBUTE to resolution.
+
+    Excluded (each one a distinct lifecycle state, never silently re-included):
+    superseded versions (UPS-R5), tombstones (UPS-R5 source-side deletion), quarantined
+    candidates (MAP-R6 failed validation), and candidates of a DEACTIVATED source
+    descriptor (EVOL-R2: disabling a source is configuration; its retained rows stop
+    contributing but stay durably stored for reversibility, DM-SUB-R5).
+    """
+    return (
+        stmt.join(
+            SourceDescriptor,
+            SourceDescriptor.source_descriptor_id == SourceCandidate.source_descriptor_id,
+        )
+        .where(
+            SourceCandidate.is_superseded.is_(False),
+            SourceCandidate.is_tombstone.is_(False),
+            SourceCandidate.quarantine_rule_id.is_(None),
+            SourceDescriptor.is_active.is_(True),
+        )
+    )
+
+
 async def _activity_candidates(
     session: AsyncSession, athlete: uuid.UUID, activity_id: uuid.UUID
 ) -> list[SourceCandidate]:
-    """All non-superseded activity candidates resolved to ``activity_id`` (the resolution set)."""
-    stmt = select(SourceCandidate).where(
-        SourceCandidate.athlete_id == athlete,
-        SourceCandidate.gbo_type == GboType.ACTIVITY,
-        SourceCandidate.resolved_activity_id == activity_id,
-        SourceCandidate.is_superseded.is_(False),
+    """All CONTRIBUTING activity candidates resolved to ``activity_id`` (the resolution set)."""
+    stmt = _contributing(
+        select(SourceCandidate).where(
+            SourceCandidate.athlete_id == athlete,
+            SourceCandidate.gbo_type == GboType.ACTIVITY,
+            SourceCandidate.resolved_activity_id == activity_id,
+        )
     )
     return list((await session.execute(stmt)).scalars().all())
 
@@ -402,14 +520,26 @@ async def _activity_candidates(
 async def _wellness_candidates(
     session: AsyncSession, athlete: uuid.UUID, local_date: _dt.date
 ) -> list[SourceCandidate]:
-    """All non-superseded daily-wellness candidates for ``local_date`` (the resolution set)."""
-    stmt = select(SourceCandidate).where(
-        SourceCandidate.athlete_id == athlete,
-        SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
-        SourceCandidate.is_superseded.is_(False),
+    """All CONTRIBUTING daily-wellness candidates for ``local_date`` (the resolution set)."""
+    stmt = _contributing(
+        select(SourceCandidate).where(
+            SourceCandidate.athlete_id == athlete,
+            SourceCandidate.gbo_type == GboType.DAILY_WELLNESS,
+        )
     )
     rows = (await session.execute(stmt)).scalars().all()
     return [c for c in rows if _parse_date(c.payload.get("local_date")) == local_date]
+
+
+def _window_score(a: _dt.datetime, b: _dt.datetime) -> float:
+    """A [0,1] closeness score for a windowed match (MAP-R12 decision record).
+
+    1.0 = identical start instants, linearly decaying to 0.0 at the edge of the
+    ±2h identity window. Descriptive audit data only — never a matching input.
+    """
+    delta = abs((a - b).total_seconds())
+    window = _IDENTITY_WINDOW.total_seconds()
+    return max(0.0, 1.0 - delta / window)
 
 
 def _uid(value: str | uuid.UUID) -> uuid.UUID:

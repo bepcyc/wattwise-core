@@ -234,6 +234,9 @@ class Settings(BaseSettings):
     # DEGR-R2 substitution confidence multiplier (in (0,1]); the VALUE lives in defaults.toml
     # (CFG-R1a), this declares only the typed schema + range constraint.
     analytics__training_load_confidence_penalty: float = Field(gt=0, le=1)
+    # GBO-R28 fail-closed floor for a stored MODELED signature's fit quality (R^2);
+    # the VALUE lives in defaults.toml (CFG-R1a) — this is schema + range only.
+    analytics__signature_min_fit_r2: float = Field(ge=0, le=1)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str

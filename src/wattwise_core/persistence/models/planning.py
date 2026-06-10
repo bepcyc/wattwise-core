@@ -17,8 +17,9 @@ from __future__ import annotations
 import datetime as _dt
 import uuid
 
-from sqlalchemy import Date, ForeignKey, Index, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Date, ForeignKey, Index, String, Text, UniqueConstraint, event
+from sqlalchemy.orm import Mapped, mapped_column, validates
+from sqlalchemy.orm.attributes import get_history
 
 from wattwise_core.domain.enums import (
     AdjustmentOrigin,
@@ -30,6 +31,7 @@ from wattwise_core.domain.enums import (
     PlanDayIntent,
     PlanStatus,
 )
+from wattwise_core.domain.workout_steps import validate_workout_steps
 from wattwise_core.persistence.base import Base, TimestampMixin
 from wattwise_core.persistence.types import (
     enum_column,
@@ -58,6 +60,16 @@ class Workout(Base, TimestampMixin):
         String(64), ForeignKey("sport.sport_code"), nullable=True, index=True
     )
     steps: Mapped[list[dict[str, object]]] = json_column(nullable=False, default=list)
+
+    @validates("steps")
+    def _validate_steps(self, _key: str, value: object) -> list[dict[str, object]]:
+        """Enforce the GBO-R29 step schema on EVERY ORM write of ``steps``.
+
+        The step array MUST validate against the typed step schema before persistence
+        (GBO-R29/R29a); an invalid step refuses the write loudly rather than landing an
+        untyped prescription.
+        """
+        return validate_workout_steps(value)
 
 
 class Goal(Base, TimestampMixin):
@@ -158,6 +170,44 @@ class ScheduleAdjustment(Base, TimestampMixin):
     origin: Mapped[AdjustmentOrigin] = enum_column(AdjustmentOrigin, nullable=False)
     status: Mapped[AdjustmentStatus] = enum_column(AdjustmentStatus, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# --- GBO-R31 immutability guards -------------------------------------------------
+# A generated plan is IMMUTABLE: athlete-/agent-requested changes are modeled as
+# ``schedule_adjustment`` overrides, never in-place mutation, so the plan stays
+# reproducible from its lineage. The guards are ORM-level events, so EVERY session
+# flush enforces them — not just one polite write path.
+
+# Plan columns that MAY change after generation: the lifecycle status transition
+# (active -> completed | superseded) and the bookkeeping timestamp.
+_PLAN_MUTABLE = frozenset({"status", "updated_at"})
+
+
+@event.listens_for(PlanDay, "before_update")
+def _forbid_plan_day_update(_mapper: object, _connection: object, target: PlanDay) -> None:
+    """Refuse ANY update of a generated ``plan_day`` row (GBO-R31 immutability)."""
+    raise ValueError(
+        f"plan_day ({target.plan_id}, {target.plan_date}) is immutable once generated "
+        "(GBO-R31): model the change as a schedule_adjustment override"
+    )
+
+
+@event.listens_for(Plan, "before_update")
+def _forbid_plan_mutation(_mapper: object, _connection: object, target: Plan) -> None:
+    """Refuse updates of a generated ``plan``'s content columns (GBO-R31).
+
+    Only the lifecycle ``status`` (and ``updated_at``) may change; dates, lineage,
+    goal, and ownership are frozen so the generated plan stays reproducible.
+    """
+    for column in Plan.__table__.columns.keys():  # noqa: SIM118 - Table.columns is not a plain dict
+        if column in _PLAN_MUTABLE:
+            continue
+        history = get_history(target, column)
+        if history.has_changes():
+            raise ValueError(
+                f"plan {target.plan_id} is immutable once generated (GBO-R31): "
+                f"column {column!r} cannot be mutated in place"
+            )
 
 
 __all__ = ["Goal", "Plan", "PlanDay", "ScheduleAdjustment", "Workout"]

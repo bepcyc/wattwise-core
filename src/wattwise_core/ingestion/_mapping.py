@@ -20,6 +20,7 @@ from typing import Any
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import Fidelity, GboType, trust_rank
+from wattwise_core.domain.equivalence import substitution_for
 from wattwise_core.ingestion import _canonical as _cw
 from wattwise_core.ingestion.trust import TrustPolicy
 from wattwise_core.persistence.models import Activity, SourceCandidate
@@ -55,10 +56,12 @@ def _resolve_scalars(
     fields: tuple[str, ...],
     policy: TrustPolicy,
     resolver: ConflictResolver,
-) -> tuple[dict[str, Any], dict[str, object]]:
+) -> tuple[dict[str, Any], dict[str, object], dict[str, object]]:
     """Resolve each scalar field across candidates + build its coverage (CONF-R2/R5).
 
-    Returns ``(resolved_values, coverage)``. Each field is resolved with its EFFECTIVE
+    Returns ``(resolved_values, coverage, field_resolution)`` — the third element is the
+    LIN-R3 per-field resolution record (candidate pointers + deciding rule), persisted
+    as lineage on the canonical row. Each field is resolved with its EFFECTIVE
     per-channel trust tier (``policy.tier(candidate, fname)`` — the configurable PRV-R7
     re-rank, defaulting to the adapter tier when unconfigured). A field whose >=2
     contributors materially disagree beyond the per-field dispute tolerance gets
@@ -69,6 +72,7 @@ def _resolve_scalars(
     """
     resolved: dict[str, Any] = {}
     coverage: dict[str, object] = {}
+    field_resolution: dict[str, object] = {}
     for fname in fields:
         tier_of = _channel_tier_of(policy, fname)  # effective per-channel tier (PRV-R7)
         contributors = _cw.field_candidates(candidates, fname, tier_of)
@@ -84,10 +88,18 @@ def _resolve_scalars(
             continue
         resolved[fname] = winner.value
         # Badge the RESOLVED WINNER's tier, NOT an arbitrary scanned contributor (PRV-R6).
+        # A winner BELOW its declared equivalence-class top tier badges SUBSTITUTED with
+        # the displaced higher tier recorded (DM-SUB-R4), never the winner's own tier.
         coverage[fname] = _cw.coverage_for(
-            True, winner.winning_trust_tier, disputed=winner.disputed
+            True,
+            winner.winning_trust_tier,
+            disputed=winner.disputed,
+            substitution=substitution_for(fname, winner.winning_trust_tier),
         ).to_jsonable()
-    return resolved, coverage
+        # LIN-R3: the per-field resolution record (winner/considered candidate pointers
+        # + the deciding CONF-R2 rule) persisted beside the canonical value.
+        field_resolution[fname] = _cw.resolution_record(winner)
+    return resolved, coverage, field_resolution
 
 
 def _activity_values(
@@ -96,6 +108,9 @@ def _activity_values(
     scalars: dict[str, Any],
     coverage: dict[str, object],
     local_projection: tuple[_dt.datetime, _dt.date] | None = None,
+    *,
+    policy_version: str | None = None,
+    field_resolution: dict[str, object] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """The activity row value-dict + the update-on-collision set for the atomic upsert (UPS-R2).
 
@@ -130,8 +145,15 @@ def _activity_values(
     values["has_power"] = scalars.get("avg_power_w") is not None
     values["has_hr"] = scalars.get("avg_hr_bpm") is not None
     values["coverage"] = coverage
+    # CONF-R6: record the policy version that produced the resolved values; LIN-R3: the
+    # per-field resolution record (candidate pointers + deciding rule) — lineage-only.
+    values["policy_version"] = policy_version
+    values["field_resolution"] = field_resolution or {}
     values["updated_at"] = utcnow()
-    update_columns += ["has_power", "has_hr", "coverage", "updated_at"]
+    update_columns += [
+        "has_power", "has_hr", "coverage", "policy_version", "field_resolution",
+        "updated_at",
+    ]
     return values, update_columns
 
 

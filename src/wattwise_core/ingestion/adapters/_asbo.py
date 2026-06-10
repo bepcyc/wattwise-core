@@ -63,6 +63,9 @@ class ActivityAsbo:
     ``map`` is the only place these are translated to canonical fields (MAP-R1/R2).
     ``native_fingerprint`` is the per-format stable identity used to derive
     ``source_native_id`` (LIN-R1.1); ``None`` falls back to the content hash.
+    ``strong_fingerprint`` is the GENUINE cross-source shared identity (MAP-R10) — set
+    ONLY when the file carries a real device identity (FIT ``file_id`` with serial
+    number + creation instant); a derived start/extent fingerprint is NEVER strong.
     """
 
     records: tuple[AsboRecord, ...] = ()
@@ -70,6 +73,7 @@ class ActivityAsbo:
     laps: tuple[AsboLap, ...] = ()
     rr_intervals_ms: tuple[float, ...] = ()
     native_fingerprint: str | None = None
+    strong_fingerprint: str | None = None
 
 
 __all__ = [
