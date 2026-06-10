@@ -60,9 +60,7 @@ def power_streams(draw: st.DrawFn, min_len: int = 1, max_len: int = 60) -> np.nd
     """A 1 Hz power array (float64) where ``None`` draws become NaN gaps."""
     n = draw(st.integers(min_value=min_len, max_value=max_len))
     raw = draw(st.lists(_power_sample, min_size=n, max_size=n))
-    return np.array(
-        [np.nan if x is None else float(x) for x in raw], dtype=np.float64
-    )
+    return np.array([np.nan if x is None else float(x) for x in raw], dtype=np.float64)
 
 
 def _brute_force_mmp(power: np.ndarray, d: int) -> float | None:
@@ -115,9 +113,7 @@ def test_mmp_exact_vs_bruteforce_oracle(power: np.ndarray, d: int) -> None:
         assert win.size == res.value.window_len_s
         assert res.value.window_len_s >= d
         assert not np.any(np.isnan(win))
-        assert float(np.mean(win)) == pytest.approx(
-            res.value.mean_power_w, abs=1e-9
-        )
+        assert float(np.mean(win)) == pytest.approx(res.value.mean_power_w, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -296,9 +292,7 @@ def test_cp_too_few_points_insufficient(points: dict[int, float]) -> None:
     p0=st.floats(200.0, 400.0, allow_nan=False),
 )
 @settings(max_examples=150)
-def test_cp_clustered_points_insufficient(
-    base: int, spread: int, p0: float
-) -> None:
+def test_cp_clustered_points_insufficient(base: int, spread: int, p0: float) -> None:
     """Durations too clustered (max/min < 3) -> INSUFFICIENT_DATA (CP-T2)."""
     durs = [base, base + spread, base + 2 * spread]
     assume(durs[-1] / durs[0] < 3.0)
@@ -339,9 +333,7 @@ def test_cp_wrong_sign_poor_fit(durations: list[int]) -> None:
 
 @pytest.mark.property
 @given(
-    durations=st.lists(
-        st.integers(120, 1200), min_size=4, max_size=8, unique=True
-    ),
+    durations=st.lists(st.integers(120, 1200), min_size=4, max_size=8, unique=True),
     scatter=st.floats(min_value=10.0, max_value=3000.0, allow_nan=False),
     seed=st.integers(0, 2**31 - 1),
 )
@@ -389,9 +381,7 @@ def test_cp_se_monotonicity_removing_longest(
 @pytest.mark.property
 @given(cp0=_cp0, w0=_w0, durations=_durations)
 @settings(max_examples=200)
-def test_cp_out_of_domain_points_excluded(
-    cp0: float, w0: float, durations: list[int]
-) -> None:
+def test_cp_out_of_domain_points_excluded(cp0: float, w0: float, durations: list[int]) -> None:
     """Adding far out-of-domain points does not change an in-domain fit (CP-T5)."""
     durs = sorted(set(durations))
     assume(durs[-1] / durs[0] >= 3.0)
@@ -408,9 +398,7 @@ def test_cp_out_of_domain_points_excluded(
     fit_polluted = cp_wprime(polluted)
     assert isinstance(fit_polluted, Computed)
     assert fit_polluted.value.cp_w == pytest.approx(fit_clean.value.cp_w, abs=1e-6)
-    assert fit_polluted.value.w_prime_j == pytest.approx(
-        fit_clean.value.w_prime_j, abs=1e-3
-    )
+    assert fit_polluted.value.w_prime_j == pytest.approx(fit_clean.value.w_prime_j, abs=1e-3)
     # The out-of-domain points were excluded -> 1200 s endpoint, no long-bias trip.
     assert fit_polluted.quality.extra["long_duration_bias"] is False
 
@@ -421,9 +409,7 @@ def test_cp_out_of_domain_points_excluded(
     p0=st.floats(200.0, 500.0, allow_nan=False),
 )
 @settings(max_examples=100)
-def test_cp_all_below_domain_unavailable(
-    durations: list[int], p0: float
-) -> None:
+def test_cp_all_below_domain_unavailable(durations: list[int], p0: float) -> None:
     """If every supplied duration is below the domain, the fit has no points (CP-T5/CP-R2)."""
     points = dict.fromkeys(durations, p0)
     fit = cp_wprime(points)

@@ -134,7 +134,5 @@ def test_link_complete_forged_code_is_401(client: TestClient) -> None:
 def test_link_approve_requires_bearer(client: TestClient) -> None:
     """The proof-of-control approval is bearer-only — anonymous approval is 401 (AUTH-R8)."""
     started = client.post("/v1/auth/link/start")
-    resp = client.post(
-        "/v1/auth/link/approve", json={"link_code": started.json()["link_code"]}
-    )
+    resp = client.post("/v1/auth/link/approve", json={"link_code": started.json()["link_code"]})
     assert resp.status_code == 401

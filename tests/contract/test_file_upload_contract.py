@@ -276,5 +276,3 @@ def test_unrecognized_bytes_fail_closed() -> None:
 def test_map_ignores_non_asbo_input() -> None:
     # The pure map must not crash on a wrong-typed input; it emits nothing.
     assert FileUploadAdapter().map(object(), _descriptor(), _ctx()) == []
-
-

@@ -11,6 +11,8 @@ than shipping unverified content (H3).
 
 from __future__ import annotations
 
+from typing import Any
+
 from wattwise_core.agent.contracts import ChatModel, GroundDecision, GroundingResult
 from wattwise_core.agent.engine_services import (
     CANONICAL_WORKOUT_NAMES,
@@ -26,6 +28,7 @@ async def reground_plan(
     svc: AnalyticsService,
     athlete_id: str,
     edited_plan: str,
+    request_text: str | None = None,
 ) -> GroundingResult:
     """Re-ground an EDITED plan body before resume so the edit cannot bypass grounding (GROUND-R3).
 
@@ -47,7 +50,13 @@ async def reground_plan(
         allowed_hosts=coach.allowed_hosts,
         lookback_days=coach.lookback_days,
     )
-    return await grounder.ground(athlete_id=athlete_id, draft=edited_plan, retrieved={})
+    # The ORIGINAL run's request text rides along so a user-supplied constraint the edit
+    # preserves (e.g. "7 hours a week") stays sayable as a request echo — without it the
+    # echo path is inert and a faithful edit is scrubbed -> ABSTAIN (the defect-1 regression
+    # on the HITL path). The EDIT body itself stays untrusted draft, never echo evidence.
+    return await grounder.ground(
+        athlete_id=athlete_id, draft=edited_plan, retrieved={}, request_text=request_text
+    )
 
 
 async def accept_edit(
@@ -56,6 +65,7 @@ async def accept_edit(
     svc: AnalyticsService,
     athlete_id: str,
     edited_plan: str,
+    request_text: str | None = None,
 ) -> str | None:
     """Re-ground an edit; return its grounded body ONLY if it fully grounds, else ``None`` (H3).
 
@@ -66,10 +76,24 @@ async def accept_edit(
     built from the LOADED CoachBundle (M6), so the edit path uses the SAME config-loaded
     equivalence/tolerance/allow-list as every other grounder path.
     """
-    result = await reground_plan(coach, model, svc, athlete_id, edited_plan)
+    result = await reground_plan(coach, model, svc, athlete_id, edited_plan, request_text)
     if result.decision is GroundDecision.PROCEED and result.scrubbed_text.strip():
         return result.scrubbed_text
     return None
 
 
 __all__ = ["accept_edit", "reground_plan"]
+
+
+async def run_request_text(saver: Any, thread_id: str) -> str | None:
+    """The paused run's immutable request text off its durable checkpoint (STATE-R2).
+
+    Re-arms the request-echo path for a HITL edit: an edit that faithfully preserves a
+    user-supplied constraint (e.g. "7 hours a week") stays sayable instead of being scrubbed
+    to ABSTAIN. Absent/foreign state yields ``None`` — the echo path simply stays inert.
+    """
+    tuple_ = await saver.aget_tuple({"configurable": {"thread_id": thread_id}})
+    if tuple_ is None:
+        return None
+    value = tuple_.checkpoint.get("channel_values", {}).get("request_text")
+    return value if isinstance(value, str) else None

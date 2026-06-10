@@ -112,9 +112,7 @@ async def _activities(
     return [_activity_row(a) for a in rows]
 
 
-async def _signatures(
-    session: AsyncSession, athlete_id: uuid.UUID
-) -> list[dict[str, object]]:
+async def _signatures(session: AsyncSession, athlete_id: uuid.UUID) -> list[dict[str, object]]:
     """The athlete's effective-dated fitness signatures, oldest first (analytics scope)."""
     stmt = (
         select(FitnessSignature)

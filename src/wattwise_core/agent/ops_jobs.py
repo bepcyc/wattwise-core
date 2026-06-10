@@ -40,9 +40,7 @@ class ImportJobRecord(AgentStateBase):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     filename: Mapped[str | None] = mapped_column(String(256), nullable=True)
     status_text: Mapped[str] = mapped_column(String(256), nullable=False)
-    received_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    received_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 class ExportJobRecord(AgentStateBase):
@@ -65,9 +63,7 @@ class ExportJobRecord(AgentStateBase):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ready")
     nonce: Mapped[str] = mapped_column(String(64), nullable=False)
     nonce_used_at: Mapped[_dt.datetime | None] = mapped_column(UtcDateTime(), nullable=True)
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 __all__ = ["ExportJobRecord", "ImportJobRecord"]

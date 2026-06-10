@@ -91,16 +91,34 @@ async def _run(owner: list[GoalStatus], foreign: list[GoalStatus], tmp: Path) ->
         async with factory() as session:
             # No filter: exactly the owner's full set, never a foreign goal.
             allrows = await _query_goals(
-                session, str(_OWNER), status=None, sport=None, frm=None, to=None,
-                sort="created_at", order="asc", cursor=None, key=_CURSOR_KEY, limit=1000,
+                session,
+                str(_OWNER),
+                status=None,
+                sport=None,
+                frm=None,
+                to=None,
+                sort="created_at",
+                order="asc",
+                cursor=None,
+                key=_CURSOR_KEY,
+                limit=1000,
             )
             assert all(r.athlete_id == _OWNER for r in allrows)
             assert len(allrows) == len(owner)
             # Per-status filter: exactly the owner's goals carrying that status.
             for status in _STATUSES:
                 rows = await _query_goals(
-                    session, str(_OWNER), status=status, sport=None, frm=None, to=None,
-                    sort="created_at", order="asc", cursor=None, key=_CURSOR_KEY, limit=1000,
+                    session,
+                    str(_OWNER),
+                    status=status,
+                    sport=None,
+                    frm=None,
+                    to=None,
+                    sort="created_at",
+                    order="asc",
+                    cursor=None,
+                    key=_CURSOR_KEY,
+                    limit=1000,
                 )
                 assert all(r.athlete_id == _OWNER and r.status is status for r in rows)
                 assert len(rows) == sum(1 for s in owner if s is status)

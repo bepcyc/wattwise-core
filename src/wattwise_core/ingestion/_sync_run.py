@@ -156,7 +156,10 @@ async def discover_batch(
     """Drive the five-phase pipeline for one source (ADP-R4..R8)."""
     fetch_ctx, ref = _fetch_inputs(target, fetched_at, sync_run_id)
     return await run_discover_pipeline(
-        adapter, window, ref, fetch_ctx,
+        adapter,
+        window,
+        ref,
+        fetch_ctx,
         api_key=resolve_api_key(ctx.credentials, target),
         athlete_native_id=target.athlete_native_id,
         since_watermark=since_watermark,
@@ -225,8 +228,16 @@ async def land(
     upsert_started = _time.perf_counter()
     try:
         outcome = await _ingest_batch(
-            ctx, athlete_id, target, batch, window, sync_run_id, fetched_at,
-            original_files, adapter=adapter, discover=discover,
+            ctx,
+            athlete_id,
+            target,
+            batch,
+            window,
+            sync_run_id,
+            fetched_at,
+            original_files,
+            adapter=adapter,
+            discover=discover,
         )
     except UndeclaredGboTypeError as exc:  # ADP-R3: typed REFUSAL, nothing written
         return await _refuse_undeclared(ctx, athlete_id, target, window, exc, fetched_at, stats)
@@ -238,8 +249,13 @@ async def land(
             error_type=type(exc).__name__,
         )
         result = await degrade_with_gap(
-            ctx.factory_for(athlete_id), athlete_id, target, window, exc,
-            seen_at=fetched_at, detail="writing the canonical batch failed",
+            ctx.factory_for(athlete_id),
+            athlete_id,
+            target,
+            window,
+            exc,
+            seen_at=fetched_at,
+            detail="writing the canonical batch failed",
         )
         emit_run_trace(target.source_key, result.outcome.value, stats, gaps_opened=1)
         return result
@@ -276,12 +292,21 @@ async def _ingest_batch(
             source_key=target.source_key,
         )
         await open_record_gaps(
-            session, _uid(athlete_id), _uid(target.source_descriptor_id), batch.failed,
-            ingest_run_id=run_uuid, seen_at=fetched_at,
+            session,
+            _uid(athlete_id),
+            _uid(target.source_descriptor_id),
+            batch.failed,
+            ingest_run_id=run_uuid,
+            seen_at=fetched_at,
         )
         await open_discover_gaps(
-            session, _uid(athlete_id), _uid(target.source_descriptor_id), discover,
-            window=window, ingest_run_id=run_uuid, seen_at=fetched_at,
+            session,
+            _uid(athlete_id),
+            _uid(target.source_descriptor_id),
+            discover,
+            window=window,
+            ingest_run_id=run_uuid,
+            seen_at=fetched_at,
         )
     return outcome
 
@@ -310,10 +335,15 @@ async def _refuse_undeclared(
     covered = synced_range(window, fetched_at)
     async with ctx.factory_for(athlete_id)() as session:
         await open_gap(
-            session, _uid(athlete_id), _uid(target.source_descriptor_id),
+            session,
+            _uid(athlete_id),
+            _uid(target.source_descriptor_id),
             GboType.ACTIVITY,
-            reason=GapReason.SCHEMA_MISMATCH, seen_at=fetched_at, transient=False,
-            range_start_at=covered.oldest, range_end_at=covered.newest,
+            reason=GapReason.SCHEMA_MISMATCH,
+            seen_at=fetched_at,
+            transient=False,
+            range_start_at=covered.oldest,
+            range_end_at=covered.newest,
         )
     result = degraded(target, "adapter emitted an undeclared record type")
     emit_run_trace(target.source_key, result.outcome.value, stats, gaps_opened=1)

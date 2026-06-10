@@ -337,6 +337,19 @@ install-boot-check: build
 # e2e, image scan) run in the slow CI stage and via their own recipes — they are
 # intentionally NOT in `gate` so it stays fast and offline (CI-R3).
 gate: lint fmt-check type lint-commits test-unit test-property test-golden test-contract test-fuzz test-logging eval test-inject cov
+
+# FULL-FIDELITY local mirror of the GitHub/Forgejo CI pipeline: the same recipes, the same
+# serial order, the same service shape (throwaway PG16+MariaDB11, generated boot secrets,
+# /healthz bootstrap probe, package build, image scan+SBOM). The MANDATORY pre-PR gate —
+# a hand-rolled subset is not a gate. WW_SKIP_IMAGE=1 skips the image leg;
+# WW_REPEAT_DB=N repeats the db-portable leg N times (flake/race hunting).
+ci-local:
+    bash scripts/ci_local.sh
+
+# Race/flake hunting preset: the db-portable leg 5x.
+ci-flake-hunt:
+    WW_REPEAT_DB=5 bash scripts/ci_local.sh
+
     @echo "gate: all deterministic offline required checks passed."
 
 # =====================================================================

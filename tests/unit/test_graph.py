@@ -128,16 +128,19 @@ class FakeGrounder:
         self.calls = 0
 
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
     ) -> GroundingResult:
         self.calls += 1
         claim = Claim(kind=ClaimKind.NUMBER, text="42", value=42.0)
         survivor = GroundedClaim(
             claim=claim, verdict=GroundVerdict.GROUNDED, citation={"metric": "pmc"}
         )
-        return GroundingResult(
-            decision=self._decision, claims=(survivor,), scrubbed_text=draft
-        )
+        return GroundingResult(decision=self._decision, claims=(survivor,), scrubbed_text=draft)
 
 
 def _services(

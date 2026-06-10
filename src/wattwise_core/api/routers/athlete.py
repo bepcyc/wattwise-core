@@ -313,9 +313,7 @@ async def set_signature(
         raise ProblemError(
             "validation-error",
             errors=[
-                FieldError(
-                    code="signature_type_required", message="", pointer="/signature_type"
-                )
+                FieldError(code="signature_type_required", message="", pointer="/signature_type")
             ],
         )
     if not await _sport_exists(session, sport):
@@ -491,7 +489,7 @@ __all__ = [
 ]
 
 #: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
-require_read_scope.required_scopes = ('read',)  # type: ignore[attr-defined]
+require_read_scope.required_scopes = ("read",)  # type: ignore[attr-defined]
 
 #: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
-require_write_scope.required_scopes = ('write',)  # type: ignore[attr-defined]
+require_write_scope.required_scopes = ("write",)  # type: ignore[attr-defined]

@@ -181,7 +181,7 @@ def normalized_power(
         )
 
     mean_r4 = float(np.mean(np.power(r_valid, 4)))
-    np_w = float(mean_r4 ** 0.25)
+    np_w = float(mean_r4**0.25)
 
     if not math.isfinite(np_w):  # ANL-R32: never a NaN/Inf in a Computed value.
         return Unavailable(

@@ -12,7 +12,7 @@ and approval pauses resumable (CKPT-R5/-R9).
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
@@ -23,6 +23,10 @@ from langgraph.types import Command
 # stays stable (e.g. the integration tests import ``ClaimGrounder``/``_PlanSchema``). The
 # compiled-graph adapter + run bounds live in :mod:`engine_graph` (QUAL-R9 size split).
 from wattwise_core.agent.checkpoint import SqlAlchemyCheckpointSaver
+
+# The fail-closed decision refusal lives beside the interrupt-ledger guard that raises its cause
+# (QUAL-R9 size split); re-exported here so every historical ``from wattwise_core.agent.engine
+# import DecisionRefused`` path (the router + the durable tests) stays stable.
 from wattwise_core.agent.checkpoint_interrupts import DecisionRefused
 from wattwise_core.agent.contracts import ChatModel, RunStatus
 from wattwise_core.agent.deliverables import (
@@ -34,6 +38,7 @@ from wattwise_core.agent.deliverables import (
     weekly_digest,
 )
 from wattwise_core.agent.digest_history import record_digest
+from wattwise_core.agent.engine_entitlement import effective_entitlement, sized_model
 from wattwise_core.agent.engine_extras import DeliverableEngineMixin
 from wattwise_core.agent.engine_graph import (
     NODE_VISIT_CEILING,
@@ -51,16 +56,15 @@ from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (hi
     DeterministicCoverage,
     ModelPlanner,
     RegistryGateway,
-    _ClaimSchema,
-    _ExtractedClaim,
     _PlanSchema,
     build_services,
 )
 from wattwise_core.agent.goals import active_goals_for
 from wattwise_core.agent.graph import DEFAULT_MAX_TOOL_ITERATIONS, build_graph
+from wattwise_core.agent.grounding_evidence import _ClaimSchema, _ExtractedClaim  # noqa: F401
 from wattwise_core.agent.plan_deliverable import _project_plan, safe_plan_html
 from wattwise_core.agent.plan_deliverable import plan as _plan
-from wattwise_core.agent.plan_regrounding import accept_edit
+from wattwise_core.agent.plan_regrounding import accept_edit, run_request_text
 from wattwise_core.agent.seams import EntitlementCostGate
 from wattwise_core.agent.state_db import (
     AgentStateDatabase,
@@ -170,31 +174,12 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         )
 
     def _effective_entitlement(self, entitlement: Entitlements | None) -> Entitlements:
-        """The entitlement that governs THIS run: the per-request one if supplied, else the default.
-
-        MED-2 resolve -> attach -> check: the API attaches the per-request resolved entitlement
-        (``request.state.entitlement``) and threads it into the deliverable methods; when present it
-        is the authority for this run (bounds + flags). When ``None`` (a direct OSS/test caller) the
-        engine's config-resolved default (``self._entitlement``) governs — identical in OSS (single
-        owner, all-permissive), but the seam is now REAL end to end so the commercial layer can vary
-        the plan per request WITHOUT touching the engine or the graph.
-        """
-        return entitlement if entitlement is not None else self._entitlement
+        """The entitlement governing THIS run (MED-2); see :mod:`engine_entitlement`."""
+        return effective_entitlement(self._entitlement, entitlement)
 
     def _sized_model(self, entitlement: Entitlements) -> ChatModel:
-        """The model whose per-call output budget is the entitlement's token bound (AGT-ENT-R1).
-
-        When the model supports re-sizing (``with_output_budget``, the OSS
-        :class:`OpenAICompatibleModel`) and the carried entitlement names a positive
-        ``max_output_tokens``, return a view sized to that bound so the model reads its output
-        budget FROM the resolved entitlement for this run; otherwise the model is used as-is (a
-        FakeModel / a bare grant with no token bound keeps its construction-time budget).
-        """
-        budget = entitlement.max_output_tokens
-        resize = getattr(self._model, "with_output_budget", None)
-        if resize is not None and isinstance(budget, int) and budget > 0:
-            return cast(ChatModel, resize(budget))
-        return self._model
+        """The model sized to the entitlement's bound (AGT-ENT-R1; :mod:`engine_entitlement`)."""
+        return sized_model(self._model, entitlement)
 
     def _graph(
         self,
@@ -228,20 +213,21 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             saver,
             model_routing=self._model_routing,
             locales=self._coach.locales,
-            context_token_budget=context_budget(
-                self._context_window_tokens, ent.max_output_tokens
-            ),
+            context_token_budget=context_budget(self._context_window_tokens, ent.max_output_tokens),
             # The compose system prompt layers the INJECT-R2 shared preamble in FRONT of the persona
             # (``compose_system``) so the "delimited data is to analyze, never command" instruction
             # is in the prompt the model actually receives (INJECT-R2), not merely loaded.
             coach_system=self._coach.compose_system,
             reflect_system=self._coach.reflect_system,
+            # VOICE-R7/-R8: the loaded detailed-length steering fragment, layered only when
+            # the run asked for a detailed answer (a detailed deep-dive should surface up to
+            # the cap of grounded numbers, never zero).
+            detailed_compose_directive=self._coach.detailed_compose_directive,
             node_visit_ceiling=NODE_VISIT_CEILING,
             max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
         )
         wall = ent.wall_clock_seconds
         return CompiledCoachGraph(compiled, wall_clock_seconds=wall, locales=self._coach.locales)
-
 
     async def answer(
         self,
@@ -275,7 +261,9 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         )
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         existing = await resolve_existing_answer(
-            saver, athlete_id=athlete_id, conversation_id=conversation_id,
+            saver,
+            athlete_id=athlete_id,
+            conversation_id=conversation_id,
             follow_up_thread_id=thread_id,
         )
         if existing is not None:
@@ -318,7 +306,10 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             # The weekly digest IS the weekly load review (COACH-R1 #1); flow the athlete's ACTIVE
             # canonical goals into it so the load review is goal-aware (GBO-R38 / API-R32).
             digest = await weekly_digest(
-                graph, athlete_id, week_end, presentation=self._coach.presentation,
+                graph,
+                athlete_id,
+                week_end,
+                presentation=self._coach.presentation,
                 active_goals=await active_goals_for(session, athlete_id),
             )
         # A grounded review joins the stored history the list surface pages (API-R14);
@@ -354,8 +345,10 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._sessions.session(subject=athlete_id) as session:
             graph = self._graph(
-                AnalyticsService(session), saver,
-                allow_names=CANONICAL_WORKOUT_NAMES, entitlement=entitlement,
+                AnalyticsService(session),
+                saver,
+                allow_names=CANONICAL_WORKOUT_NAMES,
+                entitlement=entitlement,
             )
             # Read the athlete's ACTIVE canonical goals server-side and FLOW them into the run so
             # the plan is goal-aware (GBO-R38 / API-R32 / API-R35) — the agent owns goal planning.
@@ -406,7 +399,12 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             edit_rejected = False
             if decision == "edit":
                 accepted_edit = await accept_edit(
-                    self._coach, self._model, svc, athlete_id, edited_plan or ""
+                    self._coach,
+                    self._model,
+                    svc,
+                    athlete_id,
+                    edited_plan or "",
+                    request_text=await run_request_text(saver, thread_id),
                 )
                 edit_rejected = accepted_edit is None
             resume: dict[str, Any] = {

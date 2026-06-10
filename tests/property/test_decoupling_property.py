@@ -120,9 +120,7 @@ def test_single_spike_is_damped_by_smoothing(spike_pos: int, spike_mag: float) -
     power[spike_pos] = spike_mag  # single-second spike
     hr = [150.0] * n
 
-    result = aerobic_decoupling(
-        Stream.from_values(power), Stream.from_values(hr), "cycling"
-    )
+    result = aerobic_decoupling(Stream.from_values(power), Stream.from_values(hr), "cycling")
 
     assert isinstance(result, Computed)
     assert np.isfinite(result.value)
@@ -176,14 +174,10 @@ def test_time_midpoint_split_not_sample_count() -> None:
     # Valid 0..299, a long >max_interp_gap null hole 300..399, valid 400..1799.
     # Both-valid window endpoints: t_start=0, t_end=1799 ⇒ t_mid=899.5 regardless of
     # the missing 100 s (sample-count midpoint would be elsewhere).
-    power: list[float | None] = (
-        [200.0] * 300 + [None] * 100 + [200.0] * 1400
-    )
+    power: list[float | None] = [200.0] * 300 + [None] * 100 + [200.0] * 1400
     hr: list[float | None] = [150.0] * 300 + [None] * 100 + [150.0] * 1400
 
-    result = aerobic_decoupling(
-        Stream.from_values(power), Stream.from_values(hr), "cycling"
-    )
+    result = aerobic_decoupling(Stream.from_values(power), Stream.from_values(hr), "cycling")
 
     assert isinstance(result, Computed)
     assert result.quality.extra["t_mid_s"] == pytest.approx(899.5, abs=REL_TOL)
@@ -239,9 +233,7 @@ def test_too_variable_effort_is_insufficient_data() -> None:
     # window, so the *smoothed* output keeps a high CV (a single spike would be damped).
     power = [(100.0 if (i // 300) % 2 == 0 else 450.0) for i in range(1800)]
     hr = [150.0] * 1800
-    result = aerobic_decoupling(
-        Stream.from_values(power), Stream.from_values(hr), "cycling"
-    )
+    result = aerobic_decoupling(Stream.from_values(power), Stream.from_values(hr), "cycling")
     assert isinstance(result, Unavailable)
     assert result.reason is UnavailableReason.INSUFFICIENT_DATA
 
@@ -266,9 +258,7 @@ def test_too_few_included_per_half_is_insufficient_data() -> None:
     # First half moving, second half coasting except a tiny moving stub (< 60 s).
     power = [200.0] * 900 + ([200.0] * 30 + [0.0] * 870)
     hr = [150.0] * 1800
-    result = aerobic_decoupling(
-        Stream.from_values(power), Stream.from_values(hr), "cycling"
-    )
+    result = aerobic_decoupling(Stream.from_values(power), Stream.from_values(hr), "cycling")
     assert isinstance(result, Unavailable)
     assert result.reason is UnavailableReason.INSUFFICIENT_DATA
 

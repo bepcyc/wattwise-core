@@ -69,9 +69,7 @@ class CapabilityGateway(Protocol):
 class CoverageAssessor(Protocol):
     """Deterministically reports which planned needs remain uncovered (PLAN-R*)."""
 
-    def assess(
-        self, *, request_text: str | None, retrieved: Mapping[str, Any]
-    ) -> set[str]: ...
+    def assess(self, *, request_text: str | None, retrieved: Mapping[str, Any]) -> set[str]: ...
 
 
 @runtime_checkable
@@ -80,11 +78,18 @@ class Grounder(Protocol):
 
     Verifies each claimed number/name/URL against canonical evidence, scrubs the
     unmatched, and returns an aggregate :class:`GroundingResult` carrying the
-    bounded recovery :class:`GroundDecision`.
+    bounded recovery :class:`GroundDecision`. ``request_text`` is the athlete's own
+    request: a number the USER supplied there is a sayable echo (the request's own
+    constraint), never a canonical-data claim to fail closed on.
     """
 
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
     ) -> GroundingResult: ...
 
 

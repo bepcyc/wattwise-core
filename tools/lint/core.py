@@ -44,10 +44,7 @@ class Violation:
     def render(self) -> str:
         """Format the finding as a single ``path:line: [SEV] rule (REQ) message`` line."""
         tag = "ERROR" if self.severity is Severity.BLOCKING else "warning"
-        return (
-            f"{self.path}:{self.line}: {tag} [{self.rule}] "
-            f"({self.requirement}) {self.message}"
-        )
+        return f"{self.path}:{self.line}: {tag} [{self.rule}] ({self.requirement}) {self.message}"
 
 
 # Directory names that are never engine source: skipped wholesale during discovery.

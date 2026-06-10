@@ -418,9 +418,7 @@ def limitation_text(state: AgentState, locales: LocalePolicy | None = None) -> s
 # --- terminal status + coverage caveat (OUTCOME-R1/-R4/-R5; no self-grading) ---
 
 
-def terminal_status(
-    state: AgentState, decision: GroundDecision | None, ceiling: int
-) -> RunStatus:
+def terminal_status(state: AgentState, decision: GroundDecision | None, ceiling: int) -> RunStatus:
     """Deterministically pick the single terminal status (OUTCOME-R1/-R5; no self-grading).
 
     ``awaiting_approval`` is NEVER produced here (it is yielded by the durable interrupt at

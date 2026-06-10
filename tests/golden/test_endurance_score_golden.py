@@ -70,9 +70,7 @@ def test_es_golden_partial_ctl_only_renormalizes_not_zero_substitutes() -> None:
 @pytest.mark.golden
 def test_es_golden_saturation_clamps_to_100() -> None:
     """ES-R3 Case C: every component beyond its band ⇒ score == 100.0 exactly (the bound)."""
-    result = endurance_score(
-        Computed(value=250.0), Computed(value=1.5), Computed(value=-3.0)
-    )
+    result = endurance_score(Computed(value=250.0), Computed(value=1.5), Computed(value=-3.0))
     assert isinstance(result, Computed)
     assert result.value == pytest.approx(100.0, abs=TOL)
 

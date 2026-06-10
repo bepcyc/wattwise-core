@@ -369,9 +369,7 @@ class ChatModel(Protocol):
     cannot enforce structured output MUST NOT back a verdict node.
     """
 
-    async def structured[M: BaseModel](
-        self, *, system: str, data: str, schema: type[M]
-    ) -> M: ...
+    async def structured[M: BaseModel](self, *, system: str, data: str, schema: type[M]) -> M: ...
 
     async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str: ...
 

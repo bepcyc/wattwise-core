@@ -191,16 +191,12 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
 
 #: Bearer extractor. ``auto_error=False`` so a missing credential routes through our
 #: uniform ``401`` problem document (AUTH-R1) instead of FastAPI's default body.
-_bearer_scheme: Final = HTTPBearer(
-    auto_error=False, scheme_name="bearer", bearerFormat="JWT"
-)
+_bearer_scheme: Final = HTTPBearer(auto_error=False, scheme_name="bearer", bearerFormat="JWT")
 
 
 def authenticate(
     request: Request,
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
-    ],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
 ) -> Principal:
     """Resolve the acting :class:`Principal` from the bearer token (AUTH-R1/R2/R3/R6).
 
@@ -231,9 +227,7 @@ def authenticate(
 SERVICE_AUTH_HEADER: Final = "X-Service-Auth"
 
 
-def _verify_service_factor(
-    request: Request, settings: Settings, claims: dict[str, Any]
-) -> None:
+def _verify_service_factor(request: Request, settings: Settings, claims: dict[str, Any]) -> None:
     """Enforce the first-party service-principal factor (AUTH-R8a / SEC-R4).
 
     Three fail-closed rules:

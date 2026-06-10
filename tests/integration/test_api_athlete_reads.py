@@ -81,9 +81,7 @@ async def seeded() -> AsyncIterator[Env]:
     async with factory() as session:
         athlete_id = await _seed(session, with_signatures=True)
         app = _build_app(session, athlete_id, read_allowed=True, write_allowed=True)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield Env(client, app, session, athlete_id)
     await engine.dispose()
 
@@ -98,9 +96,7 @@ async def empty() -> AsyncIterator[Env]:
     async with factory() as session:
         athlete_id = await _seed(session, with_signatures=False)
         app = _build_app(session, athlete_id, read_allowed=True, write_allowed=True)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield Env(client, app, session, athlete_id)
     await engine.dispose()
 
@@ -282,9 +278,7 @@ async def test_change_sport_missing_sport_is_422(seeded: Env) -> None:
 
 async def test_change_sport_without_write_scope_is_403(seeded: Env) -> None:
     """A change-sport mutation with only the read scope is 403 insufficient-scope (AUTH-R7/R11)."""
-    no_write = _build_app(
-        seeded.session, seeded.athlete_id, read_allowed=True, write_allowed=False
-    )
+    no_write = _build_app(seeded.session, seeded.athlete_id, read_allowed=True, write_allowed=False)
     async with AsyncClient(transport=ASGITransport(app=no_write), base_url="http://t") as client:
         resp = await client.post("/v1/athlete/change-sport", json={"sport": "running"})
     assert resp.status_code == 403

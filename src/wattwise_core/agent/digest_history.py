@@ -54,9 +54,7 @@ class AgentDigestRecord(AgentStateBase):
     athlete_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
     week_end: Mapped[str] = mapped_column(String(10), nullable=False)
     body: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 def _serialize(digest: Digest) -> dict[str, Any]:
@@ -107,9 +105,7 @@ def _deserialize(body: dict[str, Any]) -> Digest:
     )
 
 
-async def record_digest(
-    state_db: AgentStateDatabase, *, athlete_id: str, digest: Digest
-) -> None:
+async def record_digest(state_db: AgentStateDatabase, *, athlete_id: str, digest: Digest) -> None:
     """Upsert the grounded weekly review into the history (one row per athlete+week).
 
     A non-``completed`` digest is NOT recorded (an abstention is not a review). The

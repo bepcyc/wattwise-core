@@ -65,9 +65,7 @@ _SUMMARY_NUMBER_RE = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?(?![\w.])")
 _FIRST_SENTENCE_RE = re.compile(r"^[^.!?]*")
 # A numeric "readiness score" is forbidden: readiness is a typed STATE, not a number
 # (SCHEMA-R3). Catch "readiness score", "readiness: <n>", "readiness <n>", "readiness=<n>".
-_READINESS_SCORE_RE = re.compile(
-    r"readiness\s*(?:score|[:=]\s*[+-]?\d|\s+[+-]?\d)", re.IGNORECASE
-)
+_READINESS_SCORE_RE = re.compile(r"readiness\s*(?:score|[:=]\s*[+-]?\d|\s+[+-]?\d)", re.IGNORECASE)
 # An HRV-unavailable summary must SAY HRV/heart-rate-variability is unknown (GROUND-R7).
 _HRV_MENTION_RE = re.compile(r"\bhrv\b|heart[- ]rate[- ]variability", re.IGNORECASE)
 # The HRV-absent phrasing the grader accepts. FIX 7: the REAL prod clause
@@ -121,7 +119,14 @@ class _ScriptedGrounder:
     def __init__(self, decision: GroundDecision) -> None:
         self._decision = decision
 
-    async def ground(self, *, athlete_id: str, draft: str, retrieved: Any) -> GroundingResult:
+    async def ground(
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Any,
+        request_text: str | None = None,
+    ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="1", value=1.0, metric="ctl")
         survivor = GroundedClaim(claim=claim, verdict=GroundVerdict.GROUNDED, citation={"m": "ctl"})
         return GroundingResult(decision=self._decision, claims=(survivor,), scrubbed_text=draft)
@@ -380,9 +385,7 @@ def _multilingual_parity_failures(case: dict[str, Any]) -> list[str]:
     """Number/citation parity + jargon-free checks shared by every multilingual case."""
     failures: list[str] = []
     renders = case["renders"]
-    numbers = {
-        lang: sorted(re.findall(r"-?\d+(?:\.\d+)?", text)) for lang, text in renders.items()
-    }
+    numbers = {lang: sorted(re.findall(r"-?\d+(?:\.\d+)?", text)) for lang, text in renders.items()}
     first = next(iter(numbers.values()))
     if any(nums != first for nums in numbers.values()):
         failures.append(f"{case['id']}: numbers differ across languages {numbers}")

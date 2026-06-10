@@ -81,9 +81,7 @@ def encode_cursor(
     return token
 
 
-def decode_cursor(
-    cursor: str, *, params: dict[str, str], key: str
-) -> tuple[_dt.datetime, str]:
+def decode_cursor(cursor: str, *, params: dict[str, str], key: str) -> tuple[_dt.datetime, str]:
     """Verify + decode a signed cursor to its keyset position (PAGE-R5/R6).
 
     A malformed token or a bad/forged signature -> ``invalid-cursor`` (400); a valid

@@ -196,9 +196,7 @@ async def test_live_agent_answers_grounded_and_completed(live_db: Database) -> N
         # surfaced citation re-states a canonical analytic verbatim (GROUND-R7, no fabrication).
         assert answer.answer_text.strip()
         assert "enough confirmed data" not in answer.answer_text.lower()
-        matches = [
-            await _canonical_matches(live_db, c.metric, c.value) for c in answer.citations
-        ]
+        matches = [await _canonical_matches(live_db, c.metric, c.value) for c in answer.citations]
         assert all(matches), f"a citation did not match canonical analytics: {answer.citations}"
         assert any(matches)
         return
@@ -234,9 +232,7 @@ async def test_live_weekly_digest_grounded_and_completed(live_db: Database) -> N
         if digest.status is not RunStatus.COMPLETED:
             continue
         assert digest.digest_text.strip(), "COMPLETED digest with empty body (MODEL-R5a)"
-        matches = [
-            await _canonical_matches(live_db, c.metric, c.value) for c in digest.citations
-        ]
+        matches = [await _canonical_matches(live_db, c.metric, c.value) for c in digest.citations]
         assert all(matches), f"a digest citation did not match canonical: {digest.citations}"
         return
 

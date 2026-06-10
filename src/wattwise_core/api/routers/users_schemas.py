@@ -75,7 +75,9 @@ class EmailCaptureRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: str = Field(
-        min_length=3, max_length=320, pattern=EMAIL_PATTERN,
+        min_length=3,
+        max_length=320,
+        pattern=EMAIL_PATTERN,
         json_schema_extra={"format": "email"},
     )
 

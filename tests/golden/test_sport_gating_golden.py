@@ -179,9 +179,7 @@ def test_cycling_power_family_still_computes() -> None:
 @pytest.mark.parametrize("sport", NON_POWER_SPORTS)
 def test_bundle_power_fields_not_applicable_for_non_power_sport(sport: str) -> None:
     """ANL-R12/LM-R2: a non-power sport yields a bundle whose power fields are gated."""
-    bundle = load_metrics_bundle(
-        _power_stream(), _hr_stream(), FTP_W, CONST_W, 140.0, sport=sport
-    )
+    bundle = load_metrics_bundle(_power_stream(), _hr_stream(), FTP_W, CONST_W, 140.0, sport=sport)
     for field in (bundle.np, bundle.if_, bundle.tss, bundle.intensity_class):
         assert isinstance(field, Unavailable)
         assert field.reason == UnavailableReason.NOT_APPLICABLE_FOR_SPORT
@@ -219,8 +217,13 @@ def test_bundle_power_path_keeps_power_tss_label_and_no_hr_load() -> None:
     """LM-T2: a power activity carries load_model=power_tss; HR load is NOT also "the" load."""
     hr_load = banister_hr_load(_hr_stream(), 190.0, 50.0, "male")
     bundle = load_metrics_bundle(
-        _power_stream(), _hr_stream(), FTP_W, CONST_W, 140.0,
-        sport="cycling", hr_load_result=hr_load,
+        _power_stream(),
+        _hr_stream(),
+        FTP_W,
+        CONST_W,
+        140.0,
+        sport="cycling",
+        hr_load_result=hr_load,
     )
     assert bundle.load_model == LOAD_MODEL_POWER_TSS
     assert is_computed(bundle.tss)
@@ -231,8 +234,13 @@ def test_bundle_power_path_keeps_power_tss_label_and_no_hr_load() -> None:
 def test_bundle_no_power_no_hr_load_unavailable_but_labeled() -> None:
     """LM-R2: neither power nor HR load ⇒ Unavailable load field with a populated load_model."""
     bundle = load_metrics_bundle(
-        Stream.from_values([]), None, None, None, None,
-        sport="cycling", hr_load_result=None,
+        Stream.from_values([]),
+        None,
+        None,
+        None,
+        None,
+        sport="cycling",
+        hr_load_result=None,
     )
     assert isinstance(bundle.tss, Unavailable)
     assert isinstance(bundle.hr_load, Unavailable)

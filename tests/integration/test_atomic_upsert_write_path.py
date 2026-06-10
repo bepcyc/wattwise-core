@@ -205,9 +205,7 @@ async def test_one_bad_record_does_not_roll_back_the_run(
         fetched_at=_dt.datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
     )
     async with pool() as session:
-        result = await IngestService(session).ingest(
-            athlete_id, descriptor, [good_a, bad, good_b]
-        )
+        result = await IngestService(session).ingest(athlete_id, descriptor, [good_a, bad, good_b])
         await session.commit()
     assert result.candidates_failed == 1  # the bad row was isolated, not fatal
     async with pool() as session:
@@ -233,9 +231,7 @@ async def test_candidate_batch_is_one_multi_row_round_trip_not_per_row(
     """
     athlete_id, descriptor = await _seed(pool)
     # Three distinct activities, each its OWN window so resolution never collapses them.
-    cands = [
-        _ride(f"ride-{i}", start=_START + _dt.timedelta(hours=6 * i)) for i in range(3)
-    ]
+    cands = [_ride(f"ride-{i}", start=_START + _dt.timedelta(hours=6 * i)) for i in range(3)]
 
     inserts: list[str] = []
 

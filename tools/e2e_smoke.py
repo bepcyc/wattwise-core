@@ -77,14 +77,24 @@ def _boot(tmp: Path) -> tuple[subprocess.Popen[bytes], str, str]:
     }
     uv = shutil.which("uv") or "uv"
     subprocess.run(  # noqa: S603 — fixed argv, no shell, repo-local smoke tool
-        [uv, "run", "alembic", "upgrade", "head"], cwd=_REPO, env=env, check=True,
+        [uv, "run", "alembic", "upgrade", "head"],
+        cwd=_REPO,
+        env=env,
+        check=True,
         capture_output=True,
     )
     port = _free_port()
     proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell, repo-local smoke tool
         [
-            uv, "run", "uvicorn", "--factory", "wattwise_core.api.app:create_app",
-            "--host", "127.0.0.1", "--port", str(port),
+            uv,
+            "run",
+            "uvicorn",
+            "--factory",
+            "wattwise_core.api.app:create_app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
         ],
         cwd=_REPO,
         env=env,
@@ -156,8 +166,11 @@ def main() -> int:
                 acts = client.get(f"{base}/v1/activities", headers=auth)
                 n_items = len(acts.json().get("data", [])) if acts.status_code == 200 else 0
                 results.append(
-                    _step("activities list", acts.status_code == 200 and n_items >= 1,
-                          f"{acts.status_code}, items={n_items}")
+                    _step(
+                        "activities list",
+                        acts.status_code == 200 and n_items >= 1,
+                        f"{acts.status_code}, items={n_items}",
+                    )
                 )
 
                 # (b) headline metric: the PMC over the uploaded ride's window.
@@ -166,19 +179,24 @@ def main() -> int:
                     params={"from": "2024-01-01", "to": "2024-01-08"},
                     headers=auth,
                 )
-                results.append(_step("PMC load-fitness", pmc.status_code == 200,
-                                     str(pmc.status_code)))
+                results.append(
+                    _step("PMC load-fitness", pmc.status_code == 200, str(pmc.status_code))
+                )
 
                 # (c) grounded agent ask over SSE — needs a real model.
                 if os.environ.get("WATTWISE_LLM_API_KEY"):
                     status = _sse_done_status(client, base, auth)
                     results.append(
-                        _step("agent ask SSE", status in {"completed", "degraded"},
-                              f"terminal status={status}")
+                        _step(
+                            "agent ask SSE",
+                            status in {"completed", "degraded"},
+                            f"terminal status={status}",
+                        )
                     )
                 else:
-                    results.append(_step("agent ask SSE", False,
-                                         "SKIPPED — WATTWISE_LLM_API_KEY unset"))
+                    results.append(
+                        _step("agent ask SSE", False, "SKIPPED — WATTWISE_LLM_API_KEY unset")
+                    )
         finally:
             if proc is not None:
                 proc.terminate()

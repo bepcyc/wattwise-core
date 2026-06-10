@@ -215,9 +215,7 @@ class UnconfiguredAgentEngine:
         async with state_db.session() as session:
             return await list_memory(session, athlete_id=athlete_id, limit=limit, offset=offset)
 
-    async def get_memory(
-        self, *, athlete_id: str, memory_item_id: str
-    ) -> RecalledItem | None:
+    async def get_memory(self, *, athlete_id: str, memory_item_id: str) -> RecalledItem | None:
         """Fetch ONE memory row by id, owner-scoped, else ``None`` — NON-LLM (MEM-R3)."""
         state_db = await self._agent_state_db()
         async with state_db.session() as session:

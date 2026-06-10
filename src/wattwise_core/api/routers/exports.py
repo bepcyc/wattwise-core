@@ -147,10 +147,7 @@ def _job_out(row: ExportJobRecord, settings: Settings | None = None) -> ExportJo
             exp=exp,
             nonce=row.nonce,
         )
-        url = (
-            f"/v1/exports/{row.export_job_id}/download"
-            f"?exp={exp}&nonce={row.nonce}&sig={sig}"
-        )
+        url = f"/v1/exports/{row.export_job_id}/download?exp={exp}&nonce={row.nonce}&sig={sig}"
         download = DownloadOut(
             url=url,
             expires_at=_dt.datetime.fromtimestamp(exp, _dt.UTC).isoformat(),
@@ -240,9 +237,7 @@ async def list_exports(
     )
 
 
-async def _owned_job(
-    session: AsyncSession, athlete_id: str, job_id: str
-) -> ExportJobRecord | None:
+async def _owned_job(session: AsyncSession, athlete_id: str, job_id: str) -> ExportJobRecord | None:
     """The owner's job by id; a foreign / unknown / non-UUID id reads as absent."""
     try:
         job_uuid = uuid.UUID(job_id)
@@ -301,9 +296,7 @@ def _bearer_principal(request: Request) -> Principal:
     header = request.headers.get("Authorization", "")
     scheme, param = get_authorization_scheme_param(header)
     credentials = (
-        HTTPAuthorizationCredentials(scheme=scheme, credentials=param)
-        if scheme and param
-        else None
+        HTTPAuthorizationCredentials(scheme=scheme, credentials=param) if scheme and param else None
     )
     return authenticate(request, credentials)
 

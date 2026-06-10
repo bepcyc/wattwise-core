@@ -273,6 +273,10 @@ class Settings(BaseSettings):
     analytics__endurance_score_window_days: int = Field(ge=1)
     analytics__endurance_score_long_duration_s: int = Field(ge=1)
     analytics__endurance_score_short_duration_s: int = Field(ge=1)
+    # CP-R3/R4 pre-fit power-degeneracy epsilon (relative MMP power spread below which
+    # the fit refuses with INSUFFICIENT_DATA before any regression); the VALUE lives in
+    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraint.
+    analytics__cp_power_spread_epsilon: float = Field(gt=0, lt=1)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str
@@ -338,6 +342,14 @@ class Settings(BaseSettings):
     # (LANG-R1). Shape-only here; resolution + the default-language fallback are owned by
     # ``LocalePolicy.from_config`` (the manifest's ``default_language`` is the LANG-R4 fallback).
     agent__coach__languages: dict[str, dict[str, str]]
+    # Generic any-language pass-through (accepted deviation from LANG-R1's packs-only reading,
+    # LANG-R4 fallback still recorded): when ON and a requested locale has no loaded pack, the
+    # compose prompt layers the templated directive (code interpolates {language_tag}/{locale})
+    # instead of the default pack's variant, so the coach answers in the requested language.
+    # Loaded packs stay authoritative; grounding/abstention are untouched. Schema only — the
+    # values live in defaults.toml (CFG-R1a).
+    agent__coach__language_passthrough: bool
+    agent__coach__language_passthrough_directive: str
     # Offline-eval cost/latency budgets (QA-EVAL-R8): the median cost-per-task and p95
     # latency the eval gate enforces, plus the price per 1k tokens used to cost a recorded
     # (network-free) run. Loaded content (CFG-R1a), never a gate hardcode; strictly positive.
@@ -510,6 +522,7 @@ def _require_strong_signing_key(self: Settings) -> None:
             "(too few distinct bytes — a repeated/degenerate value, not real entropy); "
             "the service refuses to start (SEC-R3)"
         )
+
 
 def _reject_wildcard_cors_with_credentials(self: Settings) -> None:
     """Reject the wildcard-origin + credentials configuration cliff (SEC-R10 / SEC-R10-AC).

@@ -177,9 +177,7 @@ def test_unknown_export_job_is_404(tmp_path: Path) -> None:
     client, _ = _app(tmp_path)
     try:
         auth = _owner_auth(client)
-        resp = client.get(
-            "/v1/exports/00000000-0000-7000-8000-0000000000aa", headers=auth
-        )
+        resp = client.get("/v1/exports/00000000-0000-7000-8000-0000000000aa", headers=auth)
         assert resp.status_code == 404
     finally:
         client.__exit__(None, None, None)

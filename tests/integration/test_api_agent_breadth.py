@@ -84,9 +84,7 @@ class _FakeBreadthEngine:
         self.seen_athlete_id = athlete_id
         return self.diagnosis
 
-    async def digest(
-        self, *, athlete_id: str, week_end: str, entitlement: Any = None
-    ) -> Digest:
+    async def digest(self, *, athlete_id: str, week_end: str, entitlement: Any = None) -> Digest:
         self.seen_athlete_id = athlete_id
         return self.digest_body
 
@@ -103,9 +101,7 @@ class _FakeBreadthEngine:
         self.seen_athlete_id = athlete_id
         return self.memory.get(athlete_id, [])[offset : offset + limit]
 
-    async def get_memory(
-        self, *, athlete_id: str, memory_item_id: str
-    ) -> RecalledItem | None:
+    async def get_memory(self, *, athlete_id: str, memory_item_id: str) -> RecalledItem | None:
         self.seen_athlete_id = athlete_id
         for item in self.memory.get(athlete_id, []):
             if item.memory_item_id == memory_item_id:
@@ -226,9 +222,7 @@ async def env() -> AsyncIterator[_Env]:
         await session.commit()
         fake = _FakeBreadthEngine(diagnosis=_diagnosis(present=True), digest_body=_digest())
         app = _build_app(fake, session, athlete_id)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield _Env(client, fake, session, athlete_id)
     await engine.dispose()
 
@@ -365,13 +359,17 @@ async def test_resubscribe_replaces_keeping_one_active_row(env: _Env) -> None:
     assert second.json()["hour_local"] == 18
     # exactly ONE active row exists for the owner (GBO-R46 — one standing schedule)
     rows = (
-        await env.session.execute(
-            select(DigestSubscription).where(
-                DigestSubscription.athlete_id == uuid.UUID(env.athlete_id),
-                DigestSubscription.status == DigestStatus.ACTIVE,
+        (
+            await env.session.execute(
+                select(DigestSubscription).where(
+                    DigestSubscription.athlete_id == uuid.UUID(env.athlete_id),
+                    DigestSubscription.status == DigestStatus.ACTIVE,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 1
     # and the list surfaces exactly one schedule
     listed = await env.client.get("/v1/agent/digest/subscriptions", headers=_auth())
@@ -402,9 +400,7 @@ async def test_subscribe_weekly_without_weekday_is_422(env: _Env) -> None:
 
 async def test_delete_unknown_subscription_is_404(env: _Env) -> None:
     """Cancelling an unknown / non-UUID subscription id is 404 not-found (API-R51)."""
-    unknown = await env.client.delete(
-        f"/v1/agent/digest/subscribe/{uuid.uuid4()}", headers=_auth()
-    )
+    unknown = await env.client.delete(f"/v1/agent/digest/subscribe/{uuid.uuid4()}", headers=_auth())
     assert unknown.status_code == 404
     assert unknown.json()["type"].endswith("/not-found")
     bad = await env.client.delete("/v1/agent/digest/subscribe/not-a-uuid", headers=_auth())

@@ -95,9 +95,7 @@ async def seeded() -> AsyncIterator[Env]:
         await session.commit()
         recorder = _Recorder()
         app = _build_app(session, athlete_id, recorder, scopes=_FULL_SCOPES)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield Env(client, app, session, athlete_id, recorder)
     await engine.dispose()
 
@@ -124,9 +122,7 @@ def _build_app(
     async def _session() -> AsyncIterator[AsyncSession]:
         yield session
 
-    app.dependency_overrides[authenticate] = lambda: Principal(
-        subject=athlete_id, scopes=scopes
-    )
+    app.dependency_overrides[authenticate] = lambda: Principal(subject=athlete_id, scopes=scopes)
     app.dependency_overrides[get_db] = _session
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_rate_limiter] = lambda: app.state.rate_limiter
@@ -184,9 +180,7 @@ async def test_capture_email_persists_unverified(seeded: Env) -> None:
 
 async def test_changing_verified_email_resets_verified(seeded: Env) -> None:
     """Changing an already-verified address resets verified to false (fail-closed, GBO-R49)."""
-    await seeded.client.patch(
-        "/v1/users/me", json={"email": "first@example.com"}, headers=_auth()
-    )
+    await seeded.client.patch("/v1/users/me", json={"email": "first@example.com"}, headers=_auth())
     # simulate the out-of-band verification flow marking the route verified
     route = await _email_route(seeded.session, seeded.athlete_id)
     assert route is not None
@@ -204,9 +198,7 @@ async def test_changing_verified_email_resets_verified(seeded: Env) -> None:
 
 async def test_recapturing_same_email_keeps_verified(seeded: Env) -> None:
     """Re-capturing the SAME address leaves an already-verified route untouched (GBO-R49)."""
-    await seeded.client.patch(
-        "/v1/users/me", json={"email": "owner@example.com"}, headers=_auth()
-    )
+    await seeded.client.patch("/v1/users/me", json={"email": "owner@example.com"}, headers=_auth())
     route = await _email_route(seeded.session, seeded.athlete_id)
     assert route is not None
     route.verified = True
@@ -239,9 +231,7 @@ async def test_forged_verified_property_is_422(seeded: Env) -> None:
 
 async def test_account_route_list_masks_the_full_address(seeded: Env) -> None:
     """The route list returns only a masked hint — the full address never leaks there (ERR-R5)."""
-    await seeded.client.patch(
-        "/v1/users/me", json={"email": "owner@example.com"}, headers=_auth()
-    )
+    await seeded.client.patch("/v1/users/me", json={"email": "owner@example.com"}, headers=_auth())
     body = (await seeded.client.get("/v1/users/me", headers=_auth())).json()
     email_routes = [r for r in body["notification_routes"] if r["channel"] == "email"]
     assert email_routes, "the captured email must surface as a route"
@@ -252,9 +242,7 @@ async def test_account_route_list_masks_the_full_address(seeded: Env) -> None:
 
 async def test_account_carries_no_model_machinery(seeded: Env) -> None:
     """No model/tier/catalog control appears on the account surface (API-R38)."""
-    await seeded.client.patch(
-        "/v1/users/me", json={"email": "owner@example.com"}, headers=_auth()
-    )
+    await seeded.client.patch("/v1/users/me", json={"email": "owner@example.com"}, headers=_auth())
     flat = json.dumps((await seeded.client.get("/v1/users/me", headers=_auth())).json())
     for token in _FORBIDDEN_MODEL_FIELDS:
         assert token not in flat, f"model-selection token {token!r} leaked (API-R38)"
@@ -266,9 +254,7 @@ async def test_account_carries_no_model_machinery(seeded: Env) -> None:
 async def test_delete_records_async_request_without_hard_delete(seeded: Env) -> None:
     """DELETE records the async erasure request and does NOT hard-delete inline (retention §11)."""
     # capture an email first so there is a delivery channel to disable
-    await seeded.client.patch(
-        "/v1/users/me", json={"email": "owner@example.com"}, headers=_auth()
-    )
+    await seeded.client.patch("/v1/users/me", json={"email": "owner@example.com"}, headers=_auth())
     resp = await seeded.client.delete("/v1/users/me", headers=_auth())
     assert resp.status_code == 200
     body = resp.json()

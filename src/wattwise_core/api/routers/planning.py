@@ -357,7 +357,7 @@ __all__ = [
 ]
 
 #: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
-require_agent_scope.required_scopes = ('agent',)  # type: ignore[attr-defined]
+require_agent_scope.required_scopes = ("agent",)  # type: ignore[attr-defined]
 
 #: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
-require_read_scope.required_scopes = ('read',)  # type: ignore[attr-defined]
+require_read_scope.required_scopes = ("read",)  # type: ignore[attr-defined]

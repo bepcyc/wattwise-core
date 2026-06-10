@@ -68,9 +68,7 @@ def create_engine_from_settings(
     if dsn is None:
         settings = settings or get_settings()
         if settings.database_dsn is None:
-            raise RuntimeError(
-                "fail-closed: WATTWISE_DATABASE_DSN is required to create an engine"
-            )
+            raise RuntimeError("fail-closed: WATTWISE_DATABASE_DSN is required to create an engine")
         dsn = settings.database_dsn.get_secret_value()
     dsn = normalize_dsn(dsn)
     is_sqlite = dsn.startswith("sqlite")

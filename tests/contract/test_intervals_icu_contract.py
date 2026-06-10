@@ -161,9 +161,7 @@ async def test_fetch_handles_missing_streams_endpoint() -> None:
     respx.get(f"{_BASE}/api/v1/activity/{_ACTIVITY}").mock(
         return_value=httpx.Response(200, json=_load("activity_detail.json"))
     )
-    respx.get(f"{_BASE}/api/v1/activity/{_ACTIVITY}/streams").mock(
-        return_value=httpx.Response(404)
-    )
+    respx.get(f"{_BASE}/api/v1/activity/{_ACTIVITY}/streams").mock(return_value=httpx.Response(404))
     async with _client() as client:
         asbo = await client.fetch_activity(_ACTIVITY)
     cand = IntervalsIcuAdapter().map(asbo, _descriptor(), _ctx())[0]
@@ -179,8 +177,7 @@ def test_map_synthetic_cycling_all_channels() -> None:
     """A power-bearing cycling activity maps every canonical channel + SI scalars."""
     act = IntervalsActivityAsbo.model_validate(_load("synthetic_cycling_activity.json"))
     streams = [
-        IntervalsStreamAsbo.model_validate(s)
-        for s in _load("synthetic_cycling_streams.json")
+        IntervalsStreamAsbo.model_validate(s) for s in _load("synthetic_cycling_streams.json")
     ]
     cand = IntervalsIcuAdapter().map(
         ActivityWithStreams(activity=act, streams=streams), _descriptor(), _ctx()
@@ -195,8 +192,14 @@ def test_map_synthetic_cycling_all_channels() -> None:
     assert cand.payload["has_cadence"] is True
     # Every source channel maps to its canonical name; unmappable one is dropped.
     assert sorted(cand.payload["streams"]) == [
-        "altitude_m", "cadence_rpm", "distance_m", "hr_bpm",
-        "latlng", "power_w", "speed_mps", "temp_c",
+        "altitude_m",
+        "cadence_rpm",
+        "distance_m",
+        "hr_bpm",
+        "latlng",
+        "power_w",
+        "speed_mps",
+        "temp_c",
     ]
     assert "unmappable_channel" not in cand.payload["streams"]
     assert cand.trust_tier is Fidelity.RAW_STREAM
@@ -206,8 +209,7 @@ def test_map_preserves_real_gaps_as_none_never_zero() -> None:
     """A mid-stream missing sample stays ``None`` — never coerced to 0 (MAP-R5)."""
     act = IntervalsActivityAsbo.model_validate(_load("synthetic_cycling_activity.json"))
     streams = [
-        IntervalsStreamAsbo.model_validate(s)
-        for s in _load("synthetic_cycling_streams.json")
+        IntervalsStreamAsbo.model_validate(s) for s in _load("synthetic_cycling_streams.json")
     ]
     cand = IntervalsIcuAdapter().map(
         ActivityWithStreams(activity=act, streams=streams), _descriptor(), _ctx()
@@ -223,8 +225,7 @@ def test_map_is_pure_and_deterministic() -> None:
     """Same ASBO + context -> byte-identical candidates incl. content_hash (MAP-R1/R8)."""
     act = IntervalsActivityAsbo.model_validate(_load("synthetic_cycling_activity.json"))
     streams = [
-        IntervalsStreamAsbo.model_validate(s)
-        for s in _load("synthetic_cycling_streams.json")
+        IntervalsStreamAsbo.model_validate(s) for s in _load("synthetic_cycling_streams.json")
     ]
     awith = ActivityWithStreams(activity=act, streams=streams)
     first = IntervalsIcuAdapter().map(awith, _descriptor(), _ctx())[0]

@@ -226,9 +226,7 @@ async def link_start(settings: AppSettings, session: StateSession) -> LinkChalle
     until the athlete proves control of the WattWise account by approving it in-app.
     The lifetime is config-loaded (CFG-R1a).
     """
-    code, expires = await start_link_challenge(
-        session, ttl_seconds=settings.auth__link_ttl_seconds
-    )
+    code, expires = await start_link_challenge(session, ttl_seconds=settings.auth__link_ttl_seconds)
     return LinkChallenge(link_code=code, expires_at=expires.isoformat())
 
 

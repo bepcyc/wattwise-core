@@ -433,9 +433,7 @@ async def agent_decision(
             entitlement=attached_entitlement(request),
         )
     except DecisionRefused as exc:
-        raise await _decision_problem(
-            engine, athlete_id, thread_id, body.interrupt_id
-        ) from exc
+        raise await _decision_problem(engine, athlete_id, thread_id, body.interrupt_id) from exc
     return render_decision(plan, body.decision, trace_id)
 
 
@@ -469,4 +467,4 @@ __all__ = [
 ]
 
 #: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
-require_agent_scope.required_scopes = ('agent',)  # type: ignore[attr-defined]
+require_agent_scope.required_scopes = ("agent",)  # type: ignore[attr-defined]

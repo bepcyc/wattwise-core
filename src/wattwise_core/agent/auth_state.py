@@ -56,9 +56,7 @@ class AuthRefreshToken(AgentStateBase):
     expires_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), nullable=False)
     used_at: Mapped[_dt.datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     revoked_at: Mapped[_dt.datetime | None] = mapped_column(UtcDateTime(), nullable=True)
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 class AuthLinkChallenge(AgentStateBase):
@@ -79,9 +77,7 @@ class AuthLinkChallenge(AgentStateBase):
     proven_at: Mapped[_dt.datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     used_at: Mapped[_dt.datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     expires_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 def hash_token(token: str) -> str:
@@ -175,9 +171,7 @@ async def consume_refresh_token(
         ttl_seconds=ttl_seconds,
         family_id=row.family_id,
     )
-    return RefreshOutcome(
-        status="ok", subject=row.subject, scopes=scopes, new_secret=successor
-    )
+    return RefreshOutcome(status="ok", subject=row.subject, scopes=scopes, new_secret=successor)
 
 
 async def revoke_family(session: AsyncSession, *, family_id: str) -> None:
@@ -196,9 +190,7 @@ async def revoke_family(session: AsyncSession, *, family_id: str) -> None:
     await session.commit()
 
 
-async def find_refresh_token(
-    session: AsyncSession, *, presented: str
-) -> AuthRefreshToken | None:
+async def find_refresh_token(session: AsyncSession, *, presented: str) -> AuthRefreshToken | None:
     """Look up a presented refresh token by its stored hash (revoke path)."""
     return (
         await session.execute(
@@ -218,9 +210,7 @@ async def start_link_challenge(
     return code, expires
 
 
-async def approve_link_challenge(
-    session: AsyncSession, *, link_code: str, subject: str
-) -> bool:
+async def approve_link_challenge(session: AsyncSession, *, link_code: str, subject: str) -> bool:
     """Bind a pending challenge to the AUTHENTICATED owner (proof of control, AUTH-R8).
 
     Only a pending (unproven, unused, unexpired) challenge can be approved; the guarded
@@ -251,9 +241,7 @@ class LinkRedemption:
     subject: str | None = None
 
 
-async def complete_link_challenge(
-    session: AsyncSession, *, link_code: str
-) -> LinkRedemption:
+async def complete_link_challenge(session: AsyncSession, *, link_code: str) -> LinkRedemption:
     """Redeem a PROVEN link code exactly once (API-R23 ``/link/complete``).
 
     Proven + unused + unexpired -> mark used, return the bound subject. A known but
@@ -262,9 +250,7 @@ async def complete_link_challenge(
     """
     row = (
         await session.execute(
-            select(AuthLinkChallenge).where(
-                AuthLinkChallenge.code_hash == hash_token(link_code)
-            )
+            select(AuthLinkChallenge).where(AuthLinkChallenge.code_hash == hash_token(link_code))
         )
     ).scalar_one_or_none()
     if row is None:

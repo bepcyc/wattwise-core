@@ -147,9 +147,7 @@ class ActivityStreamSet(Base, TimestampMixin):
     """
 
     __tablename__ = "activity_stream_set"
-    __table_args__ = (
-        UniqueConstraint("activity_id", name="uq_activity_stream_set_activity"),
-    )
+    __table_args__ = (UniqueConstraint("activity_id", name="uq_activity_stream_set_activity"),)
 
     stream_set_id: Mapped[uuid.UUID] = pk_column()
     activity_id: Mapped[uuid.UUID] = fk_uuid_column("activity.activity_id", nullable=False)

@@ -80,7 +80,6 @@ _OPENAPI_PATH: Final = f"{API_PREFIX}/openapi.json"
 _DOCS_PATH: Final = f"{API_PREFIX}/docs"
 
 
-
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build and return the configured ``wattwise-core`` ASGI app (fail-closed boot).
 
@@ -252,9 +251,7 @@ def _wire_router_seams(app: FastAPI) -> None:
         overrides[connections_router.credential_sink] = lambda: sink
 
 
-def _wire_planning(
-    overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object
-) -> None:
+def _wire_planning(overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object) -> None:
     """Bind the planning router's seams to the real gates + the shared agent engine (API-R32).
 
     The planning surface mirrors the agent/performance routers: GENERATION (``POST
@@ -311,7 +308,6 @@ def _build_rate_limiter(settings: Settings) -> RateLimiter:
         LimitClass.AGENT: settings.entitlement__request_rate_per_minute,
     }
     return RateLimiter(limits)
-
 
 
 async def _persisted_locale_seam(

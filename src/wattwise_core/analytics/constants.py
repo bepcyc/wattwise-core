@@ -120,10 +120,27 @@ CP_R2_MIN: Final = 0.95  # CP-R3
 CP_DOMAIN_MIN_S: Final = 120  # CP-R2
 CP_DOMAIN_MAX_S: Final = 1200  # CP-R2
 CP_LONG_DURATION_BIAS_S: Final = 1200  # CP-R6 (fires strictly above)
+# CP-R3/R4 pre-fit degeneracy gate: a (near-)constant in-domain MMP power set —
+# relative spread strictly below this epsilon — is refused as INSUFFICIENT_DATA
+# BEFORE any regression, so the fail-closed verdict never depends on
+# platform-dependent fit numerics. The VALUE is NOT a code literal (CFG-R1a): it is
+# loaded from ``[analytics]`` in the packaged defaults.toml and typed +
+# range-validated by ``Settings.analytics__cp_power_spread_epsilon``.
+CP_POWER_SPREAD_EPSILON: Final[float] = _analytics_default("cp_power_spread_epsilon")
 
 # --- MMP grid ---
 MMP_DURATION_GRID_S: Final[tuple[int, ...]] = (
-    1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600,
+    1,
+    5,
+    15,
+    30,
+    60,
+    120,
+    300,
+    600,
+    1200,
+    1800,
+    3600,
 )  # MMP-R2
 
 # --- TRIMP (Banister-HRR), sex constants (a multiplicative, b exponential) ---
@@ -146,7 +163,11 @@ DECOUPLING_SMOOTHING_WINDOW_S: Final = 30  # DEC-R3
 # --- intensity_class IF cut-points (LM-R1) ---
 INTENSITY_CLASS_CUTS: Final[tuple[float, ...]] = (0.55, 0.75, 0.90, 1.05)
 INTENSITY_CLASS_LABELS: Final[tuple[str, ...]] = (
-    "recovery", "endurance", "tempo", "threshold", "vo2",
+    "recovery",
+    "endurance",
+    "tempo",
+    "threshold",
+    "vo2",
 )
 
 # --- readiness/form verdict bands (QA-EVAL-R2.4) ---

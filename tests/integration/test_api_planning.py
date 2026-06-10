@@ -57,8 +57,14 @@ UTC = _dt.UTC
 
 #: The forbidden billing/budget/model machinery fields (API-R11c).
 FORBIDDEN_FIELDS = (
-    "usage", "cost_remaining_usd", "cost_usd_estimate", "input_tokens",
-    "output_tokens", "model_tier", "reasoning", "model",
+    "usage",
+    "cost_remaining_usd",
+    "cost_usd_estimate",
+    "input_tokens",
+    "output_tokens",
+    "model_tier",
+    "reasoning",
+    "model",
 )
 
 
@@ -196,9 +202,7 @@ def test_post_workouts_awaiting_plan_html_is_sanitized_inert() -> None:
     )
     app = _build_plan_app(engine)
     with TestClient(app) as client:
-        resp = client.post(
-            "/v1/planning/workouts", json={"request": "plan"}, headers=_auth(app)
-        )
+        resp = client.post("/v1/planning/workouts", json={"request": "plan"}, headers=_auth(app))
     assert resp.status_code == 200
     html = resp.json()["plan_html"].lower()
     assert "<script" not in html
@@ -264,9 +268,7 @@ def test_post_workouts_rate_limited_returns_429() -> None:
         headers = _auth(app)
         last = None
         for _ in range(21):
-            last = client.post(
-                "/v1/planning/workouts", json={"request": "plan"}, headers=headers
-            )
+            last = client.post("/v1/planning/workouts", json={"request": "plan"}, headers=headers)
     assert last is not None
     assert last.status_code == 429
     assert last.json()["type"].endswith("/rate-limited")
@@ -278,9 +280,7 @@ def test_post_workouts_requires_agent_scope() -> None:
     # Drop the agent-scope override so the router's OWN fail-closed seam (insufficient-scope) runs.
     del app.dependency_overrides[planning_router.require_agent_scope]
     with TestClient(app) as client:
-        resp = client.post(
-            "/v1/planning/workouts", json={"request": "plan"}, headers=_auth(app)
-        )
+        resp = client.post("/v1/planning/workouts", json={"request": "plan"}, headers=_auth(app))
     assert resp.status_code == 403
     assert resp.json()["type"].endswith("/insufficient-scope")
 
@@ -353,8 +353,13 @@ async def _seed(session: AsyncSession) -> str:
             sport="cycling",
             steps=[
                 {"target_type": "open", "intent": "warmup", "duration_s": 600},
-                {"target_type": "power_pct_cp", "intent": "work", "duration_s": 1200,
-                 "target_low": 88.0, "target_high": 94.0},
+                {
+                    "target_type": "power_pct_cp",
+                    "intent": "work",
+                    "duration_s": 1200,
+                    "target_low": 88.0,
+                    "target_high": 94.0,
+                },
             ],
         )
     )
@@ -434,9 +439,7 @@ async def test_get_workouts_paginates_with_signed_cursor(seeded: _ReadEnv) -> No
     assert page1["page"]["has_more"] is True
     cursor = page1["page"]["next_cursor"]
     assert cursor
-    second = await seeded.client.get(
-        f"/v1/planning/workouts?limit=1&cursor={cursor}", headers={}
-    )
+    second = await seeded.client.get(f"/v1/planning/workouts?limit=1&cursor={cursor}", headers={})
     assert second.status_code == 200
     page2 = second.json()
     assert len(page2["data"]) == 1
