@@ -221,20 +221,32 @@ async def open_discover_gaps(
     opened = 0
     for ref in out.fetch_failed:
         await open_gap(
-            session, athlete_id, source_descriptor_id, ref.gbo_type,
-            reason=GapReason.FETCH_FAILED, seen_at=seen_at,
-            severity=Severity.WARNING, transient=True,
-            range_start_token=ref.source_native_id, range_end_token=ref.source_native_id,
+            session,
+            athlete_id,
+            source_descriptor_id,
+            ref.gbo_type,
+            reason=GapReason.FETCH_FAILED,
+            seen_at=seen_at,
+            severity=Severity.WARNING,
+            transient=True,
+            range_start_token=ref.source_native_id,
+            range_end_token=ref.source_native_id,
             ingest_run_id=ingest_run_id,
         )
         opened += 1
     if out.incomplete_cursor is not None:
         start = out.last_discovered_at or _window_start(window)
         await open_gap(
-            session, athlete_id, source_descriptor_id, GboType.ACTIVITY,
-            reason=GapReason.DISCOVERY_INCOMPLETE, seen_at=seen_at,
-            severity=Severity.WARNING, transient=True,
-            range_start_at=start, range_end_at=_window_end(window),
+            session,
+            athlete_id,
+            source_descriptor_id,
+            GboType.ACTIVITY,
+            reason=GapReason.DISCOVERY_INCOMPLETE,
+            seen_at=seen_at,
+            severity=Severity.WARNING,
+            transient=True,
+            range_start_at=start,
+            range_end_at=_window_end(window),
             range_start_token=out.incomplete_cursor or None,
             ingest_run_id=ingest_run_id,
         )

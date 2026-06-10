@@ -187,7 +187,10 @@ def _engine(
     canonical: _DatabaseStub, state_db: AgentStateDatabase, model: FakeModel, *, window: int
 ) -> GraphAgentEngine:
     return GraphAgentEngine(
-        canonical, model, state_db=state_db, dedup_window_seconds=window  # type: ignore[arg-type]
+        canonical,
+        model,
+        state_db=state_db,
+        dedup_window_seconds=window,  # type: ignore[arg-type]
     )
 
 

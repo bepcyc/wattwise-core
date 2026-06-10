@@ -350,9 +350,7 @@ def render_plan_awaiting(plan: Plan, trace_id: str) -> AgentAskResponse:
     )
 
 
-def render_decision(
-    plan: Plan, decision: DecisionKind, trace_id: str
-) -> AgentDecisionResponse:
+def render_decision(plan: Plan, decision: DecisionKind, trace_id: str) -> AgentDecisionResponse:
     """Render the resumed, now-terminal PLAN into the decision response (API-R12a / CKPT-R9).
 
     ``plan_html`` is sanitized HERE (API-R13). A resumed plan is grounded (degraded only when a

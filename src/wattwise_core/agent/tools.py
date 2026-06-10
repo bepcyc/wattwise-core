@@ -159,9 +159,7 @@ def _make_handler(capability: Capability) -> _Handler:
 # ONE registry, two surfaces (PLAN-R3/TOOL-R1): every MCP tool is built FROM the single
 # CAPABILITIES tuple so a tool key == a capability key VERBATIM and both resolve the SAME
 # canonical service call. There is no hand-authored parallel key set.
-_TOOLS: tuple[Tool, ...] = tuple(
-    Tool(c.key, c.description, _make_handler(c)) for c in CAPABILITIES
-)
+_TOOLS: tuple[Tool, ...] = tuple(Tool(c.key, c.description, _make_handler(c)) for c in CAPABILITIES)
 
 
 class ToolRegistry:

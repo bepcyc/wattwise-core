@@ -164,9 +164,7 @@ async def test_both_routes_dispatch_to_identical_l5_service_calls() -> None:
     for cap in CAPABILITIES:
         args = _ARGS_BY_SCHEMA[cap.param_schema]
         gather_svc, tool_svc = _svc(), _svc()
-        gathered = await gather(
-            gather_svc, _ATHLETE, [RetrievalRequest(cap.key, dict(args))]
-        )
+        gathered = await gather(gather_svc, _ATHLETE, [RetrievalRequest(cap.key, dict(args))])
         result = await ToolRegistry().invoke(
             capability=cap.key,
             context=ToolContext(athlete_id=_ATHLETE),

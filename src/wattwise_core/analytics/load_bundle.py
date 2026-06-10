@@ -110,9 +110,7 @@ def _ratio_metric(
     )
 
 
-def _tss_per_hour(
-    tss_result: MetricResult[float], duration_valid_s: int
-) -> MetricResult[float]:
+def _tss_per_hour(tss_result: MetricResult[float], duration_valid_s: int) -> MetricResult[float]:
     """``tss_per_hour = tss / (duration_valid_s / 3600)`` (LM-R1).
 
     Computed only when TSS is Computed and ``duration_valid_s > 0``.

@@ -129,9 +129,7 @@ async def test_shared_fingerprint_never_merges_incompatible_sports(
     athlete, src_a, src_b = await _seed(session)
     svc = IngestService(session)
     await svc.ingest(athlete, src_a, [_ride(src_a, "a-1", fingerprint="fp-x")])
-    await svc.ingest(
-        athlete, src_b, [_ride(src_b, "b-1", sport="running", fingerprint="fp-x")]
-    )
+    await svc.ingest(athlete, src_b, [_ride(src_b, "b-1", sport="running", fingerprint="fp-x")])
     acts = (await session.execute(select(Activity))).scalars().all()
     assert len(acts) == 2  # distinct sports stay separate sessions
 

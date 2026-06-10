@@ -33,9 +33,7 @@ class MetricEquivalence:
 
     def __init__(self, aliases: Mapping[str, str]) -> None:
         # Pre-fold the loaded alias keys once; values are canonical MetricName members.
-        self._aliases: dict[str, str] = {
-            _normalize_metric_label(k): v for k, v in aliases.items()
-        }
+        self._aliases: dict[str, str] = {_normalize_metric_label(k): v for k, v in aliases.items()}
 
     def canonical_key(self, metric: str) -> str | None:
         """Return the canonical metric key for ``metric``, or ``None`` if unrecognized.

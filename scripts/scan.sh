@@ -50,7 +50,7 @@ case "${scanner}" in
       if ! trivy image \
             --severity "${WW_FAIL_SEVERITY}" \
             --exit-code 1 \
-            --ignore-unfixed=false \
+            --ignore-unfixed \
             --format table \
             --output "${WW_OUT_DIR}/trivy-image.txt" \
             "${image_target}"; then

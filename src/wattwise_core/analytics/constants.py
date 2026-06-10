@@ -123,7 +123,17 @@ CP_LONG_DURATION_BIAS_S: Final = 1200  # CP-R6 (fires strictly above)
 
 # --- MMP grid ---
 MMP_DURATION_GRID_S: Final[tuple[int, ...]] = (
-    1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600,
+    1,
+    5,
+    15,
+    30,
+    60,
+    120,
+    300,
+    600,
+    1200,
+    1800,
+    3600,
 )  # MMP-R2
 
 # --- TRIMP (Banister-HRR), sex constants (a multiplicative, b exponential) ---
@@ -146,7 +156,11 @@ DECOUPLING_SMOOTHING_WINDOW_S: Final = 30  # DEC-R3
 # --- intensity_class IF cut-points (LM-R1) ---
 INTENSITY_CLASS_CUTS: Final[tuple[float, ...]] = (0.55, 0.75, 0.90, 1.05)
 INTENSITY_CLASS_LABELS: Final[tuple[str, ...]] = (
-    "recovery", "endurance", "tempo", "threshold", "vo2",
+    "recovery",
+    "endurance",
+    "tempo",
+    "threshold",
+    "vo2",
 )
 
 # --- readiness/form verdict bands (QA-EVAL-R2.4) ---

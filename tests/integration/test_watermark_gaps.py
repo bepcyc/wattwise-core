@@ -336,7 +336,10 @@ async def test_transient_time_gap_self_heals_on_resync(db: Any) -> None:
     # Pre-open a TRANSIENT time-range gap (a prior fetch over this range failed).
     async with factory() as session:
         await open_gap(
-            session, athlete, descriptor, GboType.ACTIVITY,
+            session,
+            athlete,
+            descriptor,
+            GboType.ACTIVITY,
             reason=GapReason.FETCH_FAILED,
             seen_at=_dt.datetime(2026, 5, 25, tzinfo=UTC),
             transient=True,
@@ -366,13 +369,21 @@ async def test_watermark_advance_is_forward_only(db: Any) -> None:
     early = _dt.datetime(2026, 6, 1, tzinfo=UTC)
     async with factory() as session:
         await advance_watermark(
-            session, athlete, descriptor, GboType.ACTIVITY,
-            high_water_at=late, content_hint="h1",
+            session,
+            athlete,
+            descriptor,
+            GboType.ACTIVITY,
+            high_water_at=late,
+            content_hint="h1",
         )
     async with factory() as session:
         await advance_watermark(
-            session, athlete, descriptor, GboType.ACTIVITY,
-            high_water_at=early, content_hint="h2",
+            session,
+            athlete,
+            descriptor,
+            GboType.ACTIVITY,
+            high_water_at=early,
+            content_hint="h2",
         )
         wm = await watermark_for(session, athlete, descriptor, GboType.ACTIVITY)
     assert wm is not None
@@ -388,7 +399,10 @@ async def test_close_covering_gaps_skips_partial_overlap(db: Any) -> None:
     descriptor = uuid.UUID(descriptor_id)
     async with factory() as session:
         await open_gap(
-            session, athlete, descriptor, GboType.ACTIVITY,
+            session,
+            athlete,
+            descriptor,
+            GboType.ACTIVITY,
             reason=GapReason.FETCH_FAILED,
             seen_at=_dt.datetime(2026, 5, 25, tzinfo=UTC),
             transient=True,
@@ -397,7 +411,10 @@ async def test_close_covering_gaps_skips_partial_overlap(db: Any) -> None:
         )
     async with factory() as session:
         closed = await close_covering_gaps(
-            session, athlete, descriptor, GboType.ACTIVITY,
+            session,
+            athlete,
+            descriptor,
+            GboType.ACTIVITY,
             range_start_at=_dt.datetime(2026, 5, 22, tzinfo=UTC),
             range_end_at=_dt.datetime(2026, 5, 28, tzinfo=UTC),  # does NOT fully cover
             closed_at=_FIXED_NOW,
@@ -420,9 +437,9 @@ async def test_terminal_mapping_gap_is_not_auto_closed_by_covering_sync(db: Any)
     athlete_id, _descriptor_id = await _seed(factory, ref=ref)
     # First run: a poison record opens a TERMINAL mapping gap; a good record commits + advances
     # the activity watermark to 2026-06-01 08:00.
-    await _orch(
-        factory, [_RideAsbo("good-1", 250.0, day=1), _PoisonAsbo("bad-1")], store
-    ).run(athlete_id, source="fake_api", window=SyncWindow("2026-05-20", "2026-06-03"))
+    await _orch(factory, [_RideAsbo("good-1", 250.0, day=1), _PoisonAsbo("bad-1")], store).run(
+        athlete_id, source="fake_api", window=SyncWindow("2026-05-20", "2026-06-03")
+    )
 
     # A later sync whose window FULLY covers the activity range must NOT close the terminal
     # mapping gap (contrast test_transient_time_gap_self_heals_on_resync, which DOES heal).
@@ -459,12 +476,20 @@ async def test_floor_is_min_across_gbo_types_so_lagging_scope_not_skipped(db: An
     wellness_hw = _dt.datetime(2026, 6, 1, 8, 0, tzinfo=UTC)  # LAGGING — the conservative floor
     async with factory() as session:
         await advance_watermark(
-            session, athlete, descriptor, GboType.ACTIVITY,
-            high_water_at=activity_hw, content_hint="a",
+            session,
+            athlete,
+            descriptor,
+            GboType.ACTIVITY,
+            high_water_at=activity_hw,
+            content_hint="a",
         )
         await advance_watermark(
-            session, athlete, descriptor, GboType.DAILY_WELLNESS,
-            high_water_at=wellness_hw, content_hint="w",
+            session,
+            athlete,
+            descriptor,
+            GboType.DAILY_WELLNESS,
+            high_water_at=wellness_hw,
+            content_hint="w",
         )
 
     async with sessionmaker() as s:
@@ -489,8 +514,12 @@ async def test_floor_uses_only_advanced_scopes(db: Any) -> None:
     only_hw = _dt.datetime(2026, 6, 5, 8, 0, tzinfo=UTC)
     async with factory() as session:
         await advance_watermark(
-            session, athlete, descriptor, GboType.ACTIVITY,
-            high_water_at=only_hw, content_hint="a",
+            session,
+            athlete,
+            descriptor,
+            GboType.ACTIVITY,
+            high_water_at=only_hw,
+            content_hint="a",
         )
     async with sessionmaker() as s:
         assert await watermark_floor(s, athlete, descriptor) == only_hw  # the one advanced scope

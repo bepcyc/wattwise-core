@@ -80,9 +80,7 @@ async def seeded() -> AsyncIterator[Env]:
     async with factory() as session:
         athlete_id, activity_id = await _seed_ride(session)
         app = _build_app(session, athlete_id)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield Env(client, app, session, athlete_id, activity_id)
     await engine.dispose()
 
@@ -124,23 +122,43 @@ async def _seed_ride(session: AsyncSession) -> tuple[str, str]:
     aid = athlete.athlete_id
     session.add(
         FitnessSignature(
-            athlete_id=aid, signature_type="cycling", effective_date=_dt.date(2026, 1, 1),
-            ftp_w=250.0, cp_w=250.0, w_prime_j=20000.0, max_hr_bpm=190.0, resting_hr_bpm=45.0,
+            athlete_id=aid,
+            signature_type="cycling",
+            effective_date=_dt.date(2026, 1, 1),
+            ftp_w=250.0,
+            cp_w=250.0,
+            w_prime_j=20000.0,
+            max_hr_bpm=190.0,
+            resting_hr_bpm=45.0,
             origin=SignatureOrigin.MEASURED,
         )
     )
     activity = Activity(
-        athlete_id=aid, start_time=_START, sport="cycling", elapsed_time_s=3600,
-        moving_time_s=3600, avg_power_w=250.0, max_power_w=400.0, avg_hr_bpm=150,
-        has_power=True, has_hr=True, has_gps=True,
+        athlete_id=aid,
+        start_time=_START,
+        sport="cycling",
+        elapsed_time_s=3600,
+        moving_time_s=3600,
+        avg_power_w=250.0,
+        max_power_w=400.0,
+        avg_hr_bpm=150,
+        has_power=True,
+        has_hr=True,
+        has_gps=True,
     )
     session.add(activity)
     await session.flush()
     await _seed_streams(session, activity.activity_id)
     session.add(
         ActivityLap(
-            activity_id=activity.activity_id, lap_index=0, start_offset_s=0, duration_s=1800,
-            distance_m=15000.0, avg_power_w=250.0, max_power_w=400.0, avg_hr_bpm=150,
+            activity_id=activity.activity_id,
+            lap_index=0,
+            start_offset_s=0,
+            duration_s=1800,
+            distance_m=15000.0,
+            avg_power_w=250.0,
+            max_power_w=400.0,
+            avg_hr_bpm=150,
         )
     )
     await session.commit()
@@ -150,8 +168,11 @@ async def _seed_ride(session: AsyncSession) -> tuple[str, str]:
 async def _seed_streams(session: AsyncSession, activity_id: uuid.UUID) -> None:
     """Seed power/HR/latlng channels with a deliberate HR gap (a ``None`` sample)."""
     stream_set = ActivityStreamSet(
-        activity_id=activity_id, sample_basis=SampleBasis.TIME, sample_rate_hz=1.0,
-        sample_count=3600, t0=_START,
+        activity_id=activity_id,
+        sample_basis=SampleBasis.TIME,
+        sample_rate_hz=1.0,
+        sample_count=3600,
+        t0=_START,
     )
     session.add(stream_set)
     await session.flush()
@@ -166,8 +187,12 @@ async def _seed_streams(session: AsyncSession, activity_id: uuid.UUID) -> None:
     for channel, values in channels.items():
         session.add(
             StreamChannel(
-                stream_set_id=sid, set_kind=StreamSetKind.ACTIVITY, channel=channel,
-                sample_basis=SampleBasis.TIME, values=values, coverage={},
+                stream_set_id=sid,
+                set_kind=StreamSetKind.ACTIVITY,
+                channel=channel,
+                sample_basis=SampleBasis.TIME,
+                values=values,
+                coverage={},
             )
         )
 
@@ -201,9 +226,7 @@ async def test_pmc_chart_ready_shape(seeded: Env) -> None:
 
 
 @pytest.mark.integration
-async def test_coggan_per_activity_points_carry_activity_id(
-    seeded: Env
-) -> None:
+async def test_coggan_per_activity_points_carry_activity_id(seeded: Env) -> None:
     """Per-activity Coggan points carry ``activity_id`` and a computed TSS (~100)."""
     client, activity_id = seeded.client, seeded.activity_id
     resp = await client.get("/v1/performance/coggan", params=_range())
@@ -216,9 +239,7 @@ async def test_coggan_per_activity_points_carry_activity_id(
 
 
 @pytest.mark.integration
-async def test_critical_power_fails_closed_when_underdetermined(
-    seeded: Env
-) -> None:
+async def test_critical_power_fails_closed_when_underdetermined(seeded: Env) -> None:
     """A single constant ride cannot fit CP → 422 cp_insufficient_points, not a number (ERR-R9)."""
     client = seeded.client
     resp = await client.get("/v1/performance/critical-power", params=_range())
@@ -265,9 +286,7 @@ async def test_activities_list_is_paginated(seeded: Env) -> None:
 
 
 @pytest.mark.integration
-async def test_activity_detail_has_canonical_load_bundle(
-    seeded: Env
-) -> None:
+async def test_activity_detail_has_canonical_load_bundle(seeded: Env) -> None:
     """Activity detail composes the canonical scalars + the per-activity load bundle (§13)."""
     client, activity_id = seeded.client, seeded.activity_id
     resp = await client.get(f"/v1/activities/{activity_id}")
@@ -306,9 +325,7 @@ async def test_streams_gap_is_explicit_null(seeded: Env) -> None:
 
 
 @pytest.mark.integration
-async def test_streams_absent_channel_is_present_with_nulls(
-    seeded: Env
-) -> None:
+async def test_streams_absent_channel_is_present_with_nulls(seeded: Env) -> None:
     """A requested-but-absent channel is present with ``present=false`` + all-null (API-R48)."""
     client, activity_id = seeded.client, seeded.activity_id
     resp = await client.get(
@@ -359,8 +376,11 @@ async def _seed_no_gps_activity(session: AsyncSession, athlete_id: str) -> str:
     activity = Activity(
         athlete_id=uuid.UUID(athlete_id),
         start_time=_dt.datetime(2026, 6, 2, 8, 0, tzinfo=UTC),
-        sport="cycling", elapsed_time_s=600, moving_time_s=600,
-        has_power=False, has_gps=False,
+        sport="cycling",
+        elapsed_time_s=600,
+        moving_time_s=600,
+        has_power=False,
+        has_gps=False,
     )
     session.add(activity)
     await session.commit()
@@ -481,7 +501,12 @@ async def test_best_efforts_is_paginated_collection_from_mmp(seeded: Env) -> Non
     assert body["page"]["limit"] == len(items)
     item = items[0]
     assert set(item) == {
-        "duration_s", "label", "power_watts", "local_date", "activity_id", "coverage",
+        "duration_s",
+        "label",
+        "power_watts",
+        "local_date",
+        "activity_id",
+        "coverage",
     }
     # The 1-hour 250 W ride: a short best effort equals MMP(d) ≈ 250 W (BEST-R1).
     powered = [i for i in items if i["power_watts"] is not None]

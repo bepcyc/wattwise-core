@@ -304,9 +304,7 @@ def _decoupling_pct(halves: _HalfEfficiencies) -> float | Unavailable:
             UnavailableReason.OUT_OF_DOMAIN,
             "first-half efficiency is zero; decoupling ratio undefined",
         )
-    decoupling_pct = (
-        (halves.eff_first - halves.eff_second) / halves.eff_first
-    ) * 100.0
+    decoupling_pct = ((halves.eff_first - halves.eff_second) / halves.eff_first) * 100.0
     if not np.isfinite(decoupling_pct):
         return Unavailable(
             UnavailableReason.OUT_OF_DOMAIN,
@@ -395,9 +393,7 @@ def aerobic_decoupling(
     if smoothing_window_s <= 0:
         raise ValueError("smoothing_window_s must be positive")
 
-    win = _prepare_window(
-        output_stream, hr_stream, sport, min_duration_s, max_interp_gap_s
-    )
+    win = _prepare_window(output_stream, hr_stream, sport, min_duration_s, max_interp_gap_s)
     if isinstance(win, Unavailable):
         return win
 

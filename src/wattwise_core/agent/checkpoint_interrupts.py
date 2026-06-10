@@ -28,6 +28,18 @@ from wattwise_core.persistence.upsert import upsert
 EnsureThread = Callable[[AsyncSession, str], Awaitable[Any]]
 
 
+class DecisionRefused(RuntimeError):
+    """A HITL decision could not consume a live interrupt (CKPT-R9; fail-closed).
+
+    Raised by :meth:`~wattwise_core.agent.engine.GraphAgentEngine.decision` when
+    ``consume_interrupt`` returns ``False`` — the atomic guarded UPDATE matched no ``live`` row
+    owned by the caller (an already-consumed double-decision F-409, an unknown/never-recorded
+    interrupt F-404, or a cross-athlete attempt F-XID). The run is NEVER resumed in that case; the
+    API router maps this to 404/409. Lives beside the ledger guard it reports on (QUAL-R9 size
+    split); re-exported from :mod:`wattwise_core.agent.engine` so the historical import path stays.
+    """
+
+
 async def record_interrupt(
     sessions: async_sessionmaker[AsyncSession],
     ensure_thread: EnsureThread,
@@ -119,4 +131,4 @@ async def interrupt_status(
     return "consumed" if status == "consumed" else "unknown"
 
 
-__all__ = ["consume_interrupt", "interrupt_status", "record_interrupt"]
+__all__ = ["DecisionRefused", "consume_interrupt", "interrupt_status", "record_interrupt"]

@@ -186,9 +186,7 @@ async def test_post_goal_metric_target_persists_value(env: _Env) -> None:
 @pytest.mark.asyncio
 async def test_post_goal_forged_athlete_id_is_422(env: _Env) -> None:
     """A forged caller-identity body field is rejected (AUTH-R3 / SCHEMA-R4)."""
-    resp = await env.client.post(
-        "/v1/goals", json=_goal_body(athlete_id="attacker"), headers={}
-    )
+    resp = await env.client.post("/v1/goals", json=_goal_body(athlete_id="attacker"), headers={})
     assert resp.status_code == 422
     assert resp.json()["type"].endswith("/validation-error")
 
@@ -256,9 +254,7 @@ async def test_patch_goal_updates_fields(env: _Env) -> None:
 @pytest.mark.asyncio
 async def test_patch_unknown_goal_is_404(env: _Env) -> None:
     """A PATCH to an unknown goal_id is a 404 not-found (API-R51)."""
-    resp = await env.client.patch(
-        f"/v1/goals/{uuid.uuid4()}", json={"title": "x"}, headers={}
-    )
+    resp = await env.client.patch(f"/v1/goals/{uuid.uuid4()}", json={"title": "x"}, headers={})
     assert resp.status_code == 404
 
 
@@ -448,11 +444,13 @@ async def test_list_target_date_sort_pages_null_dated_goals_losslessly(env: _Env
     goals included. Mutation-proof: a raw (un-coalesced) ``target_date`` keyset loses undated rows.
     """
     a = await _create(env, title="dated-early", target_date="2026-03-01")
-    b = await _create(env, title="undated-1", goal_type="process", target_event=None,
-                      target_date=None)
+    b = await _create(
+        env, title="undated-1", goal_type="process", target_event=None, target_date=None
+    )
     c = await _create(env, title="dated-late", target_date="2026-09-01")
-    d = await _create(env, title="undated-2", goal_type="process", target_event=None,
-                      target_date=None)
+    d = await _create(
+        env, title="undated-2", goal_type="process", target_event=None, target_date=None
+    )
     expected = {a["goal_id"], b["goal_id"], c["goal_id"], d["goal_id"]}
     seen: set[str] = set()
     url: str | None = "/v1/goals?sort=target_date&order=asc&limit=1"

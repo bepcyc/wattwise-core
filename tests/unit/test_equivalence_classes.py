@@ -35,7 +35,9 @@ def test_packaged_training_load_class_loads() -> None:
     assert cls is not None
     assert cls.top_tier == Fidelity.RAW_STREAM
     assert [m.tier for m in cls.members] == [
-        Fidelity.RAW_STREAM, Fidelity.PLATFORM_COMPUTED, Fidelity.MODELED,
+        Fidelity.RAW_STREAM,
+        Fidelity.PLATFORM_COMPUTED,
+        Fidelity.MODELED,
     ]
     assert all(m.note and m.penalty for m in cls.members)
 
@@ -106,8 +108,11 @@ def test_step_targets_resolve_relative_to_signature() -> None:
     """GBO-R29: a power_pct_cp step re-resolves against the CURRENT CP — and returns a
     typed None when the signature lacks the base, never a fabricated absolute target."""
     step = {
-        "target_type": "power_pct_cp", "intent": "work",
-        "target_low": 90.0, "target_high": 100.0, "duration_s": 1200,
+        "target_type": "power_pct_cp",
+        "intent": "work",
+        "target_low": 90.0,
+        "target_high": 100.0,
+        "duration_s": 1200,
     }
     validate_workout_steps([step])
     resolved = resolve_step_target(step, cp_w=300.0)

@@ -111,9 +111,7 @@ async def test_implausible_range_is_quarantined_with_rule_id(session: AsyncSessi
     with the range rule id; nothing reaches the canonical store."""
     athlete, src = await _seed(session)
     svc = IngestService(session)
-    result = await svc.ingest(
-        athlete, src, [_cand(src, "hot-1", {"avg_hr_bpm": 999.0})]
-    )
+    result = await svc.ingest(athlete, src, [_cand(src, "hot-1", {"avg_hr_bpm": 999.0})])
     assert result.candidates_quarantined == 1
     row = (await session.execute(select(SourceCandidate))).scalar_one()
     assert row.quarantine_rule_id == "MAP-R6:range:avg_hr_bpm"

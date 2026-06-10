@@ -103,9 +103,7 @@ async def env(tmp_path: Path) -> AsyncIterator[Env]:
         canonical_engine, expire_on_commit=False, class_=AsyncSession
     )
     async with canonical_factory() as session:
-        session.add(
-            Athlete(athlete_id=uuid.UUID(ATHLETE), sex="male", reference_timezone="UTC")
-        )
+        session.add(Athlete(athlete_id=uuid.UUID(ATHLETE), sex="male", reference_timezone="UTC"))
         await session.commit()
 
     state_db = build_agent_state_database(dsn=f"sqlite+aiosqlite:///{tmp_path}/agent.sqlite")

@@ -39,9 +39,7 @@ class Stream:
             raise ValueError("t_seconds must be monotonically non-decreasing (ANL-R7)")
 
     @classmethod
-    def from_values(
-        cls, values: list[float | None], *, t0: float = 0.0, dt: float = 1.0
-    ) -> Stream:
+    def from_values(cls, values: list[float | None], *, t0: float = 0.0, dt: float = 1.0) -> Stream:
         """Build a uniform stream from a list where ``None`` marks a gap."""
         v = np.array([np.nan if x is None else float(x) for x in values], dtype=np.float64)
         t = t0 + dt * np.arange(v.size, dtype=np.float64)

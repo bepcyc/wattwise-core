@@ -204,13 +204,17 @@ async def _resolved_power(session: AsyncSession) -> dict[str, float]:
     act = (await session.execute(select(Activity))).scalars().one()
     ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
     power = (
-        await session.execute(
-            select(StreamChannel).where(
-                StreamChannel.stream_set_id == ss.stream_set_id,
-                StreamChannel.channel == "power_w",
+        (
+            await session.execute(
+                select(StreamChannel).where(
+                    StreamChannel.stream_set_id == ss.stream_set_id,
+                    StreamChannel.channel == "power_w",
+                )
             )
         )
-    ).scalars().one()
+        .scalars()
+        .one()
+    )
     return {"avg_power_w": float(act.avg_power_w), "stream_sample": float(power.values[0])}
 
 
@@ -258,9 +262,7 @@ def _assert_close(baseline: dict[str, float], other: dict[str, float]) -> None:
     seconds=st.integers(min_value=60, max_value=1200),
     k=st.integers(min_value=2, max_value=4),  # 2..4 DUPLICATE overlapping sources
 )
-def test_duplicate_sources_do_not_change_any_aggregate(
-    watts: float, seconds: int, k: int
-) -> None:
+def test_duplicate_sources_do_not_change_any_aggregate(watts: float, seconds: int, k: int) -> None:
     """Adding ``k`` duplicate sources keeps COUNT == 1 and every total == baseline.
 
     The DEDUP-R1 property: a duplicate source for an existing activity changes no

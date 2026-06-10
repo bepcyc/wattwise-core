@@ -92,9 +92,7 @@ async def get_memory(
     return _to_recalled(row) if row is not None else None
 
 
-async def delete_memory(
-    session: AsyncSession, *, athlete_id: str, memory_item_id: str
-) -> bool:
+async def delete_memory(session: AsyncSession, *, athlete_id: str, memory_item_id: str) -> bool:
     """Delete ONE memory row by id, scoped to the owner; True iff a row was erased (MEM-R3).
 
     The guarded DELETE matches BOTH ``memory_item_id`` AND the server-derived ``athlete_id``, so

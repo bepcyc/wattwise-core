@@ -165,15 +165,12 @@ def _time_domain_from_series(
     if nn.size < 2 or usable_s < min_duration_s:
         return Unavailable(
             UnavailableReason.INSUFFICIENT_DATA,
-            f"usable recording {usable_s:.1f}s below minimum {min_duration_s:.1f}s "
-            f"(HRV-R4)",
+            f"usable recording {usable_s:.1f}s below minimum {min_duration_s:.1f}s (HRV-R4)",
         )
 
     td = _time_domain(nn)
     if not _all_finite(td):
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN, "non-finite time-domain HRV value"
-        )
+        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "non-finite time-domain HRV value")
     quality = QualityReport(
         coverage_fraction=1.0,
         confidence=1.0 - correction.corrected_fraction,
@@ -214,9 +211,7 @@ def _time_domain_from_summary(
     mean_nn = float(summary_mean_nn_ms) if summary_mean_nn_ms is not None else math.nan
     # RMSSD is the canonical summary scalar; it must be finite & non-negative.
     if not math.isfinite(rmssd) or rmssd < 0.0:
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN, "summary rmssd must be finite and >= 0"
-        )
+        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "summary rmssd must be finite and >= 0")
     td = TimeDomainHrv(rmssd_ms=rmssd, sdnn_ms=sdnn, pnn50_pct=pnn50, mean_nn_ms=mean_nn)
     quality = QualityReport(
         coverage_fraction=1.0,
@@ -283,10 +278,7 @@ def time_domain_hrv(
 
 
 def _all_finite(td: TimeDomainHrv) -> bool:
-    return all(
-        math.isfinite(x)
-        for x in (td.rmssd_ms, td.sdnn_ms, td.pnn50_pct, td.mean_nn_ms)
-    )
+    return all(math.isfinite(x) for x in (td.rmssd_ms, td.sdnn_ms, td.pnn50_pct, td.mean_nn_ms))
 
 
 # Freq-domain HRV (HRV-R5/R6/R7) lives in the sibling :mod:`hrv_freq` module for the

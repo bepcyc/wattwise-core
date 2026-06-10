@@ -41,9 +41,7 @@ class DigestSubscription(Base, TimestampMixin):
     """
 
     __tablename__ = "digest_subscription"
-    __table_args__ = (
-        Index("ix_digest_subscription_athlete_status", "athlete_id", "status"),
-    )
+    __table_args__ = (Index("ix_digest_subscription_athlete_status", "athlete_id", "status"),)
 
     subscription_id: Mapped[uuid.UUID] = pk_column()
     athlete_id: Mapped[uuid.UUID] = fk_uuid_column("athlete.athlete_id", nullable=False)

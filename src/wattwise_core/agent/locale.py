@@ -99,9 +99,7 @@ class LocalePolicy:
         }
         default = _primary_subtag(default_language) or _BASELINE_DEFAULT_LANGUAGE
         if packs and default not in packs:
-            raise ValueError(
-                f"default_language {default!r} has no loaded language pack (LANG-R4)"
-            )
+            raise ValueError(f"default_language {default!r} has no loaded language pack (LANG-R4)")
         return cls(packs=packs, default_language=default)
 
     def resolve(self, requested: str | None) -> tuple[str, bool]:

@@ -113,9 +113,7 @@ async def test_persisted_checkpoint_blob_carries_no_planted_pii(
     await saver.aput(_config(), _checkpoint_with_pii(), _metadata(), {})
 
     async with factory() as session:
-        row = (
-            await session.execute(select(AgentCheckpoint).limit(1))
-        ).scalar_one()
+        row = (await session.execute(select(AgentCheckpoint).limit(1))).scalar_one()
     raw_bytes: bytes = row.checkpoint_blob
     # The blob is the serialized state; no planted secret may survive in it.
     assert SECRET_EMAIL.encode() not in raw_bytes

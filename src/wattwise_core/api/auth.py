@@ -195,9 +195,7 @@ _bearer_scheme: Final = HTTPBearer(auto_error=False, scheme_name="bearer")
 
 def authenticate(
     request: Request,
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
-    ],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
 ) -> Principal:
     """Resolve the acting :class:`Principal` from the bearer token (AUTH-R1/R2/R3/R6).
 

@@ -55,9 +55,7 @@ from wattwise_core.storage import ObjectStore
 
 # Canonical tables that are NOT athlete-scoped at all (shared registry / global config).
 # They hold no personal data and MUST NOT be touched by a per-athlete erasure.
-_CANONICAL_SHARED_TABLES: frozenset[str] = frozenset(
-    {"sport", "sub_sport", "source_descriptor"}
-)
+_CANONICAL_SHARED_TABLES: frozenset[str] = frozenset({"sport", "sub_sport", "source_descriptor"})
 
 # Scope path for a table that carries NO ``athlete_id`` column: the child column to match
 # against the athlete-owned ids produced by following one or more PARENT HOPS down to an
@@ -90,9 +88,7 @@ class _Transitive:
 # ``activity_stream_set`` itself carries no ``athlete_id``; the wellness branch is one hop
 # (``wellness_stream_set`` IS athlete-scoped).
 _CANONICAL_TRANSITIVE: Mapping[str, _Transitive] = {
-    "activity_lap": _Transitive(
-        (("activity_id", (("activity", "activity_id", "athlete_id"),)),)
-    ),
+    "activity_lap": _Transitive((("activity_id", (("activity", "activity_id", "athlete_id"),)),)),
     "activity_stream_set": _Transitive(
         (("activity_id", (("activity", "activity_id", "athlete_id"),)),)
     ),
@@ -210,9 +206,7 @@ def _ordered_scoped_tables(
     return hoisted + remaining
 
 
-async def _delete_direct(
-    session: AsyncSession, table: Table, athlete_id: uuid.UUID
-) -> int:
+async def _delete_direct(session: AsyncSession, table: Table, athlete_id: uuid.UUID) -> int:
     """Delete (and count) rows of an ``athlete_id``-bearing table for the athlete.
 
     The ``WHERE athlete_id = :id`` predicate excludes NULL-``athlete_id`` rows (e.g. the
@@ -242,9 +236,7 @@ def _owned_id_subquery(
     for hop_table, select_col, match_col in reversed(hops):
         parent = tables[hop_table]
         if inner is None:  # final (deepest) hop: filter by athlete_id directly
-            inner = select(parent.c[select_col]).where(
-                parent.c["athlete_id"] == athlete_id
-            )
+            inner = select(parent.c[select_col]).where(parent.c["athlete_id"] == athlete_id)
         else:
             inner = select(parent.c[select_col]).where(parent.c[match_col].in_(inner))
     if inner is None:  # an empty hop chain is a wiring bug, never a silent no-op (fail-closed)
@@ -290,12 +282,16 @@ async def _erase_object_bytes(
     """
     activity_file = Base.metadata.tables["activity_file"]
     refs = (
-        await session.execute(
-            select(activity_file.c["object_ref"]).where(
-                activity_file.c["athlete_id"] == athlete_id
+        (
+            await session.execute(
+                select(activity_file.c["object_ref"]).where(
+                    activity_file.c["athlete_id"] == athlete_id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     distinct_refs = set(refs)
     for ref in distinct_refs:
         object_store.delete(ref)

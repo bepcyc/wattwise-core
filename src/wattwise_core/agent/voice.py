@@ -210,11 +210,7 @@ def _lead_is_raw_metric_token(lead: str) -> bool:
     it is what the engine is structurally not allowed to surface in prose.
     """
     stripped = _NUMBER_RE.sub(" ", lead)
-    words = [
-        w.lower()
-        for w in re.findall(r"[^\W\d_]+", stripped, flags=re.UNICODE)
-        if len(w) > 1
-    ]
+    words = [w.lower() for w in re.findall(r"[^\W\d_]+", stripped, flags=re.UNICODE) if len(w) > 1]
     if not words:
         return False
     non_token = [w for w in words if w not in INTERNAL_METRIC_TOKENS]
@@ -438,9 +434,7 @@ def _translate_tokens(body: str, presentation: VoicePresentation) -> str:
     return _RAW_TOKEN_RE.sub(_sub, body)
 
 
-def _repair_lead(
-    text: str, html: str, presentation: VoicePresentation
-) -> tuple[str, str]:
+def _repair_lead(text: str, html: str, presentation: VoicePresentation) -> tuple[str, str]:
     """Make the body LEAD with a state read, dropping/prepending as needed (COACH-R7).
 
     Returns ``(text, html)``. If the text already leads with a state phrase it is returned
