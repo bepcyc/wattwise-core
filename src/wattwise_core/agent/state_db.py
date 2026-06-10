@@ -109,12 +109,14 @@ def create_agent_state_engine(
     raw_dsn = dsn
     if raw_dsn is None:
         settings = settings or get_settings()
-        dsn_secret = settings.database_dsn
-        if dsn_secret is None:
+        # Prefer the distinct AGENT-STATE-WRITE role's DSN (DEPLOY-R4) when the deployment
+        # configured one; otherwise fall back to the canonical DSN (single-operator self-host:
+        # one credential). EITHER way this engine/pool is separate from the canonical Database.
+        raw_dsn = settings.agent_state_write_dsn()
+        if raw_dsn is None:
             raise RuntimeError(
                 "fail-closed: a DSN is required to create the agent-state engine (ARCH-R13)"
             )
-        raw_dsn = dsn_secret.get_secret_value()
     dsn = normalize_dsn(raw_dsn)
     is_sqlite = dsn.startswith("sqlite")
     if _is_memory_sqlite(dsn):

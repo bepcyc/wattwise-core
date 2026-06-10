@@ -160,6 +160,10 @@ ignore = ["PLR0913", "PLR2004"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "PLR2004", "PLR0915"]
+# The per-layer DB-role test builds DDL/DML from uuid-derived, test-owned identifiers (no
+# external input) to provision throwaway PostgreSQL roles for the ARCH-R24 write-path test;
+# S608 (string-built SQL) is a false positive on this fully-controlled provisioning SQL.
+"tests/integration/test_db_role_isolation.py" = ["S101", "S105", "S106", "PLR2004", "PLR0915", "S608"]
 "tools/lint/**" = ["S101"]
 # The seam-contract base-classes are a shipped TEST deliverable (GOLD-R5 §6.3a):
 # they are assertion-based pytest contracts that happen to live under src/.

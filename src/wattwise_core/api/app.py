@@ -46,7 +46,7 @@ from wattwise_core.api.auth import (
     issue_access_token,
     require_scopes,
 )
-from wattwise_core.api.deps import AppSettings, get_db, get_rate_limiter
+from wattwise_core.api.deps import AppSettings, get_db, get_master_data_db, get_rate_limiter
 from wattwise_core.api.errors import ProblemError, install_error_handlers
 from wattwise_core.api.middleware import EndpointMetricsMiddleware, JSONBodySizeLimitMiddleware
 from wattwise_core.api.openapi import install_openapi
@@ -120,6 +120,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
     app.state.database = Database(resolved)
+    # The MASTER-DATA-WRITE role's Database (ARCH-R3b / DEPLOY-R4): when the deployment
+    # configures the distinct role DSN, the API's master-data endpoints (profile/signature,
+    # zones/language/default-load-model user-settings, goals) open their sessions on it — a
+    # credential that can write ONLY the master-data tables (reciprocal denial). Unset, it IS
+    # the shared canonical Database (single-operator self-host: one credential, one pool —
+    # the structural split is an opt-in deploy choice, and a second pool on e.g. an in-memory
+    # SQLite dev DSN would otherwise see a different, empty database).
+    if resolved.database_master_data_dsn is not None:
+        app.state.master_data_database = Database(resolved, dsn=resolved.master_data_write_dsn())
+    else:
+        app.state.master_data_database = app.state.database
     app.state.rate_limiter = _build_rate_limiter(resolved)
     # Resolve + VALIDATE the OSS default entitlement plan at boot (ENT-4 / AGT-ENT-R4): an
     # invalid/missing plan fails the boot CLOSED here (RUN-R4.1) — the engine never starts
@@ -160,7 +171,8 @@ def _wire_router_seams(app: FastAPI) -> None:
     derived server-side from the verified principal (AUTH-R3), the analytics service is
     built per request from the shared DB session, and the agent rate limiter is the
     process limiter. The athlete-profile and user-settings routers bind the same
-    server-derived identity + ``read``/``write`` scope gates over the shared session, so
+    server-derived identity + ``read``/``write`` scope gates over the MASTER-DATA session
+    (the master-data-write role's Database — ARCH-R3b/DEPLOY-R4), so
     the owner can set their profile (sex/timezone/current sport), their FTP fitness
     signature (the threshold the power analytics ground on), and their preferences
     (zones/language/answer-length/default load model) behind the bearer + scope gates.
@@ -190,18 +202,24 @@ def _wire_router_seams(app: FastAPI) -> None:
     overrides[athlete_router.require_read_scope] = require_scopes(Scope.READ)
     overrides[athlete_router.require_write_scope] = require_scopes(Scope.WRITE)
     overrides[athlete_router.current_athlete_id] = _athlete_id_seam
-    overrides[athlete_router.current_session] = get_db
+    # The athlete-profile / user-settings / goals routers ARE the API's master-data mutation
+    # surface (ARCH-R3b: profile + fitness signature, zones/language/default-load-model,
+    # goals), so their sessions open on the MASTER-DATA-WRITE role's Database (DEPLOY-R4) —
+    # under a per-role deployment that credential can write ONLY the master-data tables and is
+    # read-only on the source-derived canonical tables it joins (e.g. the sport registry).
+    overrides[athlete_router.current_session] = get_master_data_db
     overrides[user_settings_router.require_read_scope] = require_scopes(Scope.READ)
     overrides[user_settings_router.require_write_scope] = require_scopes(Scope.WRITE)
     overrides[user_settings_router.current_athlete_id] = _athlete_id_seam
-    overrides[user_settings_router.current_session] = get_db
+    overrides[user_settings_router.current_session] = get_master_data_db
     # The Goals CRUD surface (/v1/goals, API-R35) binds the SAME server-derived identity + read/
-    # write scope gates over the shared session, the engine-keyed signed cursor (PAGE-R5), and the
-    # process limiter so the owner can author the training goals the agent plans toward (GBO-R38).
+    # write scope gates over the MASTER-DATA session (goals are athlete-authored master-data,
+    # ARCH-R3b), the engine-keyed signed cursor (PAGE-R5), and the process limiter so the owner
+    # can author the training goals the agent plans toward (GBO-R38).
     overrides[goals_router.require_read_scope] = require_scopes(Scope.READ)
     overrides[goals_router.require_write_scope] = require_scopes(Scope.WRITE)
     overrides[goals_router.current_athlete_id] = _athlete_id_seam
-    overrides[goals_router.current_session] = get_db
+    overrides[goals_router.current_session] = get_master_data_db
     overrides[goals_router.rate_limiter] = get_rate_limiter
     overrides[goals_router.cursor_signing_key] = _cursor_signing_key_seam
     # The agent gate is the CHECK half of the entitlement seam: it runs the bearer+agent-scope
