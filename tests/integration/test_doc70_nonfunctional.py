@@ -148,9 +148,11 @@ def test_service_auth_header_verified_constant_time_and_never_replaces_bearer(
     """The X-Service-Auth factor is verified when presented and never widens identity (SEC-R4).
 
     A WRONG service secret is rejected 401 even alongside a valid athlete bearer; the
-    RIGHT secret passes the middleware but the request still authenticates via the
+    RIGHT secret passes the factor check but the request still authenticates via the
     bearer token (the factor is additional, never a replacement: with the service
-    header alone and no bearer, a protected route still 401s).
+    header alone and no bearer, a protected route still 401s). The probe target is an
+    AUTHENTICATED route (``/v1/users/me``) — the factor rides the bearer gate
+    (AUTH-R8a), so an unauthenticated public route never evaluates it.
     """
     client = _client(tmp_path, security__service_auth_secret="service-" + "s3cr3t-" * 8)
     try:
@@ -158,9 +160,9 @@ def test_service_auth_header_verified_constant_time_and_never_replaces_bearer(
         bearer = {"Authorization": f"Bearer {access}"}
         good = {"X-Service-Auth": "service-" + "s3cr3t-" * 8}
         bad = {"X-Service-Auth": "wrong-secret"}
-        ok = client.get(f"{API_PREFIX}/system/status", headers={**bearer, **good})
+        ok = client.get(f"{API_PREFIX}/users/me", headers={**bearer, **good})
         assert ok.status_code == 200, ok.text
-        rejected = client.get(f"{API_PREFIX}/system/status", headers={**bearer, **bad})
+        rejected = client.get(f"{API_PREFIX}/users/me", headers={**bearer, **bad})
         assert rejected.status_code == 401, rejected.text
         # The service factor alone never authenticates an athlete (additional, not instead).
         protected = client.get(f"{API_PREFIX}/users/me", headers=good)
@@ -179,7 +181,7 @@ def test_service_auth_header_with_no_provisioned_secret_is_rejected(tmp_path: Pa
     try:
         access = _sign_in(client)["access_token"]
         resp = client.get(
-            f"{API_PREFIX}/system/status",
+            f"{API_PREFIX}/users/me",
             headers={"Authorization": f"Bearer {access}", "X-Service-Auth": "anything"},
         )
         assert resp.status_code == 401, resp.text
