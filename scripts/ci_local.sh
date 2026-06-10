@@ -20,6 +20,10 @@ command -v gitleaks >/dev/null 2>&1 && command -v trivy >/dev/null 2>&1 \
   || bash scripts/ci_tools.sh gitleaks trivy
 
 PG_PORT="${WW_CI_PG_PORT:-55461}"
+# CI's runner binds the app on 8000; a dev box may have 8000 occupied (e.g. a docker-published
+# service) — that is an environment artifact, not a finding, so the local probe picks a free
+# port by default while staying overridable for exact-CI replication (WW_CI_APP_PORT=8000).
+APP_PORT="${WW_CI_APP_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 MD_PORT="${WW_CI_MD_PORT:-53361}"
 PG_NAME="wwci-pg-$$"
 MD_NAME="wwci-mariadb-$$"
@@ -83,10 +87,10 @@ log "Bootstrap acceptance (/healthz serves) — mirrors the workflow step"
 rm -f ./.wattwise-ci.sqlite
 boot_env env WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-ci.sqlite" just migrate
 boot_env env WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-ci.sqlite" \
-  uv run uvicorn --factory wattwise_core.api.app:create_app --host 127.0.0.1 --port 8000 &
+  uv run uvicorn --factory wattwise_core.api.app:create_app --host 127.0.0.1 --port "$APP_PORT" &
 UV_PID=$!
 ok=""
-for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1 && ok=1 && break; sleep 1; done
+for i in $(seq 1 30); do curl -fsS http://127.0.0.1:${APP_PORT}/healthz >/dev/null 2>&1 && ok=1 && break; sleep 1; done
 kill "$UV_PID" >/dev/null 2>&1 || true; UV_PID=""
 rm -f ./.wattwise-ci.sqlite
 [ -n "$ok" ] || fail "bootstrap acceptance: /healthz never served"
