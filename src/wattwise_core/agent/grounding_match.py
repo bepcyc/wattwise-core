@@ -5,7 +5,10 @@ numeric side of claim verification: the config-carried :class:`NumericTolerance`
 fail-closed canonical-value read (:func:`_canonical_metric` / :func:`_as_float`), the
 tolerance comparison (:func:`_within_tolerance`), the grounded-number citation
 (:func:`_metric_citation`, GROUND-R5), and the canonical-display rewrite of the model's numeric
-token (:func:`_apply_number_scrub` / :func:`_render_value`, GROUND-R7 verbatim). All functions
+token (:func:`_apply_number_scrub` / :func:`_render_value`, GROUND-R7 verbatim). The rewrite is
+anchored to the CLAIM'S OWN span and never matches inside a longer number, and a verified span is
+marked with a sentinel (:func:`_sentinel`) so numeric coverage is POSITIONAL — a stray token that
+merely EQUALS a published value is never treated as covered. All functions
 are pure/synchronous and deterministic (GRAPH-R4); ``grounding`` imports and re-exports
 ``NumericTolerance`` so every historical
 ``from wattwise_core.agent.grounding import NumericTolerance`` path stays stable.
@@ -121,30 +124,88 @@ def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
     }
 
 
-def _apply_number_scrub(text: str, claim: Claim, replacement: str) -> tuple[str, str | None]:
-    """Rewrite the model's numeric token in ``text`` to the canonical value, or remove it (R7).
+# Sentinel characters (Unicode private-use area, U+E000..U+F8FF) temporarily stand in for the
+# canonical display values the grounder has already verified. The numeric-coverage sweep then sees
+# ONLY unverified digits — coverage is positional, never by string equality, so a stray token that
+# merely EQUALS a published value cannot ride a grounded claim's coverage (fail-closed, H4). The
+# caller strips this range from the raw draft first so a model can never pre-plant a sentinel.
+_SENTINEL_BASE = 0xE000
+_SENTINEL_RANGE_RE = re.compile("[\\ue000-\\uf8ff]")
 
-    For a NUMBER claim the published figure is ALWAYS the canonical value (``replacement`` =
-    its display string, or ``""`` to remove an ungrounded/unavailable number). This finds the
-    model's own numeric token — the first number in ``claim.text`` (e.g. ``"63.50"`` from
-    ``"your fitness is at 63.50"``) — and replaces THAT token in the draft, so the rewrite is
-    robust to the model not reproducing ``claim.text`` verbatim (case / wording drift). Returns the
-    edited text and the canonical display string actually published (so the numeric-coverage sweep
-    treats it as covered), or ``None`` when nothing was published (removed / token not found).
+
+def _sentinel(index: int) -> str:
+    """The placeholder character standing in for the ``index``-th published canonical value."""
+    return chr(_SENTINEL_BASE + index)
+
+
+def _strip_sentinels(text: str) -> str:
+    """Remove every private-use sentinel character from a raw draft (anti-spoofing guard)."""
+    return _SENTINEL_RANGE_RE.sub("", text)
+
+
+def _bounded_number_search(text: str, token: str, start: int = 0) -> re.Match[str] | None:
+    """Find ``token`` as a STANDALONE number from ``start`` — never inside a longer number.
+
+    The lookarounds refuse a match whose digits continue on either side (``102`` inside ``1029``
+    or ``100`` inside ``100.5``) and a match that is really the magnitude of a signed/decimal
+    neighbour (``4`` inside ``-4``). An unmatched token simply yields no rewrite — the numeric
+    sweep then removes the figure (fail-closed), never a corrupted neighbouring number.
+    """
+    pattern = re.compile(rf"(?<![\d.\-]){re.escape(token)}(?!\.?\d)")
+    return pattern.search(text, start)
+
+
+def _locate_number_token(text: str, claim: Claim, display: str | None) -> tuple[int, int] | None:
+    """Locate the claim's OWN numeric token in ``text``, anchored to the claim's span (R7).
+
+    Resolution order, strictest first: (1) find ``claim.text`` in the draft and match the token
+    only WITHIN that span — two claims sharing a token (two "100"s) each resolve to their own
+    occurrence; (2) a bounded search for the token anywhere (the model did not reproduce
+    ``claim.text`` verbatim — case / wording drift); (3) a bounded search for the canonical
+    ``display`` string (the model restated the value at a different precision). ``None`` when
+    nothing matches — the caller publishes nothing and the numeric sweep scrubs the figure.
     """
     token_match = NUMBER_RE.search(claim.text)
     token = token_match.group(0) if token_match is not None else claim.text
-    idx = text.find(token)
-    if idx == -1:
-        # The model's token is not literally in the draft; nothing to publish/remove here. The
-        # numeric sweep is the backstop for any uncovered number that DID reach the draft.
-        return text, replacement or None
-    edited = text[:idx] + replacement + text[idx + len(token) :]
+    span_idx = text.find(claim.text)
+    if span_idx != -1:
+        bounded = _bounded_number_search(text, token, span_idx)
+        if bounded is not None and bounded.start() < span_idx + len(claim.text):
+            return bounded.span()
+    bounded = _bounded_number_search(text, token)
+    if bounded is not None:
+        return bounded.span()
+    if display is not None and display != token:
+        bounded = _bounded_number_search(text, display)
+        if bounded is not None:
+            return bounded.span()
+    return None
+
+
+def _apply_number_scrub(
+    text: str, claim: Claim, replacement: str, marker: str
+) -> tuple[str, str | None]:
+    """Rewrite the claim's numeric token in ``text`` to the canonical value, or remove it (R7).
+
+    For a NUMBER claim the published figure is ALWAYS the canonical value (``replacement`` =
+    its display string, or ``""`` to remove an ungrounded/unavailable number). The token is
+    located via :func:`_locate_number_token` — anchored to the claim's own span, never inside a
+    longer number — and a published value is written as the caller's ``marker`` sentinel (the
+    caller restores the display string after the numeric sweep, so coverage stays positional).
+    Returns the edited text and the canonical display string actually published, or ``None``
+    when nothing was published: removed, or token not found — in which case NOTHING is claimed
+    as covered and the numeric sweep removes any stray figure (fail-closed).
+    """
+    span = _locate_number_token(text, claim, replacement or None)
+    if span is None:
+        return text, None
+    start, end = span
     if replacement == "":
+        edited = text[:start] + text[end:]
         edited = re.sub(r"\s{2,}", " ", edited)
         edited = re.sub(r"\s+([.,;:!?])", r"\1", edited).strip()
         return edited, None
-    return edited, replacement
+    return text[:start] + marker + text[end:], replacement
 
 
 def _render_value(value: float, decimals: int) -> str:

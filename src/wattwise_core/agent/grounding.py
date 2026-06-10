@@ -53,6 +53,8 @@ from wattwise_core.agent.grounding_match import (
     _canonical_metric,
     _metric_citation,
     _render_value,
+    _sentinel,
+    _strip_sentinels,
     _within_tolerance,
 )
 from wattwise_core.agent.grounding_sweep import (
@@ -115,8 +117,15 @@ def ground(
     allow_list = normalize_urls(allow_urls)
     name_library = evidence if isinstance(evidence, NameLibrary) else None
     grounded: list[GroundedClaim] = []
-    text = draft_text
-    grounded_numbers: set[str] = set()
+    # Sentinel-range characters are stripped from the raw draft first so a model can never
+    # pre-plant a placeholder and smuggle an unverified figure past the positional sweep.
+    text = _strip_sentinels(draft_text)
+    # Each published canonical value is written into the draft as a unique sentinel character
+    # and restored AFTER the numeric sweep, so coverage is POSITIONAL (GROUND-R7): only the
+    # exact span the grounder rewrote is covered, never every token that happens to equal a
+    # published value — two claims sharing a token each rewrite their OWN occurrence, and a
+    # stray duplicate of a grounded number is still an uncovered span the sweep removes.
+    sentinels: dict[str, str] = {}
     for claim in claims:
         outcome = _verify_claim(claim, evidence, name_library, allow_list, tolerance)
         grounded.append(outcome.grounded)
@@ -124,25 +133,29 @@ def ground(
             continue
         if claim.kind is ClaimKind.NUMBER:
             # A NUMBER's published figure is rewritten to the CANONICAL value at display precision
-            # (verbatim for grounded, corrected for contradicted, removed for ungrounded). Rewrite
-            # the model's NUMERIC TOKEN within the draft directly, not the whole claim.text span, so
-            # display rewriting is robust to the model not reproducing claim.text verbatim (case /
-            # wording drift). The actual canonical display string is recorded so the numeric sweep
-            # below does NOT scrub the very value the grounder verified (GROUND-R7).
-            text, published = _apply_number_scrub(text, claim, outcome.scrub_text)
+            # (verbatim for grounded, corrected for contradicted, removed for ungrounded). The
+            # rewrite is anchored to the claim's own span (falling back to a number-bounded token
+            # search for wording drift); an unlocatable token publishes NOTHING, leaving any stray
+            # figure to the sweep below (fail-closed, GROUND-R7).
+            marker = _sentinel(len(sentinels))
+            text, published = _apply_number_scrub(text, claim, outcome.scrub_text, marker)
             if published is not None:
-                grounded_numbers.add(published)
+                sentinels[marker] = published
         else:
             text = _scrub_span(text, claim.text, outcome.scrub_text)
     decision = _decide(grounded)
     text = scrub_unverified_urls(text, evidence, allow_list)
-    text, swept = scrub_uncovered_numbers(text, grounded_numbers)
+    # Verified values are hidden behind sentinels, so EVERY remaining numeric token is
+    # unverified by construction — the sweep needs no covered-value allowance at all.
+    text, swept = scrub_uncovered_numbers(text, frozenset())
     if swept:
         # The draft carried a number the claim extractor never surfaced and the deterministic
         # sweep had to remove (GROUND-R3, mirroring the URL sweep). An unverified number reaching
         # athlete-facing text is a grounding failure even if every EXTRACTED claim grounded, so the
         # run must NOT proceed: re-draft if anything grounded survives, else abstain (fail-closed).
         decision = _downgrade_for_sweep(decision, grounded)
+    for marker, display in sentinels.items():
+        text = text.replace(marker, display)
     return GroundingResult(decision=decision, claims=tuple(grounded), scrubbed_text=text)
 
 

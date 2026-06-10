@@ -8,10 +8,13 @@ URL or a fabricated number the extractor missed must still never reach athlete-f
 
 * :func:`scrub_unverified_urls` — remove every URL not first-party allow-listed / accepted by the
   evidence (GROUND-R4: invented URLs scrubbed unconditionally, even unextracted ones).
-* :func:`scrub_uncovered_numbers` — remove every number-like span not covered by a GROUNDED claim's
-  published canonical value or a structurally safe NON-metric token (a date, a "Day/Week/Zone N"
-  ordinal, an "NxM" interval, or a duration/percentage with an attached unit). Anything else — a
-  bare or metric-attached figure the grounder did not verify — is removed (fail-closed, H4).
+* :func:`scrub_uncovered_numbers` — remove every number-like span that is neither in the caller's
+  explicit ``grounded_numbers`` allowance nor a structurally safe NON-metric token (a date, a
+  "Day/Week/Zone N" ordinal, an "NxM" interval, or a duration/percentage with an attached unit).
+  Anything else — a bare or metric-attached figure the grounder did not verify — is removed
+  (fail-closed, H4). The grounder itself passes an EMPTY allowance: its verified values are hidden
+  behind positional sentinels (see ``grounding_match``), so string equality with a published value
+  never covers a stray, unverified token.
 
 Everything here is a pure, synchronous function of its text inputs (GRAPH-R4): it calls no model
 and no service, so the same inputs always yield the same result.

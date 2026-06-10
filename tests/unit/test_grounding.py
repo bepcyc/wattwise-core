@@ -153,6 +153,67 @@ def test_unextracted_number_is_swept_and_does_not_proceed() -> None:
     assert result.decision is not GroundDecision.PROCEED, "an uncovered number must block proceed"
 
 
+def test_shared_token_claims_each_rewrite_their_own_span() -> None:
+    """Two claims sharing a numeric token each rewrite their OWN occurrence (GROUND-R7).
+
+    Canonical ctl=100, tss=98; the draft says "100" for both. The OLD rewrite anchored on the
+    FIRST substring occurrence of the token in the whole draft, so the TSS correction landed on
+    the CTL's span — publishing "CTL is 98 and TSS was 100" (both wrong, swapped) under a
+    ``proceed`` decision. Span-anchored rewriting must publish each claim's canonical value in
+    its own place.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 100.0, "tss": 98.0})
+    draft = "Your CTL is 100 and your weekly TSS was 100."
+    claims = [_number("CTL is 100", "ctl", 100.0), _number("TSS was 100", "tss", 100.0)]
+    result = ground(draft, claims, evidence, [])
+    assert result.scrubbed_text == "Your CTL is 100 and your weekly TSS was 98."
+    assert result.decision is GroundDecision.PROCEED
+    assert all(c.verdict is GroundVerdict.GROUNDED for c in result.claims)
+
+
+def test_contradicted_shared_token_corrects_its_own_span_only() -> None:
+    """A contradicted claim sharing a token with a grounded one corrects ITS span (GROUND-R9).
+
+    Canonical ctl=100, atl=80; the draft claims "100" for both. The OLD rewrite corrupted the
+    grounded CTL span to "80" and left the CONTRADICTED model figure "100" in the ATL span —
+    publishing the one value GROUND-R9 forbids. The correction must land on the ATL occurrence.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 100.0, "atl": 80.0})
+    draft = "Your CTL is 100 and your ATL is 100."
+    claims = [_number("CTL is 100", "ctl", 100.0), _number("ATL is 100", "atl", 100.0)]
+    result = ground(draft, claims, evidence, [])
+    assert result.scrubbed_text == "Your CTL is 100 and your ATL is 80."
+    assert result.decision is GroundDecision.REGENERATE  # contradicted never proceeds
+
+
+def test_token_never_rewrites_inside_a_longer_number() -> None:
+    """A claim token is matched as a standalone number, never inside a longer one (GROUND-R7).
+
+    The claim's "102" must not anchor inside the unrelated "1029": the claim rewrites its own
+    span, and the uncovered "1029" is swept as an unverified figure (H4) — blocking proceed.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 102.0})
+    draft = "Over 1029 TSS this block, your CTL is 102."
+    result = ground(draft, [_number("CTL is 102", "ctl", 102.0)], evidence, [])
+    assert "1029" not in result.scrubbed_text
+    assert "your CTL is 102" in result.scrubbed_text
+    assert result.decision is not GroundDecision.PROCEED
+
+
+def test_repeated_grounded_number_is_not_string_covered() -> None:
+    """A stray duplicate of a grounded VALUE is still an uncovered span (positional coverage).
+
+    The string-set coverage let ANY token equal to a published value ship unverified ("TSS 100"
+    riding the grounded CTL's "100"). Coverage is positional now: only the span the grounder
+    rewrote is covered, the duplicate is swept, and the run re-drafts (fail-closed, H4).
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 100.0})
+    draft = "Your CTL is 100. Yes - 100 TSS planned tomorrow."
+    result = ground(draft, [_number("CTL is 100", "ctl", 100.0)], evidence, [])
+    assert result.scrubbed_text.count("100") == 1
+    assert result.decision is not GroundDecision.PROCEED
+
+
 def test_numeric_sweep_keeps_dates_units_and_structural_tokens() -> None:
     """H4: the numeric sweep keeps safe NON-metric tokens (dates, units, ordinals), only metrics go.
 
