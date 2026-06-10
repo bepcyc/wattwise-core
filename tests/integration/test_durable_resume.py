@@ -31,7 +31,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import WRITES_IDX_MAP, empty_checkpoint
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -49,6 +49,7 @@ from wattwise_core.agent.state_store import (
     AgentThread,
     AgentWrite,
 )
+from wattwise_core.persistence.upsert import ensure_row
 
 if TYPE_CHECKING:
     from _pytest.mark.structures import ParameterSet
@@ -591,12 +592,6 @@ async def test_ensure_row_isolation_does_not_stick_to_the_pooled_connection() ->
     maria = os.environ.get("WATTWISE_MARIADB_DSN")
     if not maria:
         pytest.skip("no MariaDB DSN (container leg only)")
-    from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    from wattwise_core.agent.state_store import AgentThread
-    from wattwise_core.persistence.upsert import ensure_row
-
     engine = create_async_engine(maria, pool_size=1, max_overflow=0)
     try:
         async with engine.begin() as conn:
@@ -614,9 +609,7 @@ async def test_ensure_row_isolation_does_not_stick_to_the_pooled_connection() ->
             conflict_keys=["thread_id"],
         )
         async with factory() as probe:
-            level = (
-                await probe.execute(text("SELECT @@transaction_isolation"))
-            ).scalar_one()
+            level = (await probe.execute(text("SELECT @@transaction_isolation"))).scalar_one()
         assert str(level).upper().replace("_", "-") == "REPEATABLE-READ", (
             f"isolation leaked across pool check-in: {level!r}"
         )
