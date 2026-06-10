@@ -421,6 +421,7 @@ class Settings(BaseSettings):
     encryption_root_key: SecretStr | None = None
     token_signing_key: SecretStr | None = None
     llm_api_key: SecretStr | None = None
+
     def canonical_write_dsn(self) -> str | None:
         """The canonical-WRITE DSN (Ingestion/Sync role, ARCH-R3); ``None`` if unset."""
         return None if self.database_dsn is None else self.database_dsn.get_secret_value()
