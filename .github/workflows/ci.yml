@@ -42,8 +42,8 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -54,8 +54,8 @@ jobs:
     name: Type check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -65,9 +65,9 @@ jobs:
     name: Conventional commits
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with: { fetch-depth: 0 }  # need the full PR commit range
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -77,8 +77,8 @@ jobs:
     name: Pre-commit config validity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -88,8 +88,8 @@ jobs:
     name: Fast tiers (unit+property+golden+contract+fuzz+logging)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -104,8 +104,8 @@ jobs:
     name: Coverage gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -118,8 +118,8 @@ jobs:
     name: Agent eval gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -132,8 +132,8 @@ jobs:
     name: Injection gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -143,9 +143,9 @@ jobs:
     name: Secret + dependency scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with: { fetch-depth: 0 }   # secret scan over diff + history delta
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just gitleaks trivy
       - run: just install
@@ -155,8 +155,8 @@ jobs:
     name: Forge portability
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -182,8 +182,8 @@ jobs:
     env:
       WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@localhost:55432/wattwise
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -229,8 +229,8 @@ jobs:
       WATTWISE_PG_DSN: postgresql+asyncpg://wattwise:wattwise@localhost:55432/wattwise
       WATTWISE_MARIADB_DSN: mysql+aiomysql://wattwise:wattwise@localhost:53306/wattwise
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -276,8 +276,8 @@ jobs:
     env:
       WATTWISE_DATABASE_DSN: postgresql+asyncpg://wattwise:wattwise@localhost:55432/wattwise
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -297,8 +297,8 @@ jobs:
     needs: [lint, type-check, fast-tests]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
@@ -312,8 +312,8 @@ jobs:
     needs: [lint, type-check, fast-tests]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
@@ -357,9 +357,9 @@ jobs:
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8
         with: { python-version: "3.13" }
       - uses: docker/login-action@v3            # GHCR push auth (CI-R12)
         with:
