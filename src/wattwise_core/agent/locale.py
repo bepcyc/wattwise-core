@@ -21,12 +21,17 @@ This module depends only on the observability layer (no agent sibling imports, A
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from wattwise_core.observability import metrics as obs_metrics
 from wattwise_core.observability.logging import get_logger
+
+#: Strict IETF BCP-47-shaped tag gate for prompt interpolation (INJECT-R1): primary
+#: subtag + optional alphanumeric subtags only — nothing else reaches the directive.
+_IETF_TAG_RE = re.compile(r"[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*")
 
 _logger = get_logger(__name__)
 
@@ -182,10 +187,14 @@ class LocalePolicy:
             or lang in self.packs
         ):
             return None
+        # INJECT-R1/AGT-SEC: the requested tag is UNTRUSTED input headed for the system
+        # prompt — only a strictly-valid IETF language tag is ever interpolated; anything
+        # else (embedded newlines, prose, control text) collapses to the safe primary
+        # subtag, so no caller-controlled instruction line can enter the directive.
+        full_tag = (requested or "").strip()
+        safe_locale = full_tag if _IETF_TAG_RE.fullmatch(full_tag) else lang
         try:
-            return self.passthrough_directive.format(
-                language_tag=lang, locale=(requested or lang).strip()
-            )
+            return self.passthrough_directive.format(language_tag=lang, locale=safe_locale)
         except (KeyError, IndexError, ValueError):
             return None
 
@@ -213,6 +222,13 @@ class LocalePolicy:
         pack carries one (the no-bundle seam) — never an empty or mixed-language body. The
         EMPTY policy (no packs) keys the floor on the REQUESTED language directly, preserving
         the engine's historical localized floor for an isolated caller.
+
+        PASS-THROUGH languages (no pack) deliberately receive the DEFAULT language's copy: the
+        abstain path is deterministic and model-free by design (GROUND-R6 — a failed run may
+        not call the model again), so an any-language limitation cannot be generated here. The
+        abstaining deliverable body is the limitation alone (no localized prose beside it), so
+        no single deliverable mixes languages; the fallback is RECORDED (LANG-R4) like every
+        other one.
         """
         if not self.packs:
             requested_lang = _primary_subtag(requested)
