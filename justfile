@@ -131,6 +131,11 @@ test-integration:
 test-e2e:
     {{uv}} pytest -m e2e
 
+# Live-LLM tier (env-gated; never part of the offline gate, TIER-R1). Requires
+# WATTWISE_LLM_API_KEY (and optionally WATTWISE_AGENT__MODEL); tests skip without it.
+test-llm:
+    {{uv}} pytest -m llm
+
 # =====================================================================
 # 3. Coverage gate (CI-R1 item 5)
 # =====================================================================

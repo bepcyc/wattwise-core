@@ -149,11 +149,13 @@ async def _canonical_matches(db: Database, metric: str | None, value: float | No
     )
     coach = CoachBundle.from_settings(settings)
     async with db.session() as session:
+        # No explicit reference_date: anchor at utcnow().date() exactly like the engine's own
+        # evidence does, so the verbatim check resolves the SAME as-of day the run grounded on
+        # (a hardcoded date drifts as wall-clock advances and falsely rejects correct citations).
         evidence = CanonicalEvidence(
             AnalyticsService(session),
             str(OWNER_ATHLETE_ID),
             equivalence=coach.equivalence,
-            reference_date=_dt.date(2026, 6, 9),
         )
         canonical = await evidence.metric_value(metric, None)
     if canonical is None:
@@ -205,4 +207,40 @@ async def test_live_agent_answers_grounded_and_completed(live_db: Database) -> N
         "live agent did not reach a grounded COMPLETED answer with citations in "
         f"{_MAX_ATTEMPTS} attempts (last status={last_status}); the headline grounding path "
         "regressed — natural-term claims are not grounding against canonical analytics."
+    )
+
+
+async def test_live_weekly_digest_grounded_and_completed(live_db: Database) -> None:
+    """The live weekly digest (== weekly load review, COACH-R1 #1) completes grounded.
+
+    Drives the REAL engine's ``digest()`` path (a ``scheduled_digest`` run) for the seeded
+    training week and asserts within a bounded number of attempts: a COMPLETED status, a
+    non-empty digest body, and every surfaced citation re-stating the canonical analytic
+    verbatim (GROUND-R7 — no fabrication). Empty content with reasoning-only output is a
+    FAILURE (MODEL-R5a), never a pass.
+    """
+    settings = load_settings(
+        app__environment="development",
+        database_dsn=str(live_db.engine.url),
+        llm_api_key=os.environ["WATTWISE_LLM_API_KEY"],
+    )
+    engine = build_agent_engine(live_db, settings)
+    assert engine is not None, "live tier requires a configured model (WATTWISE_LLM_API_KEY)"
+
+    last_status: RunStatus | None = None
+    for _ in range(_MAX_ATTEMPTS):
+        digest = await engine.digest(athlete_id=str(OWNER_ATHLETE_ID), week_end="2026-06-08")
+        last_status = digest.status
+        if digest.status is not RunStatus.COMPLETED:
+            continue
+        assert digest.digest_text.strip(), "COMPLETED digest with empty body (MODEL-R5a)"
+        matches = [
+            await _canonical_matches(live_db, c.metric, c.value) for c in digest.citations
+        ]
+        assert all(matches), f"a digest citation did not match canonical: {digest.citations}"
+        return
+
+    pytest.fail(
+        "live weekly digest did not reach a COMPLETED grounded review in "
+        f"{_MAX_ATTEMPTS} attempts (last status={last_status})."
     )
