@@ -26,13 +26,18 @@ from typing import Any, ClassVar
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import AgentAnswer, Digest, Readiness
 from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, diagnose_coverage
+from wattwise_core.agent.engine_extras import _read_stored_response_length
 from wattwise_core.agent.engine_memory import (
     delete_memory,
     erase_memory,
     get_memory,
     list_memory,
 )
-from wattwise_core.agent.memory import RecalledItem
+from wattwise_core.agent.memory import (
+    RESPONSE_LENGTH_PREF_PREFIX,
+    OssMemoryStore,
+    RecalledItem,
+)
 from wattwise_core.agent.state_db import (
     AgentStateDatabase,
     build_agent_state_database,
@@ -220,6 +225,34 @@ class UnconfiguredAgentEngine:
         state_db = await self._agent_state_db()
         async with state_db.session() as session:
             return await erase_memory(session, athlete_id=athlete_id)
+
+    async def get_response_length_preference(self, *, athlete_id: str) -> str:
+        """Read the persisted verbosity default, else ``standard`` — NON-LLM (VOICE-R8 §382).
+
+        The response-length preference is an agent-state item (MEM-R1, §382 — NOT canonical master-
+        data), so its read/write never requires a model: the ``GET /v1/user-settings/response-
+        length`` surface works on a no-LLM deployment exactly as on the live engine (the store-split
+        single source the run-path default reads). Falls back closed to ``standard`` when unset.
+        """
+        state_db = await self._agent_state_db()
+        return await _read_stored_response_length(state_db, athlete_id=athlete_id)
+
+    async def set_response_length_preference(self, *, athlete_id: str, value: str) -> None:
+        """Persist the verbosity default into the AGENT-STATE store — NON-LLM (VOICE-R8 §382/§8.10).
+
+        Upserts the single ``preference``-kind item the run path reads as its default (MEM-R1,
+        §382), so the ``PUT /v1/user-settings/response-length`` write works with no model and the
+        value the athlete sets is exactly the run-path default. One preference row, never
+        duplicated; ``value`` is the caller-validated closed token (short/standard/detailed).
+        """
+        state_db = await self._agent_state_db()
+        async with state_db.session() as session:
+            store = OssMemoryStore(session)
+            await store.upsert_preference(
+                athlete_id=athlete_id,
+                marker=RESPONSE_LENGTH_PREF_PREFIX,
+                content=f"{RESPONSE_LENGTH_PREF_PREFIX}{value}",
+            )
 
 
 __all__ = ["UnconfiguredAgentEngine"]

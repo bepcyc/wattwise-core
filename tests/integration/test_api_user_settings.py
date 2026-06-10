@@ -15,7 +15,12 @@ session) against a seeded canonical store. Asserts that:
 * scope is enforced — a ``write`` ``PUT`` with only the ``read`` scope is ``403`` — and no
   end-user settings response carries an LLM model/tier/catalog control (API-R38).
 
-Runs on in-memory SQLite (the portable substrate, GBO-R8b).
+The canonical settings (zones / language / default-load-model) run on in-memory SQLite (the
+portable substrate, GBO-R8b). The **response-length** preference is — per doc 50 VOICE-R8 §382 — an
+agent-interaction preference in the dedicated AGENT-STATE store (NOT a canonical §3 master-data
+entity), so its GET/PUT reach a real :class:`UnconfiguredAgentEngine` over a FILE-backed agent-state
+SQLite engine with a **real connection pool** (NEVER ``:memory:``/``StaticPool``, which a single
+connection can't model and would false-green the store round-trip, skill §7).
 """
 
 from __future__ import annotations
@@ -23,13 +28,17 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from wattwise_core.agent.state_db import AgentStateDatabase, build_agent_state_database
+from wattwise_core.agent.unconfigured import UnconfiguredAgentEngine
 from wattwise_core.api.auth import Principal, Scope, authenticate
 from wattwise_core.api.errors import ProblemError, install_error_handlers
 from wattwise_core.api.ratelimit import RateLimiter
@@ -37,6 +46,14 @@ from wattwise_core.api.routers import user_settings as settings_router
 from wattwise_core.persistence.models import Athlete, Base
 
 pytestmark = pytest.mark.integration
+
+
+def _enable_sqlite_wal(dbapi_conn: object, _record: object) -> None:
+    """WAL + long busy_timeout per connection so the real agent-state pool serialises writers."""
+    cur = dbapi_conn.cursor()  # type: ignore[attr-defined]
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA busy_timeout=30000")
+    cur.close()
 
 #: Model/tier/catalog tokens that MUST NOT appear on any end-user settings response (API-R38).
 _FORBIDDEN_MODEL_FIELDS = (
@@ -46,12 +63,14 @@ _FORBIDDEN_MODEL_FIELDS = (
 
 @dataclass
 class Env:
-    """The wired app + its client/session for one seeded scenario."""
+    """The wired app + its client/session/engine for one seeded scenario."""
 
     client: AsyncClient
     app: FastAPI
     session: AsyncSession
     athlete_id: str
+    engine: UnconfiguredAgentEngine
+    state_db: AgentStateDatabase
 
 
 def _insufficient_scope() -> None:
@@ -60,28 +79,45 @@ def _insufficient_scope() -> None:
 
 
 @pytest_asyncio.fixture
-async def seeded() -> AsyncIterator[Env]:
-    """An app wired to a seeded canonical store with exactly one owner (no preferences set)."""
+async def seeded(tmp_path: Path) -> AsyncIterator[Env]:
+    """An app over a seeded canonical store + a REAL-pool agent-state store, one owner, no prefs.
+
+    The response-length preference lives in the AGENT-STATE store (VOICE-R8 §382), so it is backed
+    by a FILE-sqlite agent-state DB on a real pool (WAL), reached through a real
+    :class:`UnconfiguredAgentEngine` (no LLM needed — the preference seam is non-LLM). The other
+    settings stay on the canonical in-memory store.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    state_db = build_agent_state_database(dsn=f"sqlite+aiosqlite:///{tmp_path}/agent.sqlite")
+    event.listen(state_db.engine.sync_engine, "connect", _enable_sqlite_wal)
+    await state_db.create_all()
+    agent_engine = UnconfiguredAgentEngine(state_db=state_db)
     async with factory() as session:
         athlete = Athlete(sex="male", reference_timezone="UTC")
         session.add(athlete)
         await session.flush()
         athlete_id = str(athlete.athlete_id)
         await session.commit()
-        app = _build_app(session, athlete_id, write_allowed=True)
+        app = _build_app(session, athlete_id, agent_engine, write_allowed=True)
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://t"
         ) as client:
-            yield Env(client, app, session, athlete_id)
+            yield Env(client, app, session, athlete_id, agent_engine, state_db)
+    await state_db.dispose()
     await engine.dispose()
 
 
-def _build_app(session: AsyncSession, athlete_id: str, *, write_allowed: bool) -> FastAPI:
-    """Mount the user-settings router and override the identity/scope/session seams."""
+def _build_app(
+    session: AsyncSession,
+    athlete_id: str,
+    agent_engine: UnconfiguredAgentEngine,
+    *,
+    write_allowed: bool,
+) -> FastAPI:
+    """Mount the user-settings router and override the identity/scope/session/engine seams."""
     app = FastAPI()
     app.state.rate_limiter = RateLimiter()  # the per-athlete read/write buckets (LIMIT-R1)
     install_error_handlers(app)
@@ -97,6 +133,9 @@ def _build_app(session: AsyncSession, athlete_id: str, *, write_allowed: bool) -
             settings_router.require_write_scope: write_seam,
             settings_router.current_athlete_id: lambda: athlete_id,
             settings_router.current_session: lambda: session,
+            # The response-length preference is agent-state-backed (VOICE-R8 §382), reached through
+            # the shared engine seam — NOT ``current_session`` (the canonical store).
+            settings_router.response_length_store: lambda: agent_engine,
         }
     )
     return app
@@ -113,7 +152,12 @@ async def test_response_length_defaults_to_standard(seeded: Env) -> None:
 
 
 async def test_set_and_get_response_length(seeded: Env) -> None:
-    """PUT response-length persists; a fresh GET reflects the stored value (API-R11f)."""
+    """PUT response-length persists; a fresh GET reflects the stored value (API-R11f).
+
+    The persisted value must land in the AGENT-STATE store (VOICE-R8 §382), so the round-trip is
+    proven END TO END: after the PUT, reading the SAME agent-state preference directly through the
+    engine resolves the stored value — the GET endpoint and the engine see ONE source (store-split).
+    """
     put = await seeded.client.put(
         "/v1/user-settings/response-length", json={"response_length": "detailed"}
     )
@@ -121,6 +165,25 @@ async def test_set_and_get_response_length(seeded: Env) -> None:
     assert put.json()["response_length"] == "detailed"
     again = await seeded.client.get("/v1/user-settings/response-length")
     assert again.json()["response_length"] == "detailed"
+    # Mutation-proof: the value is in the AGENT-STATE store the run path reads — not just echoed.
+    persisted = await seeded.engine.get_response_length_preference(athlete_id=seeded.athlete_id)
+    assert persisted == "detailed", "PUT must persist to the agent-state preference (VOICE-R8 §382)"
+
+
+async def test_response_length_is_upserted_not_duplicated(seeded: Env) -> None:
+    """Re-PUT updates the ONE agent-state preference row, never duplicating (MEM-R1 single row)."""
+    for value in ("short", "detailed", "standard"):
+        put = await seeded.client.put(
+            "/v1/user-settings/response-length", json={"response_length": value}
+        )
+        assert put.status_code == 200
+    # Exactly ONE preference row survives, carrying the latest value.
+    rows = await seeded.engine.list_memory(athlete_id=seeded.athlete_id)
+    pref_rows = [r for r in rows if r.content.startswith("response_length=")]
+    assert len(pref_rows) == 1, "the preference is upserted to a single row, not accumulated"
+    assert pref_rows[0].content == "response_length=standard"
+    got = await seeded.client.get("/v1/user-settings/response-length")
+    assert got.json()["response_length"] == "standard"
 
 
 async def test_unsupported_response_length_is_422(seeded: Env) -> None:
@@ -234,7 +297,9 @@ async def test_default_load_model_null_clears(seeded: Env) -> None:
 
 async def test_writes_without_write_scope_are_403(seeded: Env) -> None:
     """Every settings PUT with only the read scope is 403 insufficient-scope (AUTH-R7/R11)."""
-    no_write = _build_app(seeded.session, seeded.athlete_id, write_allowed=False)
+    no_write = _build_app(
+        seeded.session, seeded.athlete_id, seeded.engine, write_allowed=False
+    )
     async with AsyncClient(transport=ASGITransport(app=no_write), base_url="http://t") as client:
         length = await client.put(
             "/v1/user-settings/response-length", json={"response_length": "short"}

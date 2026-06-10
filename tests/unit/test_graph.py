@@ -193,6 +193,36 @@ async def test_happy_path_completes() -> None:
     assert out["citations"] == [{"metric": "pmc"}]
 
 
+async def test_ground_node_writes_stable_id_observations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """COACH-R8: the production ``ground`` node writes stable-id observations (drill/reveal handle).
+
+    The grounder survives one grounded claim carrying a citation. The ``ground`` node MUST emit an
+    ``observations`` channel where the distinct observation carries a STABLE ``observation_id`` (the
+    expand/drill handle a later follow-up targets, COACH-R8) plus the grounded ``{metric,...}``
+    citation behind it. If the node writes no observations (the pre-fix gap), the observations list
+    is empty and drill/reveal-by-id is vacuous, failing this test. The id is DETERMINISTIC: a second
+    run with the SAME grounded claim yields the SAME id so a follow-up can target it across turns.
+    """
+    model, svc = _services(gaps=set(), decision=GroundDecision.PROCEED)
+    graph = build_graph(model, svc, InMemorySaver())
+
+    out = await graph.ainvoke(_input(), config=_config("obs"))
+
+    observations = out.get("observations") or []
+    assert observations, "the ground node MUST write at least one observation (COACH-R8)"
+    obs = observations[0]
+    assert obs.get("observation_id"), "every observation MUST carry a stable id (COACH-R8)"
+    assert obs.get("text"), "an observation MUST carry athlete-facing text to target"
+    # The grounded citation is reachable behind the observation (the reveal-numbers backing).
+    cited = [c for c in obs.get("citations", []) if c]
+    assert cited and cited[0].get("metric") == "pmc"
+
+    # DETERMINISTIC stable id: a fresh run with the same grounded claim re-derives the SAME id,
+    # so a follow-up turn can target the observation without re-stating the question (COACH-R8).
+    out2 = await graph.ainvoke(_input(), config=_config("obs-2"))
+    assert out2["observations"][0]["observation_id"] == obs["observation_id"]
+
+
 async def test_coverage_exhaustion_degrades() -> None:
     """Persistent gaps spend the reflection budget then DEGRADE (REFLECT-R4)."""
     model, svc = _services(gaps={"missing_ftp"}, decision=GroundDecision.PROCEED)
@@ -209,17 +239,25 @@ async def test_coverage_exhaustion_degrades() -> None:
 
 
 async def test_redraft_cycle_is_bounded() -> None:
-    """A grounder stuck on REGENERATE spends the redraft budget then settles (GRAPH-R3)."""
+    """A grounder stuck on REGENERATE spends BOTH bounds then settles, no loop (REFLECT-R4).
+
+    The redraft cycle spends ``redraft_count`` to ``MAX_REDRAFTS``; per REFLECT-R4 (spec §225/§451)
+    an exhausted REGENERATE then FALLS THROUGH to ``replan`` while reflection budget remains, so
+    ``reflection_count`` also spends to ``MAX_REFLECTIONS`` before the run degrades — never an
+    immediate abstain and never an unbounded loop. The two distinct monotonic counters bound the
+    total: compose runs the initial draft + one per redraft + one per re-plan cycle.
+    """
     model, svc = _services(gaps=set(), decision=GroundDecision.REGENERATE)
     graph = build_graph(model, svc, InMemorySaver())
 
     out = await graph.ainvoke(_input(), config=_config("redraft"))
 
-    # bounded: redraft happened exactly MAX_REDRAFTS times, no infinite loop.
+    # bounded: BOTH monotonic counters sit exactly at their budget, no infinite loop.
     assert out["redraft_count"] == MAX_REDRAFTS
-    # initial compose + one recompose per redraft.
-    assert model.compose_calls == MAX_REDRAFTS + 1
-    # budget exhausted with a non-proceed decision -> degraded, never an error.
+    assert out["reflection_count"] == MAX_REFLECTIONS
+    # initial compose + one per spent redraft + one per spent re-plan cycle (the fall-through).
+    assert model.compose_calls == MAX_REDRAFTS + 1 + MAX_REFLECTIONS
+    # both budgets exhausted with a non-proceed decision -> degraded, never an error.
     assert out["status"] is RunStatus.DEGRADED
 
 
@@ -230,6 +268,26 @@ async def test_replan_cycle_is_bounded() -> None:
 
     out = await graph.ainvoke(_input(), config=_config("replan"))
 
+    assert out["reflection_count"] == MAX_REFLECTIONS
+    assert out["status"] is RunStatus.DEGRADED
+
+
+async def test_exhausted_redraft_falls_through_to_replan_not_immediate_abstain() -> None:
+    """REFLECT-R4: an exhausted REGENERATE re-plans while reflection budget remains (§225/§451).
+
+    MUTATION-GUARD for the fall-through edge: a perpetual REGENERATE spends ``redraft_count`` to its
+    bound, and instead of routing straight to the gate (an immediate abstain — the pre-fix gap) it
+    FALLS THROUGH to a bounded ``replan`` so ``reflection_count`` ALSO reaches its bound. If the
+    fall-through is removed, ``reflection_count`` stays 0 and this assertion fails. The run still
+    terminates (both monotonic counters spent) and degrades — never an unbounded loop.
+    """
+    model, svc = _services(gaps=set(), decision=GroundDecision.REGENERATE)
+    graph = build_graph(model, svc, InMemorySaver())
+
+    out = await graph.ainvoke(_input(), config=_config("redraft-fallthrough"))
+
+    assert out["redraft_count"] == MAX_REDRAFTS
+    # The load-bearing assertion: the exhausted redraft fell through to replan and spent it too.
     assert out["reflection_count"] == MAX_REFLECTIONS
     assert out["status"] is RunStatus.DEGRADED
 

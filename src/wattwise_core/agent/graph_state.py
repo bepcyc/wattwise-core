@@ -32,6 +32,11 @@ from wattwise_core.agent.contracts import (
     turn_gaps,
     turn_records,
 )
+
+# Re-export the COACH-R8 stable-id observation projection from its focused LEAF module
+# (:mod:`observations`, QUAL-R9 size split) so the existing ``gs.build_observations`` call site in
+# the ``ground`` node keeps resolving unchanged (ARCH-R21: the leaf depends only on contracts).
+from wattwise_core.agent.observations import build_observations
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
 
 # Bounded recovery budgets (REFLECT-R4), shared with the graph for routing decisions.
@@ -274,21 +279,29 @@ def render_context(
     retrieved: Mapping[str, Any],
     *,
     active_goals: Sequence[Mapping[str, Any]] | None = None,
+    recalled_memory: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[str, bool]:
-    """Serialise canonical evidence within a measured token budget (MODEL-R3, INJECT-R1).
+    """Serialise canonical evidence within a measured token budget (MODEL-R3, INJECT-R1, MEM-R4).
 
-    Untrusted content (the user request, every retrieved record body, AND the athlete's
-    active-goal labels/notes) is wrapped in an explicit delimited ``<untrusted-data>`` envelope so
-    injected instructions in titles/notes/tool bodies cannot read as instructions (INJECT-R1). The
-    ``active_goals`` block carries the athlete's ACTIVE canonical goals (GBO-R38 / API-R32) so the
-    agent plans TOWARD them; they are user-authored INTENT, never an analytic number (MEM-R1), so
-    they steer the draft but are not grounding facts. The assembled input is measured with the token
-    estimator; on overflow the lowest-relevance records are dropped FIRST and a flag is returned so
-    the caller records the trim in coverage_gaps. Returns ``(context, trimmed)``.
+    Untrusted content (the user request, every retrieved record body, the athlete's active-goal
+    labels/notes, AND any recalled durable-memory items) is wrapped in an explicit delimited
+    ``<untrusted-data>`` envelope so injected instructions in titles/notes/memory bodies cannot read
+    as instructions (INJECT-R1/MEM-R3). The ``active_goals`` block carries the athlete's ACTIVE
+    canonical goals (GBO-R38 / API-R32) so the agent plans TOWARD them; the ``recalled_memory``
+    carries durable personalization context recalled through the MemoryStore seam (MEM-R4): stated
+    goals/constraints/preferences in the athlete's own words (MEM-R1/-R2). BOTH are user-authored
+    INTENT/personalization, never an analytic number (MEM-R1), so they steer the draft but are NOT
+    grounding facts (the §7 grounder still reads every number LIVE from canonical analytics). The
+    assembled input is measured with the token estimator; on overflow the lowest-relevance records
+    are dropped FIRST and a flag is returned so the caller records the trim in coverage_gaps.
+    Returns ``(context, trimmed)``.
     """
     header = f"request:\n<untrusted-data>\n{request_text or ''}\n</untrusted-data>"
     rendered: list[str] = [header]
     trimmed = False
+    memory_block = _render_recalled_memory(recalled_memory)
+    if memory_block is not None:
+        rendered.append(memory_block)
     goals_block = _render_active_goals(active_goals)
     if goals_block is not None:
         rendered.append(goals_block)
@@ -321,6 +334,33 @@ def _render_active_goals(active_goals: Sequence[Mapping[str, Any]] | None) -> st
     if not body:
         return None
     return f"active_goals:\n<untrusted-data>\n{body}\n</untrusted-data>"
+
+
+def _render_recalled_memory(recalled: Sequence[Mapping[str, Any]] | None) -> str | None:
+    """Render the recalled durable-memory block, or ``None`` when none (MEM-R4 / INJECT-R1).
+
+    Each item is summarised from its ``kind`` + raw ``content`` (the athlete's own words, MEM-R2) so
+    the agent personalizes its answer to stated goals/constraints/preferences. The whole block is
+    wrapped in ``<untrusted-data>`` because the content is user-authored free text that an attacker
+    could have planted (MEM-R3): it is personalization DATA the agent considers, NEVER instructions
+    it obeys, and NEVER a source of an analytic number (MEM-R1 — numbers always come live from §7).
+    """
+    if not recalled:
+        return None
+    lines = [_memory_line(item) for item in recalled]
+    body = "\n".join(line for line in lines if line)
+    if not body:
+        return None
+    return f"athlete_memory:\n<untrusted-data>\n{body}\n</untrusted-data>"
+
+
+def _memory_line(item: Mapping[str, Any]) -> str:
+    """One recalled memory item summarised from its ``kind`` + raw content (MEM-R2)."""
+    content = item.get("content")
+    if not content:
+        return ""
+    kind = item.get("kind")
+    return f"{kind}: {content}" if kind else str(content)
 
 
 def _goal_line(goal: Mapping[str, Any]) -> str:
@@ -427,6 +467,7 @@ __all__ = [
     "athlete_id",
     "budget_exceeded",
     "build_caveat",
+    "build_observations",
     "context_relevance",
     "cost_rollup",
     "estimate_tokens",

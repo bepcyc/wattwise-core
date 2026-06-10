@@ -36,7 +36,6 @@ import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-import wattwise_core.agent.memory  # noqa: F401  (registers agent_memory_item on AgentStateBase)
 from wattwise_core.agent.contracts import ClaimKind, RunStatus
 from wattwise_core.agent.engine import (
     DecisionRefused,
@@ -44,6 +43,10 @@ from wattwise_core.agent.engine import (
     _ClaimSchema,
     _ExtractedClaim,
     _PlanSchema,
+)
+from wattwise_core.agent.memory import (  # registers agent_memory_item on AgentStateBase
+    MemoryItemKind,
+    OssMemoryStore,
 )
 from wattwise_core.agent.model import FakeModel
 from wattwise_core.agent.state_db import AgentStateDatabase, build_agent_state_database
@@ -306,6 +309,85 @@ async def test_followup_reveal_numbers_runs_on_same_thread(
     assert follow.status is RunStatus.COMPLETED
     # The reveal never fabricates a number: no citation appears that the graph did not ground.
     assert all(c.record_id for c in follow.citations)
+
+
+# --- F-MEMORY (MEM-R4 durable-memory recall + episode write on the run path) -------------
+
+
+class _ContextCapturingModel(FakeModel):
+    """A FakeModel that records every ``compose`` context so a test can assert recall reached it."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.compose_contexts: list[str] = []
+
+    async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:
+        self.compose_contexts.append(context)
+        return await super().compose(system=system, context=context, max_tokens=max_tokens)
+
+
+async def _memory_rows(state_db: AgentStateDatabase, athlete_id: str) -> list[Any]:
+    """Read the athlete's durable memory rows through the OSS recall seam (newest first)."""
+    async with state_db.session() as session:
+        store = OssMemoryStore(session)
+        return list(await store.fetch_relevant(athlete_id=athlete_id, query="", limit=50))
+
+
+async def test_run_recalls_durable_memory_into_compose_and_writes_an_episode(
+    canonical: _DatabaseStub, state_db: AgentStateDatabase
+) -> None:
+    """MEM-R4: a coaching run RECALLS durable memory into compose AND records an episode.
+
+    The previously-orphaned MemoryStore seam is wired into the run path: BEFORE composing, the
+    engine recalls durable memory via ``fetch_relevant`` and projects it into the compose context
+    (personalization, MEM-R1/-R2) — so a pre-seeded preference reaches the model's context.
+    AFTER a COMPLETED run the engine records the turn as an episode through ``write_episode`` behind
+    the SAME seam (MEM-R4). Both halves are asserted: the seeded preference text appears in the
+    captured compose context (recall wired), and a NEW memory episode exists after the run (write
+    wired). Memory is personalization only — it never supplies a canonical number (MEM-R1).
+    """
+    _xfail_mariadb_ensure_thread_race(state_db)
+
+    async with state_db.session() as session:
+        store = OssMemoryStore(session)
+        await store.write_episode(
+            athlete_id=ATHLETE_A,
+            kind=MemoryItemKind.CONSTRAINT,
+            content="only train Tuesday and Thursday evenings",
+            trusted=True,
+        )
+    before = await _memory_rows(state_db, ATHLETE_A)
+    assert len(before) == 1
+
+    model = _ContextCapturingModel(
+        scripted={
+            "_PlanSchema": _PlanSchema(capabilities=["weekly_load"], window_days=42),
+            "_ClaimSchema": _ClaimSchema(
+                claims=[_ExtractedClaim(kind=ClaimKind.STATEMENT, text="trending up")]
+            ),
+        },
+        prose="Your form is in a good place this week.",
+    )
+    engine = _engine(canonical, state_db, model)
+    answer = await engine.answer(
+        athlete_id=ATHLETE_A,
+        question="How should I train this week?",
+        thread_id=None,
+        response_length="standard",
+        follow_up=None,
+        locale="en",
+    )
+    assert answer.status is RunStatus.COMPLETED
+
+    # (1) RECALL wired: the seeded durable-memory item reached the compose context.
+    assert model.compose_contexts, "compose must have run at least once"
+    assert any(
+        "only train Tuesday and Thursday evenings" in ctx for ctx in model.compose_contexts
+    ), "recalled durable memory MUST reach the compose context (MEM-R4 recall-before-compose)"
+
+    # (2) WRITE wired: a NEW episode was recorded after the completed run (MEM-R4 write-episode).
+    after = await _memory_rows(state_db, ATHLETE_A)
+    assert len(after) == len(before) + 1, "a completed run MUST record an episode (MEM-R4)"
 
 
 # --- F-APPROVE / F-EDIT / F-REJECT (durable resume) -------------------------------------

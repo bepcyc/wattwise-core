@@ -199,14 +199,20 @@ def test_planted_hallucinated_number_is_contradicted_and_replaced() -> None:
 
 
 def test_unavailable_metric_number_is_scrubbed_not_placeholder() -> None:
-    """A number whose canonical computation is unavailable is removed, never zeroed (GROUND-R7)."""
+    """A number whose canonical computation is unavailable is removed, never zeroed (GROUND-R7).
+
+    The unavailable number is scrubbed (never a placeholder/zero). The aggregate is the recovery
+    ``replan`` (GROUND-R6): a missing metric is re-gatherable, so the run attempts retrieval before
+    the ``reflection_count`` bound forces an abstain (REFLECT-R4) — see
+    :func:`test_unavailable_metric_alone_replans_then_router_bounds_to_abstain`.
+    """
     evidence = _FakeEvidence(metrics={})  # hrv unavailable
     result = ground("Your HRV is 65 today", [_number("65", "hrv", 65.0)], evidence, [])
     (claim,) = result.claims
     assert claim.verdict is GroundVerdict.UNGROUNDED
     assert "65" not in result.scrubbed_text
     assert "0" not in result.scrubbed_text.replace("today", "")  # no placeholder/zero
-    assert result.decision is GroundDecision.ABSTAIN
+    assert result.decision is GroundDecision.REPLAN
 
 
 def test_number_claim_missing_metric_fails_closed() -> None:
@@ -363,20 +369,73 @@ def test_prescriptive_statement_without_grounding_is_scrubbed() -> None:
 # --- aggregate decision matrix (GROUND-R9) ---
 
 
-def test_abstain_when_nothing_grounds() -> None:
-    """With every claim scrubbed and none publishable, the decision is abstain (GROUND-R6/R9)."""
-    evidence = _FakeEvidence()
+def test_replan_when_a_missing_metric_is_among_the_scrubbed_claims() -> None:
+    """GROUND-R6: nothing publishable, but a MISSING metric is present -> replan, not abstain.
+
+    The draft mixes a fabricated workout NAME and URL with a NUMBER about a real canonical metric
+    (``ctl``) that was NOT retrieved. Everything is scrubbed and nothing publishable survives, but
+    the missing metric is RECOVERABLE by re-gathering (GROUND-R9 ``replan``), so the aggregate is
+    ``replan`` — the engine attempts the ``ground -> reflect -> plan_retrieval`` recovery (bounded
+    by ``reflection_count``, REFLECT-R4) before degrading. The fabrications are still scrubbed.
+    """
+    evidence = _FakeEvidence()  # ctl unavailable -> a re-gatherable metric gap
     claims = [_number("99", "ctl", 99.0), _name("Fake Workout"), _url("http://x.invalid")]
     result = ground("99 Fake Workout http://x.invalid", claims, evidence, [])
     assert all(c.verdict is GroundVerdict.UNGROUNDED for c in result.claims)
-    assert result.decision is GroundDecision.ABSTAIN
+    assert result.decision is GroundDecision.REPLAN
 
 
 def test_abstain_on_empty_claims() -> None:
-    """No claims at all means nothing publishable -> abstain (fail-closed default)."""
+    """No claims at all means nothing publishable -> abstain (fail-closed default).
+
+    With ZERO claims there is no missing-metric signal to re-gather, so a ``replan`` would loop
+    pointlessly; the aggregate is a truthful ``abstain``.
+    """
     result = ground("", [], _FakeEvidence(), [])
     assert result.decision is GroundDecision.ABSTAIN
     assert result.claims == ()
+
+
+# --- GROUND-R6 recovery-replan boundary (the dead-edge fix) -----------------------------
+
+
+def test_replan_when_missing_metric_evidence_could_be_regathered() -> None:
+    """GROUND-R6: scrub left NO answer but the gap is a MISSING metric -> replan, not abstain.
+
+    The athlete asked about a metric (``ctl``) whose canonical value was NOT in the retrieved
+    evidence, so the only claim is an ungrounded NUMBER and nothing publishable survives. The
+    deliverable can no longer answer (GROUND-R6), but the gap is RECOVERABLE by re-gathering the
+    missing metric (GROUND-R9 ``replan`` = "return to gather/plan for missing evidence"), so the
+    aggregate decision MUST be ``replan`` — routing ``ground -> reflect -> plan_retrieval`` within
+    the ``reflection_count`` bound (REFLECT-R4) rather than abstaining immediately. The bound makes
+    this safe: if re-gathering still cannot ground, the run degrades to a truthful limitation at
+    the bound (the fail-closed floor is the router's, not an early abstain). MUTATION-GUARD: if the
+    aggregator drops REPLAN (the dead-edge regression), this asserts != ABSTAIN and fails.
+    """
+    evidence = _FakeEvidence()  # ctl unavailable -> the metric was not retrieved
+    result = ground("Your fitness is at 84 today.", [_number("84", "ctl", 84.0)], evidence, [])
+    (claim,) = result.claims
+    assert claim.verdict is GroundVerdict.UNGROUNDED
+    assert "84" not in result.scrubbed_text  # the unverified number is still scrubbed
+    assert result.decision is GroundDecision.REPLAN
+    assert result.decision is not GroundDecision.ABSTAIN
+
+
+def test_missing_metric_does_not_replan_when_a_grounded_survivor_exists() -> None:
+    """A missing metric BESIDE a grounded survivor regenerates, not replans (GROUND-R9 boundary).
+
+    REPLAN is reserved for the case where scrubbing left NOTHING publishable (the deliverable can
+    no longer answer, GROUND-R6). When a grounded survivor remains the answer is still producible
+    with the offending span removed, so the correct recovery is a bounded re-DRAFT (``regenerate``),
+    not a coverage re-plan — even though one scrubbed claim was a missing metric.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 84.0})  # ctl available, atl missing
+    claims = [_number("84", "ctl", 84.0), _number("70", "atl", 70.0)]
+    result = ground("CTL 84 and ATL 70", claims, evidence, [])
+    assert any(c.verdict is GroundVerdict.GROUNDED for c in result.claims)
+    assert any(c.verdict is GroundVerdict.UNGROUNDED for c in result.claims)
+    assert result.decision is GroundDecision.REGENERATE
+    assert "84" in result.scrubbed_text
 
 
 def test_regenerate_when_some_ground_and_some_ungrounded() -> None:
@@ -439,4 +498,7 @@ def test_evidence_without_sync_accessor_scrubs_numbers() -> None:
     result = ground("CTL 84", [_number("84", "ctl", 84.0)], _AsyncOnly(), [])
     # No synchronous metric_snapshot -> grounder never awaits -> number unavailable.
     assert result.claims[0].verdict is GroundVerdict.UNGROUNDED
-    assert result.decision is GroundDecision.ABSTAIN
+    assert "84" not in result.scrubbed_text  # the unverified number is scrubbed (fail-closed)
+    # The metric is missing -> re-gatherable, so the aggregate is the recovery replan (GROUND-R6);
+    # the reflection_count bound is what forces the eventual abstain (REFLECT-R4).
+    assert result.decision is GroundDecision.REPLAN

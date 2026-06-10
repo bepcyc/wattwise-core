@@ -88,13 +88,13 @@ class Athlete(Base, TimestampMixin):
     )
     # member of doc 40's load_model set; NULL = system default; HINT not identity.
     default_training_load_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # the persisted athlete-facing answer-length default applied to every agent answer /
-    # deliverable when an AgentAskRequest gives no per-request response_length (API-R11f,
-    # doc 60 §8.10). One of the ResponseLength tokens short|standard|detailed; NULL = the
-    # system default (standard). An agent-interaction preference, NOT analytics identity:
-    # verbosity only, never truth (VOICE-R8). Held on the single-owner profile row rather
-    # than a separate table — the OSS single-tenant store has exactly one of these.
-    default_response_length: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # NOTE: the persisted answer-length default (VOICE-R8 §382 / API-R11f) is NOT a column here.
+    # Per doc 50 VOICE-R8 §382 it is an agent-interaction preference held in the AGENT-STATE store
+    # (a ``preference``-kind memory item, MEM-R1), NOT a canonical §3 master-data entity like
+    # ``language``/``primary_locale``. The earlier canonical ``default_response_length`` column was
+    # a store-split bug: the run path read the agent-state preference while the user-settings PUT
+    # wrote this column, so a saved preference never reached the run. It was dropped in migration
+    # 0010; the GET/PUT now read/write the agent-state preference through the engine seam.
 
 
 class TrainingZoneSet(Base, TimestampMixin):

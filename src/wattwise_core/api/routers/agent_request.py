@@ -64,13 +64,16 @@ def resolve_locale(body: AgentAskRequest, accept_language: str | None) -> str:
     return header_locale(accept_language)
 
 
-def resolve_response_length(body: AgentAskRequest) -> ResponseLength:
-    """Apply the persisted response-length default when omitted, else ``standard`` (API-R11f).
+def resolve_response_length(body: AgentAskRequest) -> ResponseLength | None:
+    """The per-request response-length OVERRIDE, or ``None`` for the persisted default (API-R11f).
 
-    OSS has no persisted per-athlete response-length store, so an omitted value resolves
-    to ``standard``; the commercial layer resolves the athlete's saved preference here.
+    Returns the body's per-request ``response_length`` VERBATIM, or ``None`` when omitted. ``None``
+    is NOT collapsed to ``standard`` here: the engine applies the athlete's PERSISTED verbosity
+    preference (MEM-R1 / VOICE-R8 §382, held in the agent-state store) as the default for a run with
+    no per-request value, falling back to ``standard`` only when no preference is stored. A given
+    value overrides for this one call WITHOUT mutating the stored default (VOICE-R8).
     """
-    return body.response_length or "standard"
+    return body.response_length
 
 
 __all__ = [

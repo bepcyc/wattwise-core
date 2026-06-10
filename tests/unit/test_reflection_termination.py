@@ -271,11 +271,13 @@ async def test_f_coverage_bound_terminates_degraded() -> None:
 
 
 async def test_f_redraft_bound_terminates_degraded() -> None:
-    """F-REDRAFT-BOUND: a grounder that always REGENERATEs spends the redraft budget, then degrades.
+    """F-REDRAFT-BOUND: a grounder that always REGENERATEs spends BOTH bounds, then degrades.
 
-    The ground -> compose redraft cycle would loop forever; REFLECT-R4 bounds it to
-    MAX_REDRAFTS, so compose runs exactly MAX_REDRAFTS + 1 times (initial draft + each
-    bounded redraft) and the run degrades, never looping, never budget_exceeded.
+    The ground -> compose redraft cycle would loop forever; REFLECT-R4 bounds it to MAX_REDRAFTS.
+    An exhausted REGENERATE then FALLS THROUGH to ``replan`` while reflection budget remains (spec
+    §225/§451), so ``reflection_count`` also reaches MAX_REFLECTIONS before the run degrades — never
+    an unbounded ``ground <-> compose`` loop, never budget_exceeded. compose runs the initial draft
+    + one per spent redraft + one per spent re-plan cycle.
     """
     case = _case("F-REDRAFT-BOUND")
     model, svc = _services(case)
@@ -285,8 +287,9 @@ async def test_f_redraft_bound_terminates_degraded() -> None:
     assert status is not RunStatus.BUDGET_EXCEEDED
     assert status is RunStatus.DEGRADED
     assert out.get("redraft_count") == MAX_REDRAFTS
-    # The redraft loop actually ran: one initial compose + one per spent redraft unit.
-    assert model.compose_calls == MAX_REDRAFTS + 1
+    # The redraft budget fully spent, then the bounded fall-through to replan spent reflection too.
+    assert out.get("reflection_count") == MAX_REFLECTIONS
+    assert model.compose_calls == MAX_REDRAFTS + 1 + MAX_REFLECTIONS
 
 
 async def test_f_groundloop_terminates_degraded() -> None:

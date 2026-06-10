@@ -108,7 +108,9 @@ class AthleteProfile(BaseModel):
     sex: Sex
     reference_timezone: str
     current_sport: str | None = None
-    default_response_length: str | None = None
+    # NOTE: the persisted answer-length default is NOT exposed here. Per doc 50 VOICE-R8 §382 it is
+    # an agent-interaction preference in the AGENT-STATE store (MEM-R1), NOT canonical master data —
+    # it is read/written via GET/PUT /v1/user-settings/response-length (§8.10).
     default_training_load_model: str | None = None
     fitness_signature: FitnessSignatureOut | None = None
 
@@ -215,7 +217,6 @@ def _profile(owner: Athlete, signature: FitnessSignature | None) -> AthleteProfi
         sex=owner.sex,
         reference_timezone=owner.reference_timezone,
         current_sport=owner.current_sport,
-        default_response_length=owner.default_response_length,
         default_training_load_model=owner.default_training_load_model,
         fitness_signature=_signature_out(signature),
     )

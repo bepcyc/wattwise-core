@@ -108,7 +108,7 @@ class AgentEngine(Protocol):
         athlete_id: str,
         question: str | None,
         thread_id: str | None,
-        response_length: ResponseLength,
+        response_length: ResponseLength | None,
         follow_up: dict[str, Any] | None,
         locale: str,
         entitlement: Entitlements | None = None,

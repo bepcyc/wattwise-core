@@ -181,15 +181,17 @@ def _downgrade_for_sweep(
 
     A swept number means an unverified figure was about to ship despite every EXTRACTED claim
     grounding — a grounding failure (GROUND-R3). ``proceed`` is downgraded to ``regenerate`` when
-    some grounded claim survives (re-draft without the offending span) or ``abstain`` when nothing
-    publishable survives; an already-recovering/abstaining decision is left as-is (still not
-    ``proceed``).
+    some grounded claim survives (re-draft without the offending span); when NOTHING publishable
+    survives the draft can no longer answer (GROUND-R6) and the swept figure was a metric the draft
+    cited — a re-gatherable gap — so it downgrades to ``replan`` (recover via re-gather, bounded by
+    ``reflection_count``), never an immediate abstain. An already-recovering/abstaining decision is
+    left as-is (still not ``proceed``).
     """
     if decision is not GroundDecision.PROCEED:
         return decision
     if any(_is_publishable(c) for c in grounded):
         return GroundDecision.REGENERATE
-    return GroundDecision.ABSTAIN
+    return GroundDecision.REPLAN
 
 
 class _Outcome:
@@ -321,23 +323,23 @@ def _scrubbed(claim: Claim, verdict: GroundVerdict) -> _Outcome:
 
 
 def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
-    """Aggregate per-claim verdicts into a bounded recovery decision (GROUND-R9).
+    """Aggregate per-claim verdicts into a bounded recovery decision (GROUND-R6/R9).
 
     - ``regenerate`` when a checkable claim is ``contradicted`` — the canonical value EXISTS
       and was already substituted in place by :func:`_verify_number` (GROUND-R3/R7), so the
       correct move is a bounded re-draft with the corrected value, NOT a coverage re-plan.
       ``contradicted`` still carries the strongest penalty: it is NEVER published (already
       enforced) and never yields ``proceed``.
-    - ``abstain`` when nothing publishable survives and there is nothing to recover (every
-      claim ``ungrounded``/scrubbed, no grounded survivor) — cannot answer (GROUND-R6).
-    - ``regenerate`` when a claim is ``ungrounded`` but at least one grounded claim
-      survives — re-draft with the offending span removed/corrected.
-    - ``proceed`` when every claim is publishable (``grounded`` or a publishable
-      ``complementary``) — publish.
-
-    ``replan`` is reserved for contradictions that the in-place canonical substitution
-    cannot resolve (none arise here, since every contradicted number is replaced verbatim);
-    a future kind of unrecoverable contradiction would route to ``replan``.
+    - ``replan`` when scrubbing left NOTHING publishable (GROUND-R6) AND a scrubbed claim is a
+      RE-GATHERABLE metric gap (:func:`_has_regatherable_metric_gap`): GROUND-R9 routes
+      ``ground -> reflect -> plan_retrieval`` to re-gather, BOUNDED by ``reflection_count``
+      (REFLECT-R4) — the bound is the fail-closed floor (degrades to a truthful limitation if
+      re-gather still fails), so this only ATTEMPTS recovery first.
+    - ``abstain`` when nothing publishable survives and there is nothing to RE-GATHER — every claim
+      is a fabrication a replan could never ground (NAME/URL/prescription), or there are no claims.
+    - ``regenerate`` when a claim is ``ungrounded`` but a grounded claim survives — the answer is
+      still producible, re-draft with the offending span removed.
+    - ``proceed`` when every claim is publishable (``grounded`` or a publishable ``complementary``).
     """
     verdicts = [c.verdict for c in claims]
     has_grounded = any(v is GroundVerdict.GROUNDED for v in verdicts)
@@ -349,10 +351,30 @@ def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
         # with the corrected text rather than re-planning for different evidence.
         return GroundDecision.REGENERATE
     if not has_publishable:
-        return GroundDecision.ABSTAIN
+        # Nothing publishable survived — the deliverable cannot answer (GROUND-R6). If the loss
+        # was to a MISSING metric (re-gatherable), recover via ``replan``; otherwise abstain.
+        return GroundDecision.REPLAN if _has_regatherable_metric_gap(claims) else (
+            GroundDecision.ABSTAIN
+        )
     if has_ungrounded:
         return GroundDecision.REGENERATE if has_grounded else GroundDecision.ABSTAIN
     return GroundDecision.PROCEED
+
+
+def _has_regatherable_metric_gap(claims: Sequence[GroundedClaim]) -> bool:
+    """True iff a scrubbed claim is a missing-metric gap that re-gathering could close (GROUND-R6).
+
+    The deterministic signal that distinguishes a RECOVERABLE under-grounding (route ``replan``)
+    from a pure fabrication (route ``abstain``): an ungrounded NUMBER is a real metric the draft
+    cited whose canonical value was MISSING at grounding time (``_verify_number`` returns
+    ``UNGROUNDED`` only when the canonical value was ``None`` — never retrieved); that gap is what
+    re-gathering closes (GROUND-R9 ``replan`` = "missing evidence"). An ungrounded NAME/URL or
+    scrubbed prescription is a fabrication retrieval can never ground, so it does NOT replan.
+    """
+    return any(
+        c.verdict is GroundVerdict.UNGROUNDED and c.claim.kind is ClaimKind.NUMBER
+        for c in claims
+    )
 
 
 def _is_publishable(claim: GroundedClaim) -> bool:

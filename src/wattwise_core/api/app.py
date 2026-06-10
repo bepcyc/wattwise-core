@@ -205,6 +205,12 @@ def _wire_router_seams(app: FastAPI) -> None:
     overrides[agent_router.rate_limiter] = get_rate_limiter
     engine = _build_engine(app)
     overrides[agent_router.agent_engine] = lambda: engine
+    # The persisted response-length preference is an agent-interaction preference in the AGENT-STATE
+    # store (doc 50 VOICE-R8 §382 / MEM-R1), NOT canonical master-data like language/zones — so its
+    # GET/PUT reach the SAME shared engine the run path reads its default from, NOT the canonical
+    # ``current_session``. Binding it to ``engine`` makes the value the athlete sets the value a run
+    # applies (the VOICE-R8 store-split single source); the other user-settings stay canonical.
+    overrides[user_settings_router.response_length_store] = lambda: engine
     # The breadth surfaces (diagnose / digest / memory) reuse the agent router's identity/scope/
     # engine/limiter overrides (above); only the breadth-local DB-session seam is new — bind it to
     # the shared transactional session so digest persistence + the email-verified gate are live

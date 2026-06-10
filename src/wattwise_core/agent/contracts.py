@@ -316,6 +316,14 @@ class AgentState(TypedDict, total=False):
     # INTENT, never a canonical analytic NUMBER (MEM-R1), so it steers the compose prompt context
     # but is NOT a grounding fact. An immutable input (set once by ingest, never by a model/tool).
     active_goals: list[dict[str, Any]]
+    # Durable athlete-memory items recalled SERVER-side through the ONE MemoryStore/recall seam
+    # (MEM-R4) and projected into the run inputs so the agent personalizes its answer (stated
+    # goals/constraints/preferences/load-responses in the athlete's own words, MEM-R1/-R2). Each
+    # item is a plain serializable projection (kind/content/inferred) — personalization context,
+    # NEVER a canonical analytic NUMBER (MEM-R1, EVAL-R2a), so it steers the compose prompt but is
+    # NOT a grounding fact (the §7 grounder still reads every number LIVE from canonical analytics).
+    # An immutable input (recalled once by the engine before the run, never written by a model).
+    recalled_memory: list[dict[str, Any]]
     # (b) per-turn identity for the run-scoped reset (CKPT-R5)
     #   turn_id: fresh per normal /ask; never minted/changed on Command(resume).
     #   run_epoch: the turn the run-scoped channels belong to; head node sets it on reset.

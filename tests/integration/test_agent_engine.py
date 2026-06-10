@@ -304,6 +304,69 @@ async def test_engine_grounded_number_reaches_answer_citations(
     assert answer.citations[0].record_id == "ctl@2026-06-03"
 
 
+async def test_engine_answer_carries_stable_observation_drillable_on_followup(
+    seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
+) -> None:
+    """COACH-R8: a grounded answer carries a stable-id observation a drill follow-up targets.
+
+    The first turn grounds a CTL number, so the answer MUST carry a distinct observation with a
+    STABLE ``observation_id`` (the drill/reveal handle, COACH-R8) and the grounded citation behind
+    it. A ``drill`` follow-up on the SAME durable thread, targeting that exact id, MUST surface the
+    grounded ``{metric, value, as_of}`` number VERBATIM (VOICE-R9) — proving drill-by-id is no
+    longer vacuous in production (the ground node now writes the observations channel). The id is
+    server-generated and stable, so the client can pass it straight back.
+    """
+    svc, database, _ = seeded
+    series = await svc.pmc(str(OWNER_ATHLETE_ID), _dt.date(2026, 6, 1), _dt.date(2026, 6, 3))
+    ctl = series[-1].value.ctl
+    model = FakeModel(
+        scripted={
+            "_PlanSchema": _PlanSchema(capabilities=["weekly_load"], window_days=42),
+            "_ClaimSchema": _ClaimSchema(
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text=f"your fitness is at {ctl:.2f}",
+                        metric="ctl",
+                        value=ctl,
+                        as_of="2026-06-03",
+                    )
+                ]
+            ),
+        },
+        prose=f"Your fitness is at {ctl:.2f} and holding steady.",
+    )
+    engine = GraphAgentEngine(database, model)  # type: ignore[arg-type]
+    first = await engine.answer(
+        athlete_id=str(OWNER_ATHLETE_ID),
+        question="What's my fitness number?",
+        thread_id=None,
+        response_length="standard",
+        follow_up=None,
+        locale="en",
+    )
+    assert first.status is RunStatus.COMPLETED
+    # The answer carries a distinct, drillable observation with a STABLE id (COACH-R8).
+    assert first.observations, "a grounded answer must carry a stable-id observation (COACH-R8)"
+    obs = first.observations[0]
+    assert obs.observation_id, "the observation MUST carry a stable id to target"
+    assert any(c.metric == "ctl" for c in obs.citations), "grounded number behind the observation"
+
+    # A drill follow-up targeting that exact id surfaces the grounded number on the SAME thread.
+    drilled = await engine.answer(
+        athlete_id=str(OWNER_ATHLETE_ID),
+        question="What's my fitness number?",
+        thread_id=first.thread_id,
+        response_length="standard",
+        follow_up={"kind": "drill", "target_ref": obs.observation_id},
+        locale="en",
+    )
+    assert drilled.thread_id == first.thread_id, "a drill follow-up must reuse the SAME thread"
+    assert any(c.metric == "ctl" and c.record_id == "ctl@2026-06-03" for c in drilled.citations), (
+        "the drill-by-id MUST surface the grounded number verbatim (COACH-R8/VOICE-R9)"
+    )
+
+
 async def test_claimgrounder_scrubs_fabricated_number(
     seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
 ) -> None:
@@ -337,6 +400,41 @@ async def test_claimgrounder_scrubs_fabricated_number(
     assert result.decision is GroundDecision.REGENERATE
     assert all(c.citation is None for c in result.survivors)
     assert "999" not in result.scrubbed_text
+
+
+async def test_production_grounder_replans_on_a_missing_metric_not_immediate_abstain(
+    seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
+) -> None:
+    """GROUND-R6: the PRODUCTION grounder emits REPLAN when a claimed metric is unavailable.
+
+    The seeded athlete has CTL/power data but NO HRV (no wellness rows), so a draft claiming an HRV
+    number scrubs to NOTHING publishable — the deliverable can no longer answer. The metric is a
+    re-gatherable gap (GROUND-R9 ``replan`` = "missing evidence"), so the LIVE aggregator (real
+    ``_decide``, not a scripted stub) MUST emit ``REPLAN`` — proving the previously-dead
+    ``ground -> reflect -> plan_retrieval`` recovery edge fires from production grounding. The
+    unverified HRV number is still scrubbed (fail-closed, GROUND-R7).
+    """
+    svc, _, _ = seeded
+    model = FakeModel(
+        scripted={
+            "_ClaimSchema": _ClaimSchema(
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER, text="Your HRV is 65", metric="hrv", value=65.0
+                    )
+                ]
+            )
+        }
+    )
+    grounder = ClaimGrounder(model, svc)
+    result = await grounder.ground(
+        athlete_id=str(OWNER_ATHLETE_ID), draft="Your HRV is 65 and healthy.", retrieved={}
+    )
+    assert not result.survivors, "the unavailable HRV number must NOT ground"
+    assert "65" not in result.scrubbed_text, "the unverified number is scrubbed (GROUND-R7)"
+    # The load-bearing assertion: the live aggregator recovers via REPLAN, not an immediate ABSTAIN.
+    assert result.decision is GroundDecision.REPLAN
+    assert result.decision is not GroundDecision.ABSTAIN
 
 
 async def test_metric_snapshot_reads_canonical_value(

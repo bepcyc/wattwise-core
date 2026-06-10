@@ -55,6 +55,36 @@ class MemoryItemKind(StrEnum):
     PLAN_HISTORY = "plan_history"
 
 
+# --- the persisted verbosity preference (VOICE-R8 §382 / MEM-R1; agent-state, not master-data) ---
+
+#: The marker prefix of the single ``PREFERENCE``-kind memory item holding the athlete's persisted
+#: response-length default (VOICE-R8 §382). The run path (engine) and the ``/v1/user-settings/
+#: response-length`` surface both read/write THIS one item, so the value the athlete sets is exactly
+#: the run-path default — a single source of truth in the AGENT-STATE store, never canonical master-
+#: data (doc 60 §8.10). Content shape: ``response_length=<short|standard|detailed>``.
+RESPONSE_LENGTH_PREF_PREFIX = "response_length="
+
+#: The closed VOICE-R8 verbosity set; run/GET fall back to ``standard`` for an unset/unknown value.
+RESPONSE_LENGTHS: tuple[str, ...] = ("short", "standard", "detailed")
+
+
+def response_length_from_items(items: Sequence[RecalledItem]) -> str:
+    """The persisted verbosity default carried by ``items``, else ``standard`` (VOICE-R8 §382).
+
+    Scans recalled memory for the single ``PREFERENCE``-kind item whose content starts with
+    :data:`RESPONSE_LENGTH_PREF_PREFIX` and returns its closed-set value, falling back closed to
+    ``standard`` when absent or unrecognized. The ONE place the marker is parsed, so the run-path
+    default and the GET endpoint resolve verbosity identically (the store-split single source).
+    """
+    for item in items:
+        if item.kind is MemoryItemKind.PREFERENCE and item.content.startswith(
+            RESPONSE_LENGTH_PREF_PREFIX
+        ):
+            stored = item.content[len(RESPONSE_LENGTH_PREF_PREFIX) :].strip()
+            return stored if stored in RESPONSE_LENGTHS else "standard"
+    return "standard"
+
+
 class UntrustedMemoryWriteError(RuntimeError):
     """Raised when untrusted/scraped content attempts to write memory (MEM-R3/INJECT-R3).
 
@@ -134,6 +164,10 @@ class MemoryStore(Protocol):
         inferred: bool = False,
     ) -> RecalledItem: ...
 
+    async def upsert_preference(
+        self, *, athlete_id: str, marker: str, content: str
+    ) -> RecalledItem: ...
+
     async def fetch_relevant(
         self, *, athlete_id: str, query: str, limit: int = 8
     ) -> Sequence[RecalledItem]: ...
@@ -209,6 +243,48 @@ class OssMemoryStore:
         await self._session.flush()
         return _to_recalled(row)
 
+    async def upsert_preference(
+        self, *, athlete_id: str, marker: str, content: str
+    ) -> RecalledItem:
+        """Upsert the ONE owner-scoped PREFERENCE row carrying ``marker`` (MEM-R1, idempotent).
+
+        Backs a single-valued agent-interaction preference (e.g. the VOICE-R8 §382 verbosity
+        default, ``marker="response_length="``) held in the agent-state store, NOT a canonical
+        master-data entity. UPDATES the existing ``PREFERENCE``-kind row whose ``content`` starts
+        with ``marker`` (so a re-write replaces the value, never duplicating a second row), else
+        INSERTS one. Scoped STRICTLY to the server-derived owner (MEM-R3). ``content`` is the FULL
+        marker-prefixed value (``response_length=detailed``); this is trusted owner-originated
+        preference state, so no untrusted-write guard applies (the value is a closed enum the
+        caller validated, never source-synced/scraped text). Returns the persisted row.
+        """
+        stmt = (
+            select(MemoryItem)
+            .where(
+                MemoryItem.athlete_id == _coerce_uuid(athlete_id),
+                MemoryItem.kind == MemoryItemKind.PREFERENCE,
+                MemoryItem.content.startswith(marker),
+            )
+            .order_by(MemoryItem.created_at.desc())
+        )
+        existing = list((await self._session.execute(stmt)).scalars().all())
+        if existing:
+            row = existing[0]
+            row.content = content
+            row.inferred = False
+            # Defensively collapse any historical duplicates to the ONE preference row (MEM-R1).
+            for stale in existing[1:]:
+                await self._session.delete(stale)
+        else:
+            row = MemoryItem(
+                athlete_id=_coerce_uuid(athlete_id),
+                kind=MemoryItemKind.PREFERENCE,
+                content=content,
+                inferred=False,
+            )
+            self._session.add(row)
+        await self._session.flush()
+        return _to_recalled(row)
+
     async def fetch_relevant(
         self, *, athlete_id: str, query: str, limit: int = 8
     ) -> Sequence[RecalledItem]:
@@ -253,10 +329,13 @@ def _recency_key(recorded_at: _dt.datetime) -> float:
 
 
 __all__ = [
+    "RESPONSE_LENGTHS",
+    "RESPONSE_LENGTH_PREF_PREFIX",
     "MemoryItem",
     "MemoryItemKind",
     "MemoryStore",
     "OssMemoryStore",
     "RecalledItem",
     "UntrustedMemoryWriteError",
+    "response_length_from_items",
 ]

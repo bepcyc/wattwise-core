@@ -195,12 +195,18 @@ async def answer_question(
     conversation_id: str | None = None,
     follow_up: Mapping[str, Any] | None = None,
     presentation: VoicePresentation | None = None,
+    recalled_memory: Sequence[Mapping[str, Any]] | None = None,
 ) -> AgentAnswer:
     """Drive the graph for a grounded free-form answer to ``question`` (COACH-R1, COACH-R8).
 
     Builds a ``user_turn`` run carrying the question (GRAPH-R2.1), runs the graph, and
     projects ONLY its grounded outputs into :class:`AgentAnswer` (OUTCOME-R2). The
     athlete identity is server-derived (AGT-SEC-R1) and never trusted from the model.
+
+    ``recalled_memory`` are durable athlete-memory items the engine recalled SERVER-side through the
+    MemoryStore seam (MEM-R4); they flow into the run inputs so the agent personalizes its answer
+    (MEM-R1) — personalization context only, never a canonical number (the §7 grounder still reads
+    every number live).
 
     A ``follow_up`` (COACH-R8) reuses the SAME durable thread (the caller passes its
     ``thread_id`` back, CKPT-R3) and shapes the turn by kind: ``expand`` climbs one rung up the
@@ -232,6 +238,7 @@ async def answer_question(
         thread_id=thread_id,
         conversation_id=conversation_id,
         follow_up=follow_up,
+        recalled_memory=recalled_memory,
     )
     final = await graph.run(inputs)
     html, text, status, out_thread_id = _outputs(final)

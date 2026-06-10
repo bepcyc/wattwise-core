@@ -14,8 +14,10 @@ Persistence (API-R32 — no orphan writes; every PUT backs a real entity):
 - ``language`` → the athlete profile ``primary_locale`` column (master data, API-R37).
 - ``default-load-model`` → the athlete profile ``default_training_load_model`` column,
   validated against the doc-40 LOAD-R2 closed set ``{power_tss, hr_load, hr_load_zonal}``.
-- ``response-length`` → the athlete profile ``default_response_length`` column (the durable
-  agent-interaction preference, doc 50 VOICE-R8 / API-R11f) — an unsupported value → ``422``.
+- ``response-length`` → the durable agent-state PREFERENCE item (doc 50 VOICE-R8 §382 / MEM-R1 /
+  API-R11f) — an agent-interaction preference in the AGENT-STATE store, NOT a canonical §3
+  master-data entity like ``language``; reached through the shared engine seam, so the value the
+  athlete sets is exactly the run-path default. An unsupported value → ``422``.
 
 Boundary contract: identity is server-derived from the bearer token (AUTH-R3/R18) and every
 read/write acts ONLY on that one owner id — no writable caller-identity field exists on any
@@ -31,7 +33,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import uuid
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, Protocol, runtime_checkable
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
@@ -79,10 +81,33 @@ def current_session() -> AsyncSession:
     raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
 
 
+@runtime_checkable
+class ResponseLengthStore(Protocol):
+    """The AGENT-STATE-backed response-length preference seam (doc 50 VOICE-R8 §382).
+
+    The persisted answer-length preference is an agent-interaction preference held in the durable
+    agent-state store (MEM-R1, §382), NOT a canonical §3 master-data entity like ``language``. So —
+    unlike ``zones``/``language``/``default-load-model`` (which back to the canonical store via
+    ``current_session``) — the response-length GET/PUT reach the SAME store the run path reads its
+    default from, through this typed engine seam (the shared :class:`GraphAgentEngine`). This is the
+    single-source store-split: the value written here is exactly what the run applies (VOICE-R8).
+    """
+
+    async def get_response_length_preference(self, *, athlete_id: str) -> str: ...
+
+    async def set_response_length_preference(self, *, athlete_id: str, value: str) -> None: ...
+
+
+def response_length_store() -> ResponseLengthStore:
+    """The agent-state response-length store seam; the app factory overrides it (fail-closed)."""
+    raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
+
+
 _Read = Depends(require_read_scope)
 _Write = Depends(require_write_scope)
 AthleteId = Annotated[str, Depends(current_athlete_id)]
 Session = Annotated[AsyncSession, Depends(current_session)]
+LengthStore = Annotated[ResponseLengthStore, Depends(response_length_store)]
 
 
 # --- wire shapes ----------------------------------------------------------------
@@ -319,13 +344,18 @@ async def put_language(
     dependencies=[_Read],
 )
 async def get_response_length(
-    session: Session, athlete_id: AthleteId
+    store: LengthStore, athlete_id: AthleteId
 ) -> ResponseLengthSettings:
-    """Read the owner's persisted answer-length; defaults to ``standard`` (API-R11f)."""
-    owner = await _load_owner(session, athlete_id)
-    stored = owner.default_response_length
-    value = stored if stored in _RESPONSE_LENGTHS else "standard"
-    return ResponseLengthSettings(response_length=value)
+    """Read the owner's persisted answer-length; defaults to ``standard`` (API-R11f).
+
+    Reads the AGENT-STATE preference (doc 50 VOICE-R8 §382 — an agent-interaction preference, NOT a
+    canonical §3 master-data entity), the SAME store the run path applies as its default, so this
+    GET round-trips with the PUT below and reflects exactly what a run would use (the store-split
+    single source). An unset preference reads the spec default ``standard``.
+    """
+    value = await store.get_response_length_preference(athlete_id=athlete_id)
+    coerced: ResponseLength = value if value in _RESPONSE_LENGTHS else "standard"  # type: ignore[assignment]
+    return ResponseLengthSettings(response_length=coerced)
 
 
 @router.put(
@@ -335,17 +365,21 @@ async def get_response_length(
     dependencies=[_Write],
 )
 async def put_response_length(
-    body: ResponseLengthSettings, session: Session, athlete_id: AthleteId
+    body: ResponseLengthSettings, store: LengthStore, athlete_id: AthleteId
 ) -> ResponseLengthSettings:
-    """Persist the owner's answer-length default on the profile (API-R11f/API-R32).
+    """Persist the owner's answer-length default into the AGENT-STATE store (API-R11f/API-R32).
 
-    This is the default applied to every agent answer/deliverable when an
-    ``AgentAskRequest`` gives no per-request ``response_length``; a per-request value
-    overrides for that one call WITHOUT mutating this stored default.
+    The persisted default applied to every agent answer/deliverable when an ``AgentAskRequest``
+    gives no per-request ``response_length`` (a per-request value overrides for that one call
+    WITHOUT mutating this stored default). Backs the durable agent-state preference (doc 50 VOICE-R8
+    / MEM-R1, §382 — NOT canonical master-data like ``language``), so the value written here is the
+    SAME one the run path reads as its default; that durable record is its backing entity, so the
+    PUT is not an orphan write (API-R32). An unsupported value is rejected ``422`` by the typed
+    ``ResponseLength`` enum (ERR-R6). The HTTP contract is unchanged — only the backing store moved.
     """
-    owner = await _load_owner(session, athlete_id)
-    owner.default_response_length = body.response_length
-    await session.flush()
+    await store.set_response_length_preference(
+        athlete_id=athlete_id, value=body.response_length
+    )
     return ResponseLengthSettings(response_length=body.response_length)
 
 
@@ -394,11 +428,13 @@ __all__ = [
     "DefaultLoadModelSettings",
     "LanguageSettings",
     "ResponseLengthSettings",
+    "ResponseLengthStore",
     "ZoneBoundary",
     "ZonesSettings",
     "current_athlete_id",
     "current_session",
     "require_read_scope",
     "require_write_scope",
+    "response_length_store",
     "router",
 ]

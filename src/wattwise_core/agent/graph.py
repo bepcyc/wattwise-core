@@ -237,7 +237,10 @@ def _make_compose(svc: AgentServices, model: ChatModel, coach_system: str) -> Gr
         gs.athlete_id(state)
         retrieved = gs.read_retrieved(state)
         context, trimmed = gs.render_context(
-            state.get("request_text"), retrieved, active_goals=state.get("active_goals")
+            state.get("request_text"),
+            retrieved,
+            active_goals=state.get("active_goals"),
+            recalled_memory=state.get("recalled_memory"),
         )
         draft = await model.compose(system=coach_system, context=context)
         update: dict[str, Any] = {
@@ -253,10 +256,17 @@ def _make_compose(svc: AgentServices, model: ChatModel, coach_system: str) -> Gr
 
 def _make_ground(svc: AgentServices) -> GraphNode:
     async def ground(state: AgentState) -> dict[str, Any]:
-        """Deterministically verify the draft and decide recovery (GROUND-R*).
+        """Deterministically verify the draft and decide recovery (GROUND-R*, COACH-R8).
 
         Records the grounder's aggregate decision, the scrubbed text, a server-side
-        sanitized HTML body (AGT-SEC-R2), and the surviving citations.
+        sanitized HTML body (AGT-SEC-R2), the surviving citations, AND the stable-id
+        ``observations`` a follow-up turn can ``drill``/``reveal_numbers`` against without
+        re-stating the question (COACH-R8): each grounded, citable survivor becomes one
+        observation carrying a STABLE ``observation_id`` (the expand/drill handle) and the
+        grounded ``{metric, value, as_of}`` citation behind it. This is the production writer
+        of the ``observations`` channel the deliverable projection reads (drill/reveal-by-id is
+        otherwise vacuous). It adds no number and certifies no groundedness — only projects what
+        the grounder grounded.
         """
         athlete_id = gs.athlete_id(state)
         draft = state.get("draft") or ""
@@ -271,6 +281,7 @@ def _make_ground(svc: AgentServices) -> GraphNode:
                 "grounded_text": result.scrubbed_text,
                 "grounded_html": gs.safe_html(result.scrubbed_text),
                 "citations": citations,
+                "observations": gs.build_observations(result.survivors),
                 "messages": [verdict_msg],
             },
         )
@@ -363,6 +374,9 @@ def _make_finalize(svc: AgentServices, ceiling: int) -> GraphNode:
             update["grounded_text"] = limitation
             update["grounded_html"] = gs.safe_html(limitation)
             update["citations"] = []
+            # An abstaining deliverable ships only the limitation text — there is no grounded
+            # observation to drill/reveal into a non-answer, so clear the channel too (COACH-R8).
+            update["observations"] = []
         return gs.tick_visit(state, update)
 
     return finalize

@@ -240,3 +240,67 @@ async def test_list_memory_paginates_with_limit_and_offset(
     assert [r.content for r in page1] == ["item-4", "item-3"]  # newest first
     assert [r.content for r in page2] == ["item-2", "item-1"]
     assert {r.memory_item_id for r in page1}.isdisjoint({r.memory_item_id for r in page2})
+
+
+# --- MEM-R1 / VOICE-R8: persisted verbosity default on the run path (agent-state store) ---
+
+
+async def _seed_response_length_pref(
+    state_db: AgentStateDatabase, *, athlete_id: str, value: str
+) -> None:
+    """Persist a verbosity PREFERENCE in the AGENT-STATE store (MEM-R1, §382 — not master-data)."""
+    async with state_db.session() as session:
+        store = OssMemoryStore(session)
+        await store.write_episode(
+            athlete_id=athlete_id,
+            kind=MemoryItemKind.PREFERENCE,
+            content=f"response_length={value}",
+            trusted=True,
+        )
+
+
+async def test_persisted_verbosity_default_applied_when_no_per_request_length(
+    canonical: _DatabaseStub, state_db: AgentStateDatabase
+) -> None:
+    """MEM-R1 / VOICE-R8: with NO per-request length, the persisted agent-state default is applied.
+
+    The verbosity preference lives in the AGENT-STATE store (MEM-R1, §382: an agent-interaction
+    preference, NOT a canonical master-data entity). A run that carries no per-request length MUST
+    resolve to that stored default — the previously-orphaned MEM-R1 verbosity preference wired to
+    the actual run default (VOICE-R8), no longer the hardcoded ``standard``.
+    """
+    await _seed_response_length_pref(state_db, athlete_id=ATHLETE_A, value="detailed")
+    engine = _engine(canonical, state_db)
+    resolved = await engine.resolve_default_response_length(athlete_id=ATHLETE_A, requested=None)
+    assert resolved == "detailed", "the persisted agent-state preference is the run default"
+
+
+async def test_per_request_length_overrides_persisted_default_without_mutating_it(
+    canonical: _DatabaseStub, state_db: AgentStateDatabase
+) -> None:
+    """VOICE-R8: a per-request length WINS for one call WITHOUT mutating the stored default.
+
+    The athlete's stored default is ``detailed``; a single request asks for ``short``. The override
+    applies for THAT call only, and a SUBSEQUENT request with no per-request value still resolves to
+    the unchanged stored ``detailed`` — the override never rewrote the persisted preference.
+    """
+    await _seed_response_length_pref(state_db, athlete_id=ATHLETE_A, value="detailed")
+    engine = _engine(canonical, state_db)
+    overridden = await engine.resolve_default_response_length(
+        athlete_id=ATHLETE_A, requested="short"
+    )
+    assert overridden == "short", "a per-request value overrides for this one call"
+    # The stored default is UNTOUCHED: a later no-override run still resolves to it.
+    still_default = await engine.resolve_default_response_length(
+        athlete_id=ATHLETE_A, requested=None
+    )
+    assert still_default == "detailed", "the per-request override MUST NOT mutate stored default"
+
+
+async def test_no_persisted_preference_falls_back_to_standard(
+    canonical: _DatabaseStub, state_db: AgentStateDatabase
+) -> None:
+    """VOICE-R8: with no per-request value AND no stored preference, the default is ``standard``."""
+    engine = _engine(canonical, state_db)
+    resolved = await engine.resolve_default_response_length(athlete_id=ATHLETE_A, requested=None)
+    assert resolved == "standard"

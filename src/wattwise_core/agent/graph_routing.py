@@ -86,16 +86,26 @@ def make_route_after_ground(ceiling: int) -> Any:
     def _route_after_ground(state: AgentState) -> str:
         """ground -> compose (redraft) | reflect (replan) | interrupt_gate | finalize.
 
-        REGENERATE redrafts within ``MAX_REDRAFTS``; REPLAN re-plans within
-        ``MAX_REFLECTIONS``; PROCEED/ABSTAIN or budget-exhaustion falls through to the
+        REGENERATE redrafts within ``MAX_REDRAFTS``; REPLAN re-plans within ``MAX_REFLECTIONS``.
+        A REGENERATE that has EXHAUSTED ``redraft_count`` does NOT abstain while reflection budget
+        remains: it FALLS THROUGH to ``replan`` (reflect) if ``reflection_count < MAX_REFLECTIONS``
+        (REFLECT-R4, spec §225/§451 "fall through to replan ... or abstain") so the run tries to
+        re-gather before degrading — still strictly bounded by the two distinct monotonic counters,
+        never an unbounded loop. PROCEED/ABSTAIN or full budget-exhaustion falls through to the
         gate; a node-visit-ceiling breach routes straight to ``finalize`` (GRAPH-R5).
         """
         if gs.over_ceiling(state, ceiling):
             return "finalize"
         decision = gs.last_ground_decision(state)
-        if decision is GroundDecision.REGENERATE and state.get("redraft_count", 0) < MAX_REDRAFTS:
-            return "compose"
-        if decision is GroundDecision.REPLAN and state.get("reflection_count", 0) < MAX_REFLECTIONS:
+        reflections_left = state.get("reflection_count", 0) < MAX_REFLECTIONS
+        if decision is GroundDecision.REGENERATE:
+            if state.get("redraft_count", 0) < MAX_REDRAFTS:
+                return "compose"
+            # Redraft budget spent without a fully grounded result -> fall through to a bounded
+            # re-plan if the reflection budget remains, else abstain at the gate (REFLECT-R4).
+            if reflections_left:
+                return "reflect"
+        if decision is GroundDecision.REPLAN and reflections_left:
             return "reflect"
         return "interrupt_gate"
 

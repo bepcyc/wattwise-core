@@ -97,6 +97,7 @@ def build_inputs(
     thread_id: str | None = None,
     follow_up: Mapping[str, Any] | None = None,
     active_goals: Sequence[Mapping[str, Any]] | None = None,
+    recalled_memory: Sequence[Mapping[str, Any]] | None = None,
 ) -> AgentState:
     """Assemble the write-once immutable graph inputs for a run (STATE-R2/-R4, CKPT-R5).
 
@@ -123,6 +124,12 @@ def build_inputs(
     them (GBO-R38 / API-R32 / API-R35): goal-aware planning/load-review is owned by the agent, which
     reads the canonical Goal entity. They are user-authored INTENT, never an analytic number
     (MEM-R1) — they steer the compose prompt context, not grounding. Carried only when present.
+
+    ``recalled_memory`` are durable athlete-memory items recalled SERVER-side by the caller (the
+    engine) through the ONE MemoryStore/recall seam (MEM-R4) and projected into the immutable inputs
+    so the agent personalizes its answer (stated goals/constraints/preferences in the athlete's own
+    words, MEM-R1/-R2). Like ``active_goals`` they are personalization context, never an analytic
+    number (MEM-R1) — they steer the compose prompt context, not grounding. Carried when present.
     """
     if thread_id is None:
         convo = conversation_id or new_conversation_id()
@@ -141,6 +148,8 @@ def build_inputs(
         state["messages"] = [{"role": "user", "kind": "follow_up", **dict(follow_up)}]
     if active_goals:
         state["active_goals"] = [dict(goal) for goal in active_goals]
+    if recalled_memory:
+        state["recalled_memory"] = [dict(item) for item in recalled_memory]
     return state
 
 

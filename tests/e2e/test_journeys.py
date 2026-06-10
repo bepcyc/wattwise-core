@@ -41,7 +41,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from sqlalchemy import event
 
-from wattwise_core.agent.contracts import ClaimKind
+from wattwise_core.agent.contracts import ClaimKind, ReflectDecision, ReflectVerdict
 from wattwise_core.agent.engine import (
     GraphAgentEngine,
     _ClaimSchema,
@@ -106,6 +106,10 @@ def _completed_model() -> FakeModel:
                     )
                 ]
             ),
+            # Script the reflect verdict too: the REFLECT-R4 fall-through (an exhausted REGENERATE
+            # re-plans while reflection budget remains, §225/§451) can now reach the ``reflect``
+            # node on a perpetually-contradicted draft, so the structured verdict must be present.
+            "ReflectDecision": ReflectDecision(verdict=ReflectVerdict.GIVE_UP_GRACEFULLY),
         },
         prose="Your training is trending in a good direction this week — nice, steady work.",
     )

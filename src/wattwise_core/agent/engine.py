@@ -199,8 +199,7 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         ``build_graph`` so the carried entitlement's config-loaded bounds govern (the seams
         precedence ladder: explicit-default -> entitlement -> fallback). The durable saver records a
         ``live`` ledger row (CKPT-R9) so runs resume across turns/pauses. The loaded coach-config
-        (§16) is wired in via ``self._coach`` — compose gets the real system prompt and the grounder
-        the metric-equivalence + tolerance, so a natural metric the model cites grounds.
+        (§16) is wired in via ``self._coach`` so compose gets the real prompt + metric-equivalence.
         """
         ent = self._effective_entitlement(entitlement)
         model = self._sized_model(ent)
@@ -222,35 +221,44 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
         athlete_id: str,
         question: str | None,
         thread_id: str | None,
-        response_length: str,
+        response_length: str | None,
         follow_up: dict[str, Any] | None,
         locale: str,
         entitlement: Entitlements | None = None,
     ) -> AgentAnswer:
-        """Answer a question, resuming the SAME durable thread on a follow-up (COACH-R8).
+        """Answer a question, resuming the SAME durable thread on a follow-up (COACH-R8, MEM-R4).
 
-        A first turn opens a fresh durable thread; a follow-up (the caller passes the prior
-        ``thread_id`` back) lands on the SAME ``(athlete_id, conversation_id)`` so an
-        expand/drill/reveal turn continues the conversation. The durable saver is bound to that
-        scope; ``follow_up`` shapes the turn in the deliverable (CKPT-R3/-R5). When the API threads
-        the per-request resolved ``entitlement`` (MED-2) it governs this run's non-monetary bounds;
-        ``None`` falls back to the engine's config-resolved default (identical in OSS).
+        ``response_length`` of ``None`` applies the PERSISTED per-athlete verbosity default
+        (MEM-R1 / VOICE-R8, §382) WITHOUT mutating it; a value overrides for this call only. The
+        engine RECALLS durable memory before the run and records an episode after a completed first
+        turn, both through the ONE MemoryStore seam (MEM-R4). A per-request ``entitlement`` (MED-2)
+        governs this run's bounds when supplied, else the config-resolved default (CKPT-R3/-R5).
         """
+        length = await self.resolve_default_response_length(
+            athlete_id=athlete_id, requested=response_length
+        )
+        recalled = await self.recall_memory_for_run(athlete_id=athlete_id, query=question or "")
         state_db = await self._agent_state_db()
         conversation_id = conversation_id_for(athlete_id, thread_id)
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._sessions.session(subject=athlete_id) as session:
-            return await answer_question(
+            answer = await answer_question(
                 self._graph(AnalyticsService(session), saver, entitlement=entitlement),
                 athlete_id,
                 question or "",
                 locale=locale,
-                response_length=response_length,  # type: ignore[arg-type]
+                response_length=length,  # type: ignore[arg-type]
                 thread_id=thread_id,
                 conversation_id=conversation_id,
                 follow_up=follow_up,
                 presentation=self._coach.presentation,
+                recalled_memory=recalled,
             )
+        # A completed FIRST turn records a durable episode (MEM-R4); a follow-up resumes the same
+        # thread, so it is not a new episode to remember.
+        if answer.status is RunStatus.COMPLETED and follow_up is None:
+            await self.record_run_episode(athlete_id=athlete_id, content=question or "")
+        return answer
 
     async def digest(
         self, *, athlete_id: str, week_end: str, entitlement: Entitlements | None = None
@@ -393,14 +401,11 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
     ) -> Literal["unknown", "live", "consumed"]:
         """Classify an interrupt for the decision router's 404-vs-409 split (API-R12a / CKPT-R9).
 
-        The read-only, side-effect-free probe the router consults ONLY after :meth:`decision` fails
-        closed: an athlete-scoped read of the ``AgentInterrupt`` ledger by
-        ``(thread_id, interrupt_id, athlete_id)`` returning ``unknown`` (no row this athlete owns —
-        unknown thread/interrupt OR a foreign athlete's, never disclosed) -> router ``404``;
-        ``consumed`` (already decided) or ``live`` (a concurrent decision won the race) -> router
-        ``409``. Identity is the server-derived ``athlete_id`` (AUTH-R3 / CKPT-R3), scoped via the
-        durable saver bound to the thread's ``(athlete_id, conversation_id)`` — never disclosing a
-        foreign row.
+        The read-only probe the router consults ONLY after :meth:`decision` fails closed: an
+        athlete-scoped read of the ``AgentInterrupt`` ledger by ``(thread_id, interrupt_id,
+        athlete_id)`` returning ``unknown`` (no row this athlete owns — never disclosed) -> ``404``;
+        ``consumed`` (already decided) or ``live`` (a concurrent decision won the race) -> ``409``.
+        Identity is the server-derived ``athlete_id`` (AUTH-R3 / CKPT-R3), never a foreign row.
         """
         state_db = await self._agent_state_db()
         conversation_id = conversation_id_of(thread_id)
@@ -411,17 +416,13 @@ class GraphAgentEngine(DeliverableEngineMixin):  # noqa: size-limits
 def build_agent_engine(database: Database, settings: Any) -> GraphAgentEngine | None:
     """Build the production engine from settings, or ``None`` when no model is configured.
 
-    The OSS engine boots without an LLM key (RUN-R4.1 does not require one); when the key is
-    absent this returns ``None`` and the API leaves the agent endpoints surfacing a typed,
-    jargon-free unavailable rather than failing the whole boot. When a model IS configured the
-    engine is wired with a DEDICATED agent-state database (its own engine/pool, ARCH-R13/DEPLOY-R4)
-    so the durable checkpointer never contends with the canonical pool (SPIKE-3 deadlock-freedom).
-
-    The config-resolved OSS entitlement (the all-permissive plan with the config-loaded
-    non-monetary bounds, AGT-ENT-R4) is resolved here once and becomes the engine's DEFAULT
-    authority: the model's per-call output budget is sized to its token bound (AGT-ENT-R1,
-    MODEL-R5a) and the engine reads its ceiling / tool-iteration / wall-clock guards from it. The
-    API may still thread a per-REQUEST entitlement into a deliverable call to override it (MED-2).
+    The OSS engine boots without an LLM key (RUN-R4.1); absent the key this returns ``None`` and the
+    API surfaces a typed unavailable rather than failing boot. When a model IS configured the engine
+    is wired with a DEDICATED agent-state database (its own engine/pool, ARCH-R13/DEPLOY-R4) so the
+    durable checkpointer never contends with the canonical pool (SPIKE-3). The config-resolved OSS
+    entitlement (all-permissive, config-loaded non-monetary bounds, AGT-ENT-R4) becomes the
+    engine's DEFAULT authority (output budget / ceiling / tool-iteration / wall-clock, AGT-ENT-R1,
+    MODEL-R5a); the API may thread a per-REQUEST entitlement to override it (MED-2).
     """
     if settings.llm_api_key is None:
         return None
@@ -447,8 +448,7 @@ def build_agent_engine_with_model(
 
     The durable tests pass a REAL pooled ``state_db`` (file-sqlite/PG/MariaDB); when omitted the
     engine lazily builds the per-process file-sqlite fallback. ``coach`` injects a §16 coach-config
-    (the live test passes the loaded bundle; deterministic FakeModel tests pass the empty default,
-    since FakeModel scripts exact canonical claims needing no prompt steering or equivalence).
+    (empty default for FakeModel tests, which script exact canonical claims needing no steering).
     """
     return GraphAgentEngine(database, model, state_db=state_db, coach=coach)
 
