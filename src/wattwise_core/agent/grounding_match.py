@@ -4,10 +4,19 @@ The focused sibling of :mod:`wattwise_core.agent.grounding` (QUAL-R9 size split)
 numeric side of claim verification: the config-carried :class:`NumericTolerance` band, the
 fail-closed canonical-value read (:func:`_canonical_metric` / :func:`_as_float`), the
 tolerance comparison (:func:`_within_tolerance`), the grounded-number citation
-(:func:`_metric_citation`, GROUND-R5), and the canonical-display rewrite of the model's numeric
-token (:func:`_apply_number_scrub` / :func:`_render_value`, GROUND-R7 verbatim). All functions
-are pure/synchronous and deterministic (GRAPH-R4); ``grounding`` imports and re-exports
-``NumericTolerance`` so every historical
+(:func:`_metric_citation`, GROUND-R5), and the POSITIONAL canonical-display rewrite of the
+model's numeric token (:func:`_apply_number_scrub` / :func:`_render_value`, GROUND-R7 verbatim).
+
+The positional primitives (:func:`bounded_number_pattern`, :func:`find_claim_token_span`,
+:func:`ranges_overlap`, :func:`shift_ranges_after`, :func:`remove_span_clean`, plus the
+sweep-side :func:`~wattwise_core.agent.grounding_sweep.span_covered`) exist because the rewrite
+MUST be anchored to the claim's OWN span and numeric coverage MUST be tracked as character
+RANGES, never as string membership: with two
+claims sharing a token, an unanchored ``str.find`` rewrite lands the second claim's canonical
+value on the FIRST claim's span and a flat published-value set then "covers" the leftover wrong
+token — publishing BOTH numbers wrong under ``proceed`` (the GROUND-R7/R9 fail-open of issue #4).
+All functions are pure/synchronous and deterministic (GRAPH-R4); ``grounding`` imports and
+re-exports ``NumericTolerance`` so every historical
 ``from wattwise_core.agent.grounding import NumericTolerance`` path stays stable.
 """
 
@@ -15,11 +24,11 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from wattwise_core.agent.contracts import Claim, GroundingEvidence
-from wattwise_core.agent.grounding_sweep import NUMBER_RE
 
 # Default numeric tolerance for matching a claimed metric value against the canonical
 # analytic (GROUND-R7). A claimed number within this band of the canonical value is treated
@@ -121,30 +130,134 @@ def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
     }
 
 
-def _apply_number_scrub(text: str, claim: Claim, replacement: str) -> tuple[str, str | None]:
-    """Rewrite the model's numeric token in ``text`` to the canonical value, or remove it (R7).
+#: Numeric-token extraction that keeps a thousands-separated figure as ONE token
+#: ("1,000" / "12,345.6"), so its rewrite replaces the whole figure instead of splicing
+#: the canonical value over the leading digit group (issue #4 review, finding 2).
+_THOUSANDS_AWARE_NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+
+
+def bounded_number_pattern(token: str) -> re.Pattern[str]:
+    """Compile a word-bounded pattern for a numeric token (GROUND-R7, issue #4).
+
+    Digit/decimal lookarounds keep the token from ever matching INSIDE a longer number:
+    ``102`` matches neither the prefix of ``1029`` nor the tail of ``5102`` / ``0.102``,
+    and not the integer part of ``102.5`` — while a sentence-final ``102.`` still matches
+    (a trailing dot only blocks when a digit follows it). Every token search in the
+    grounder MUST go through this pattern, never a bare ``str.find``.
+    """
+    return re.compile(rf"(?<![\d.]){re.escape(token)}(?!\.?\d)")
+
+
+def ranges_overlap(ranges: Sequence[tuple[int, int]], start: int, end: int) -> bool:
+    """True iff ``[start, end)`` overlaps any of the half-open character ``ranges``."""
+    return any(s < end and start < e for s, e in ranges)
+
+
+def shift_ranges_after(
+    ranges: Sequence[tuple[int, int]], pivot: int, delta: int
+) -> list[tuple[int, int]]:
+    """Shift every range starting at/after ``pivot`` by ``delta`` (a text edit happened there).
+
+    Coverage ranges are positions in the CURRENT draft; every subsequent edit (a later
+    claim's rewrite/removal, a span scrub) must re-base the ranges behind it or the sweep
+    would test stale positions. Ranges strictly before the edit are untouched; the caller
+    guarantees no tracked range straddles the edited span.
+    """
+    return [(s + delta, e + delta) if s >= pivot else (s, e) for s, e in ranges]
+
+
+def remove_span_clean(text: str, start: int, end: int) -> tuple[str, int]:
+    """Remove ``[start, end)`` and tidy ONLY the seam it leaves; return (text, length delta).
+
+    Seam-local cleanup (collapse the doubled whitespace, drop a space left hanging before
+    punctuation, trim a now-leading/trailing seam) instead of a whole-text regex pass, so
+    every character OUTSIDE the seam keeps its position up to the single computable shift
+    that :func:`shift_ranges_after` applies — the invariant positional coverage depends on.
+    """
+    left, right = text[:start], text[end:]
+    trimmed_left = left.rstrip()
+    trimmed_right = right.lstrip()
+    if not trimmed_left or not trimmed_right or trimmed_right[0] in ".,;:!?":
+        edited = trimmed_left + trimmed_right
+    elif len(trimmed_left) != len(left) or len(trimmed_right) != len(right):
+        edited = trimmed_left + " " + trimmed_right
+    else:
+        edited = left + right
+    return edited, len(edited) - len(text)
+
+
+def find_claim_token_span(
+    text: str, claim: Claim, covered: Sequence[tuple[int, int]]
+) -> tuple[int, int] | None:
+    """Locate the claim's OWN numeric token in ``text``, anchored to the claim's span (R7).
+
+    Resolution order — positional and word-bounded at every step (issue #4):
+
+    1. **anchor**: each verbatim occurrence of ``claim.text`` in the draft, taking the first
+       whose word-bounded token does not overlap a range an earlier claim already
+       verified/rewrote — so two claims sharing a token each land in their OWN span;
+    2. **fallback** (``claim.text`` not verbatim in the draft — case/wording drift): the
+       first word-bounded occurrence of the bare token outside every covered range.
+
+    Never a bare ``str.find`` over the whole draft, and never a match inside a longer
+    number (:func:`bounded_number_pattern`). Returns the absolute ``(start, end)`` span of
+    the token, or ``None`` when it is not present — the numeric-coverage sweep then owns
+    fail-closure for any digits that DID reach the draft (GROUND-R3).
+    """
+    token_match = _THOUSANDS_AWARE_NUMBER_RE.search(claim.text)
+    token = token_match.group(0) if token_match is not None else claim.text
+    pattern = bounded_number_pattern(token)
+    if token != claim.text:
+        for anchor in re.finditer(re.escape(claim.text), text):
+            inner = pattern.search(text, anchor.start())
+            if inner is None or inner.end() > anchor.end():
+                continue
+            if not ranges_overlap(covered, inner.start(), inner.end()):
+                return inner.span()
+    uncovered = [
+        m.span() for m in pattern.finditer(text) if not ranges_overlap(covered, m.start(), m.end())
+    ]
+    if token == claim.text and len(uncovered) > 1:
+        # Bare-token claim with MULTIPLE uncovered occurrences: there is no anchor to say
+        # WHICH occurrence this claim means, and claim-list order is not a semantic signal
+        # (the extractor guarantees no ordering, STRUCT-R5). Guessing put canonical values
+        # on each other's spans when list order and text order diverged (issue #4 review,
+        # finding 1) — so ambiguity fails CLOSED: no span, the value is not published, and
+        # the uncovered occurrences are swept + downgraded rather than swapped.
+        return None
+    if uncovered:
+        return uncovered[0]
+    return None
+
+
+def _apply_number_scrub(
+    text: str, claim: Claim, replacement: str, covered: Sequence[tuple[int, int]]
+) -> tuple[str, list[tuple[int, int]]]:
+    """Rewrite the claim's numeric token IN ITS OWN SPAN to the canonical value, or remove it.
 
     For a NUMBER claim the published figure is ALWAYS the canonical value (``replacement`` =
-    its display string, or ``""`` to remove an ungrounded/unavailable number). This finds the
-    model's own numeric token — the first number in ``claim.text`` (e.g. ``"63.50"`` from
-    ``"your fitness is at 63.50"``) — and replaces THAT token in the draft, so the rewrite is
-    robust to the model not reproducing ``claim.text`` verbatim (case / wording drift). Returns the
-    edited text and the canonical display string actually published (so the numeric-coverage sweep
-    treats it as covered), or ``None`` when nothing was published (removed / token not found).
+    its display string, or ``""`` to remove an ungrounded/unavailable number). The token is
+    located positionally (:func:`find_claim_token_span`): anchored to the claim's own text
+    span, word-bounded, and skipping ranges earlier claims already verified — never the
+    first ``str.find`` hit in the whole draft (issue #4, GROUND-R7). Returns the edited text
+    and the updated coverage ranges: a published canonical value adds ITS character range
+    (only those characters count as covered for the numeric sweep); a removal or a
+    not-found token adds nothing, so any leftover digits stay uncovered and the sweep
+    fails closed on them (GROUND-R3).
     """
-    token_match = NUMBER_RE.search(claim.text)
-    token = token_match.group(0) if token_match is not None else claim.text
-    idx = text.find(token)
-    if idx == -1:
+    span = find_claim_token_span(text, claim, covered)
+    if span is None:
         # The model's token is not literally in the draft; nothing to publish/remove here. The
-        # numeric sweep is the backstop for any uncovered number that DID reach the draft.
-        return text, replacement or None
-    edited = text[:idx] + replacement + text[idx + len(token) :]
+        # positional numeric sweep is the backstop for any uncovered number that DID reach it.
+        return text, list(covered)
+    start, end = span
     if replacement == "":
-        edited = re.sub(r"\s{2,}", " ", edited)
-        edited = re.sub(r"\s+([.,;:!?])", r"\1", edited).strip()
-        return edited, None
-    return edited, replacement
+        edited, delta = remove_span_clean(text, start, end)
+        return edited, shift_ranges_after(covered, end, delta)
+    edited = text[:start] + replacement + text[end:]
+    updated = shift_ranges_after(covered, end, len(replacement) - (end - start))
+    updated.append((start, start + len(replacement)))
+    return edited, updated
 
 
 def _render_value(value: float, decimals: int) -> str:
@@ -160,4 +273,11 @@ def _render_value(value: float, decimals: int) -> str:
     return f"{rounded:.{decimals}f}"
 
 
-__all__ = ["NumericTolerance"]
+__all__ = [
+    "NumericTolerance",
+    "bounded_number_pattern",
+    "find_claim_token_span",
+    "ranges_overlap",
+    "remove_span_clean",
+    "shift_ranges_after",
+]
