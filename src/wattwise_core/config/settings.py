@@ -404,7 +404,7 @@ class Settings(BaseSettings):
                 + " (must be provided via the environment / a secret manager; BOOT-R4)"
             )
         if strict:
-            self._require_strong_signing_key()
+            _require_strong_signing_key(self)
         if self.object_store__kind not in {"local", "s3"}:
             raise ConfigError(
                 f"object_store.kind must be 'local' or 's3', got {self.object_store__kind!r}"
@@ -413,52 +413,8 @@ class Settings(BaseSettings):
             self.object_store__s3_endpoint and self.object_store__s3_bucket
         ):
             raise ConfigError("object_store.kind='s3' requires s3_endpoint and s3_bucket")
-        self._reject_wildcard_cors_with_credentials()
+        _reject_wildcard_cors_with_credentials(self)
         return self
-
-    def _require_strong_signing_key(self) -> None:
-        """Reject a weak/short token signing key in a real environment (SEC-R3 / RUN-R4.1).
-
-        Mirrors the ``encryption_root_key`` 32-byte floor in ``security/crypto.py``: the
-        signing/verification key material MUST carry at least 256 bits (32 bytes) of
-        entropy and MUST NOT be trivially weak. A key shorter than 32 bytes, or one whose
-        material is degenerate (a single repeated byte / a tiny distinct-character set —
-        no real entropy), is refused so the service never signs tokens under a guessable
-        key. In development the key may be absent (an ephemeral path) or a short test
-        value, so this floor is enforced only in the strict (staging/production)
-        environments — exactly where the presence check above already requires it.
-        """
-        key = self.token_signing_key
-        if key is None:  # presence already enforced above for strict; defensive guard
-            return
-        raw = key.get_secret_value().encode("utf-8")
-        if len(raw) < _SIGNING_KEY_MIN_BYTES:
-            raise ConfigError(
-                "fail-closed: WATTWISE_TOKEN_SIGNING_KEY carries insufficient entropy "
-                f"(needs >= {_SIGNING_KEY_MIN_BYTES} bytes / 256 bits, got {len(raw)}); "
-                "the service refuses to start with a weak signing key (SEC-R3)"
-            )
-        if len(set(raw)) < _SIGNING_KEY_MIN_DISTINCT_BYTES:
-            raise ConfigError(
-                "fail-closed: WATTWISE_TOKEN_SIGNING_KEY is trivially weak "
-                "(too few distinct bytes — a repeated/degenerate value, not real entropy); "
-                "the service refuses to start (SEC-R3)"
-            )
-
-    def _reject_wildcard_cors_with_credentials(self) -> None:
-        """Reject the wildcard-origin + credentials configuration cliff (SEC-R10 / SEC-R10-AC).
-
-        A configuration that allows the wildcard origin ``*`` AND sets
-        ``allow_credentials=true`` MUST be rejected at startup with a clear configuration
-        error (SEC-R10-AC) — it is an always-insecure combination the browser would refuse
-        anyway, so the service fails closed rather than starting in an undefined CORS state.
-        Enforced in every environment (a configuration-cliff guard, not an env-strict rule).
-        """
-        if self.security__cors_allow_credentials and "*" in self.security__cors_allow_origins:
-            raise ConfigError(
-                "fail-closed: CORS must not combine a wildcard origin '*' with "
-                "allow_credentials=true (SEC-R10); the service refuses to start"
-            )
 
     @classmethod
     def settings_customise_sources(
@@ -476,6 +432,51 @@ class Settings(BaseSettings):
         config_file_env = os.environ.get("WATTWISE_CONFIG_FILE")
         config_file = Path(config_file_env) if config_file_env else None
         return (init_settings, env_settings, _LayeredFileSource(settings_cls, config_file))
+
+
+def _require_strong_signing_key(self: Settings) -> None:
+    """Reject a weak/short token signing key in a real environment (SEC-R3 / RUN-R4.1).
+
+    Mirrors the ``encryption_root_key`` 32-byte floor in ``security/crypto.py``: the
+    signing/verification key material MUST carry at least 256 bits (32 bytes) of
+    entropy and MUST NOT be trivially weak. A key shorter than 32 bytes, or one whose
+    material is degenerate (a single repeated byte / a tiny distinct-character set —
+    no real entropy), is refused so the service never signs tokens under a guessable
+    key. In development the key may be absent (an ephemeral path) or a short test
+    value, so this floor is enforced only in the strict (staging/production)
+    environments — exactly where the presence check above already requires it.
+    """
+    key = self.token_signing_key
+    if key is None:  # presence already enforced above for strict; defensive guard
+        return
+    raw = key.get_secret_value().encode("utf-8")
+    if len(raw) < _SIGNING_KEY_MIN_BYTES:
+        raise ConfigError(
+            "fail-closed: WATTWISE_TOKEN_SIGNING_KEY carries insufficient entropy "
+            f"(needs >= {_SIGNING_KEY_MIN_BYTES} bytes / 256 bits, got {len(raw)}); "
+            "the service refuses to start with a weak signing key (SEC-R3)"
+        )
+    if len(set(raw)) < _SIGNING_KEY_MIN_DISTINCT_BYTES:
+        raise ConfigError(
+            "fail-closed: WATTWISE_TOKEN_SIGNING_KEY is trivially weak "
+            "(too few distinct bytes — a repeated/degenerate value, not real entropy); "
+            "the service refuses to start (SEC-R3)"
+        )
+
+def _reject_wildcard_cors_with_credentials(self: Settings) -> None:
+    """Reject the wildcard-origin + credentials configuration cliff (SEC-R10 / SEC-R10-AC).
+
+    A configuration that allows the wildcard origin ``*`` AND sets
+    ``allow_credentials=true`` MUST be rejected at startup with a clear configuration
+    error (SEC-R10-AC) — it is an always-insecure combination the browser would refuse
+    anyway, so the service fails closed rather than starting in an undefined CORS state.
+    Enforced in every environment (a configuration-cliff guard, not an env-strict rule).
+    """
+    if self.security__cors_allow_credentials and "*" in self.security__cors_allow_origins:
+        raise ConfigError(
+            "fail-closed: CORS must not combine a wildcard origin '*' with "
+            "allow_credentials=true (SEC-R10); the service refuses to start"
+        )
 
 
 @lru_cache(maxsize=1)
