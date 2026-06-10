@@ -50,7 +50,7 @@ case "${scanner}" in
       if ! trivy image \
             --severity "${WW_FAIL_SEVERITY}" \
             --exit-code 1 \
-            --ignore-unfixed \
+            --ignorefile .trivyignore \
             --format table \
             --output "${WW_OUT_DIR}/trivy-image.txt" \
             "${image_target}"; then
@@ -80,7 +80,7 @@ case "${scanner}" in
     : "${fail_on:=high}"
     if [ "${scan_image}" -eq 1 ]; then
       ww_log "scanning image: ${image_target} (fail-on=${fail_on})"
-      if ! grype "${image_target}" --fail-on "${fail_on}" -o table > "${WW_OUT_DIR}/grype-image.txt"; then
+      if ! grype "${image_target}" --fail-on "${fail_on}" -c .grype.yaml -o table > "${WW_OUT_DIR}/grype-image.txt"; then
         ww_warn "image scan found vulnerabilities at/above ${fail_on} (see ${WW_OUT_DIR}/grype-image.txt)"
         rc=1
       fi

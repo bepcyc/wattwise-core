@@ -1,0 +1,9 @@
+# Mirror of .trivyignore (CI-R0 parity: the grype fallback must gate identically to trivy).
+# Every exception is audited there; keep the two lists in lockstep.
+ignore:
+  - vulnerability: CVE-2026-33845
+  - vulnerability: CVE-2026-42010
+  - vulnerability: CVE-2025-7458
+  - vulnerability: CVE-2026-42496
+  - vulnerability: CVE-2026-8376
+  - vulnerability: CVE-2023-45853

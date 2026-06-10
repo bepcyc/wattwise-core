@@ -1,0 +1,14 @@
+# Audited image-gate exceptions (CONT-R1). Every entry MUST carry a justification and is
+# re-reviewed whenever the pinned base-image digest changes. The gate itself stays
+# unconditional — this file is the explicit, reviewable exception list, not a blanket flag.
+
+# debian:bookworm base (python:3.13-slim-bookworm@e4fa1f97). Fixed upstream in
+# 3.7.9-2+deb12u7 but the pinned base has not republished; remove on next digest bump.
+CVE-2026-33845
+CVE-2026-42010
+# No upstream fix available (vendor will_not_fix / fix_deferred); not reachable through the
+# engine's runtime surface (no DTLS, no perl entrypoints, no minizip use).
+CVE-2025-7458
+CVE-2026-42496
+CVE-2026-8376
+CVE-2023-45853
