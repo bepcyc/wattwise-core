@@ -104,6 +104,26 @@ _ALLOWED_NUMERIC_KEYS: frozenset[str] = frozenset(
         "attempt",
         "max_attempts",
         "status_code",
+        # doc 30 ING-OBS-R1 per-run sync trace: per-phase timings + record counts
+        # (bounded operational integers/floats; no health values, no PII).
+        "authorize_ms",
+        "discover_ms",
+        "fetch_ms",
+        "map_ms",
+        "upsert_ms",
+        "refs_discovered",
+        "refs_skipped",
+        "records_fetched",
+        "records_failed",
+        "candidates_mapped",
+        "activities_written",
+        "wellness_written",
+        "gaps_opened",
+        "gaps_closed",
+        "watermarks_advanced",
+        "retries",
+        "rate_limit_wait_ms",
+        "untrusted_content",
     }
 )
 _ALLOWED_KEYS = _ALLOWED_KEYS | _ALLOWED_NUMERIC_KEYS

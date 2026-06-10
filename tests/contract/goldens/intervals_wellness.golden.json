@@ -1,0 +1,27 @@
+[
+ {
+  "adapter_version": "1",
+  "confidence": 1.0,
+  "content_hash": "223b81103590c54e83ddd7cbd54c5c1e722eaffca7839be59b5f6bb971b8a58e",
+  "gbo_type": "daily_wellness",
+  "mapping_version": "1",
+  "observed_at": "2026-05-01 00:00:00+00:00",
+  "payload": {
+   "hrv_rmssd_ms": 36.35172,
+   "hrv_sdnn_ms": null,
+   "local_date": "2026-05-01",
+   "readiness": 73.0,
+   "respiration_rpm": 19.716797,
+   "resting_hr_bpm": 48,
+   "sleep_duration_s": 24405,
+   "sleep_score": 85.0,
+   "spo2_pct": 96.0,
+   "steps": 8044,
+   "vo2max": 53.0,
+   "weight_kg": 77.55
+  },
+  "source_native_id": "2026-05-01",
+  "trust_tier": "summary_only",
+  "untrusted_content": false
+ }
+]

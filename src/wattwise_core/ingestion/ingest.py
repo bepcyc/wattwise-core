@@ -50,6 +50,10 @@ from wattwise_core.ingestion._mapping import (
     _validate_payload,
     _whole_source_tier_of,
 )
+from wattwise_core.ingestion.capability import (
+    UndeclaredGboTypeError,
+    require_declared_types,
+)
 from wattwise_core.ingestion.trust import load_trust_policy
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
 from wattwise_core.persistence.localdate import (
@@ -110,6 +114,8 @@ class IngestService:
         ingest_run_id: uuid.UUID | None = None,
         original_files: list[OriginalFile] | None = None,
         synced_range: SyncedRange | None = None,
+        declared_gbo_types: frozenset[GboType] | None = None,
+        source_key: str = "",
     ) -> IngestResult:
         """Land candidates into the canonical store in DURABLE, fault-isolated batches.
 
@@ -127,7 +133,13 @@ class IngestService:
         OPEN transient gap fully inside that range is closed — AFTER all batch data has been
         committed above (SYN-R3 / ING-UPS-R2 / ING-GAP-R4), so store, cursor, and gap state
         stay mutually consistent and a crash mid-run never advances past un-committed data (ING-R6).
+
+        ADP-R3 (fail-closed): BEFORE any write, every candidate's ``gbo_type`` must be in
+        the adapter's ``declared_gbo_types`` (when given) AND in the engine-writable set —
+        an undeclared/unknown type raises :class:`UndeclaredGboTypeError`; the batch is
+        REFUSED, never partially/silently dropped from the canonical store.
         """
+        require_declared_types(candidates, declared_gbo_types, source_key=source_key)
         athlete = _uid(athlete_id)
         descriptor = _uid(source_descriptor_id)
         run_id = ingest_run_id or uuid7()
@@ -188,7 +200,7 @@ class IngestService:
         start = _parse_start_time(cand.payload["start_time"])
         duration = float(cast("float", cand.payload.get("elapsed_time_s") or 0))
         sport = str(cand.payload.get("sport") or "other")
-        for act in await self._windowed_activities(athlete, start):
+        for act in await _windowed_activities(self._session, athlete, start):
             # SQLite returns tz-naive datetimes; coerce to UTC for the matcher (GBO-R32).
             act_start = _parse_start_time(act.start_time)
             if self._resolver.resolve_activity_identity(
@@ -197,27 +209,6 @@ class IngestService:
             ):
                 return act.activity_id
         return uuid7()
-
-    async def _windowed_activities(
-        self, athlete: uuid.UUID, start: _dt.datetime
-    ) -> list[Activity]:
-        """Existing activities whose ``start_time`` falls within ±2h of ``start``.
-
-        Returns them in a stable order (start_time, then activity_id) so identity
-        resolution is deterministic (CONF-R4). The fuzzy start/duration/sport matcher
-        is run per candidate; nothing outside the window is considered (DEDUP-R7).
-        """
-        lo, hi = start - _IDENTITY_WINDOW, start + _IDENTITY_WINDOW
-        stmt = (
-            select(Activity)
-            .where(
-                Activity.athlete_id == athlete,
-                Activity.start_time >= lo,
-                Activity.start_time <= hi,
-            )
-            .order_by(Activity.start_time, Activity.activity_id)
-        )
-        return list((await self._session.execute(stmt)).scalars().all())
 
     async def _write_activity_canonical(
         self, athlete: uuid.UUID, activity_id: uuid.UUID
@@ -312,6 +303,28 @@ class IngestService:
         )
 
 
+async def _windowed_activities(
+    session: AsyncSession, athlete: uuid.UUID, start: _dt.datetime
+) -> list[Activity]:
+    """Existing activities whose ``start_time`` falls within ±2h of ``start``.
+
+    Returns them in a stable order (start_time, then activity_id) so identity
+    resolution is deterministic (CONF-R4). The fuzzy start/duration/sport matcher
+    is run per candidate; nothing outside the window is considered (DEDUP-R7).
+    """
+    lo, hi = start - _IDENTITY_WINDOW, start + _IDENTITY_WINDOW
+    stmt = (
+        select(Activity)
+        .where(
+            Activity.athlete_id == athlete,
+            Activity.start_time >= lo,
+            Activity.start_time <= hi,
+        )
+        .order_by(Activity.start_time, Activity.activity_id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 def _batched(candidates: list[GboCandidate], size: int | None) -> list[list[GboCandidate]]:
     """Split candidates into bounded batches (PERF-R1 / ING-UPS-R1); ``None`` = one batch."""
     if size is None or size >= len(candidates):
@@ -380,6 +393,10 @@ async def _resolve_candidate(
                 result.activities_written.add(str(activity_id))
             elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
                 wellness_dates.add(_parse_date(cand.payload["local_date"]))
+            else:  # unreachable after require_declared_types; refuse, never drop (ADP-R3)
+                raise UndeclaredGboTypeError(str(cand.gbo_type), "")
+    except UndeclaredGboTypeError:
+        raise  # ADP-R3: a typed REFUSAL, never silently counted as a failed record
     except Exception:
         result.candidates_failed += 1  # ING-UPS-R3 record isolation; keep the run
         return

@@ -1,0 +1,102 @@
+[
+ {
+  "adapter_version": "1",
+  "confidence": 1.0,
+  "content_hash": "060442c65ea98627085c7e9821691684a632e93d51a93491023ea5a375b9baa1",
+  "gbo_type": "activity",
+  "mapping_version": "1",
+  "observed_at": "2024-01-02 10:00:00+00:00",
+  "payload": {
+   "avg_cadence_rpm": null,
+   "avg_hr_bpm": null,
+   "avg_power_w": null,
+   "avg_speed_mps": null,
+   "avg_temp_c": null,
+   "device_class": "powermeter",
+   "distance_m": null,
+   "elapsed_time_s": null,
+   "elevation_gain_m": null,
+   "energy_kj": null,
+   "has_cadence": true,
+   "has_gps": true,
+   "has_hr": true,
+   "has_power": true,
+   "laps": [],
+   "max_hr_bpm": null,
+   "max_power_w": null,
+   "moving_time_s": null,
+   "sport": "other",
+   "start_time": "2024-01-02 10:00:00+00:00",
+   "streams": {
+    "altitude_m": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      100.0,
+      101.0,
+      102.0
+     ]
+    },
+    "cadence_rpm": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      90.0,
+      91.0,
+      92.0
+     ]
+    },
+    "hr_bpm": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      140.0,
+      142.0,
+      144.0
+     ]
+    },
+    "latlng": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      [
+       45.0,
+       7.0
+      ],
+      [
+       45.0001,
+       7.0001
+      ],
+      [
+       45.0002,
+       7.0002
+      ]
+     ]
+    },
+    "power_w": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      200.0,
+      210.0,
+      220.0
+     ]
+    },
+    "temp_c": {
+     "sample_basis": "time",
+     "sample_rate_hz": 1.0,
+     "values": [
+      21.0,
+      21.0,
+      null
+     ]
+    }
+   },
+   "sub_sport": null,
+   "total_work_j": null
+  },
+  "source_native_id": "2024-01-02T10:00:00+00:00|2.000|3",
+  "trust_tier": "raw_stream",
+  "untrusted_content": true
+ }
+]

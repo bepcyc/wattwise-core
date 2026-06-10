@@ -227,6 +227,8 @@ class Settings(BaseSettings):
     adapters__intervals_icu__bucket_reduce_factor: float = Field(gt=0, lt=1)
     adapters__intervals_icu__bucket_min_rate: float = Field(gt=0)
     adapters__intervals_icu__http_timeout_s: float = Field(gt=0)
+    adapters__intervals_icu__discover_page_size: int = Field(ge=1)
+    ingestion__backfill_window_days: int = Field(ge=1)
 
     # --- analytics (doc 40 constants) ---
     analytics__ctl_time_constant_days: float = Field(gt=0)

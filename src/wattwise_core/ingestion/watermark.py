@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
 from wattwise_core.domain.enums import GapReason, GapState, GboType, Severity
+from wattwise_core.observability import metrics as _metrics
 from wattwise_core.persistence.models.source import IngestionGap, IngestionWatermark
 
 # The empty-string sentinel for "no per-stream sub-key" (SYN-R2 ``[, stream]``), so the
@@ -91,6 +92,11 @@ async def advance_and_heal(
             range_end_at=synced_range.newest,
             closed_at=synced_range.now,
         )
+    closed += await close_token_gaps(
+        session, athlete_id, source_descriptor_id,
+        {c.source_native_id for c in committed},
+        closed_at=synced_range.now,
+    )
     return AdvanceResult(watermarks_advanced=advanced, gaps_closed=closed)
 
 
@@ -202,6 +208,10 @@ async def open_gap(
     )
     session.add(gap)
     await session.flush()
+    # ING-OBS-R2: open-gap counts are queryable by reason on the metrics surface.
+    _metrics.get_registry().increment(
+        _metrics.INGEST_GAPS_OPENED, labels={"reason": reason.value}
+    )
     return gap
 
 
@@ -241,6 +251,45 @@ async def close_covering_gaps(
             closed += 1
     if closed:
         await session.flush()
+        # ING-OBS-R2: the transient self-heal rate is observable (ING-GAP-R4).
+        _metrics.get_registry().increment(_metrics.INGEST_GAPS_CLOSED, amount=float(closed))
+    return closed
+
+
+async def close_token_gaps(
+    session: AsyncSession,
+    athlete_id: uuid.UUID,
+    source_descriptor_id: uuid.UUID,
+    landed_native_ids: set[str],
+    *,
+    closed_at: _dt.datetime,
+) -> int:
+    """Self-heal token-precise transient gaps whose record just landed (ING-GAP-R4).
+
+    A per-record ``fetch_failed`` gap covers exactly one record token (ING-GAP-R5);
+    when a later successful sync lands that record, the gap closes automatically with
+    the closure time recorded. Terminal gaps are never auto-closed. Returns the count.
+    """
+    if not landed_native_ids:
+        return 0
+    stmt = select(IngestionGap).where(
+        IngestionGap.athlete_id == athlete_id,
+        IngestionGap.source_descriptor_id == source_descriptor_id,
+        IngestionGap.state == GapState.OPEN,
+        IngestionGap.transient.is_(True),
+        IngestionGap.range_start_token.in_(landed_native_ids),
+    )
+    closed = 0
+    for gap in (await session.execute(stmt)).scalars().all():
+        if gap.range_end_token != gap.range_start_token:
+            continue  # only single-record token gaps heal here
+        gap.state = GapState.CLOSED
+        gap.closed_at = closed_at
+        gap.last_seen_at = closed_at
+        closed += 1
+    if closed:
+        await session.flush()
+        _metrics.get_registry().increment(_metrics.INGEST_GAPS_CLOSED, amount=float(closed))
     return closed
 
 
@@ -250,6 +299,7 @@ __all__ = [
     "advance_and_heal",
     "advance_watermark",
     "close_covering_gaps",
+    "close_token_gaps",
     "open_gap",
     "watermark_for",
 ]

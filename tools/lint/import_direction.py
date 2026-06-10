@@ -80,6 +80,11 @@ _SOURCE_LITERAL_EXEMPT: frozenset[tuple[str, ...]] = frozenset(
         ("api", "routers", "data_health"),
         ("api", "connection_catalog"),
         ("ingestion", "registry"),
+        # The adapter-contract capability vocabulary: its SyncMode enum carries the
+        # spec's ``file_import`` mode token (ADP-R1/SYN-R1), which textually matches
+        # the built-in file-import source_key — contract vocabulary, not a consumer
+        # branching on source identity.
+        ("ingestion", "capability"),
     }
 )
 
@@ -126,7 +131,12 @@ def _module_parts(path: Path) -> list[str] | None:
 # anti-corruption SEAM L2 adapters implement (spec lists "seams" among the rankless
 # packages); it carries no layer rank so an adapter may import it (ARCH-R8 still bars
 # adapters from importing the store/analytics, which DO carry ranks).
-_RANKLESS_SEAM_MODULES: frozenset[tuple[str, ...]] = frozenset({("ingestion", "base")})
+# ``ingestion.capability`` is the same seam's capability-descriptor vocabulary
+# (ADP-R1..R3: CapabilityDescriptor, DiscoveryRef/Page, AuthContext) that every
+# adapter DECLARES against, so it is rankless for the identical reason.
+_RANKLESS_SEAM_MODULES: frozenset[tuple[str, ...]] = frozenset(
+    {("ingestion", "base"), ("ingestion", "capability")}
+)
 
 
 def _layer_of(parts: list[str]) -> int | None:
