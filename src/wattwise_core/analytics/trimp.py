@@ -295,22 +295,16 @@ def banister_hr_load(
     )
 
 
-def _validate_zone_spec(
-    bounds: np.ndarray, wts: np.ndarray
-) -> Unavailable | None:
+def _validate_zone_spec(bounds: np.ndarray, wts: np.ndarray) -> Unavailable | None:
     """Validate zone boundaries + weights; return a typed Unavailable or None.
 
     Domain preconditions (all -> ``OUT_OF_DOMAIN``): non-empty, finite, strictly
     ascending boundaries; finite weights with ``len(weights) == len(bounds) + 1``.
     """
     if bounds.size == 0:
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN, "zone_boundaries must be non-empty"
-        )
+        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "zone_boundaries must be non-empty")
     if not np.all(np.isfinite(bounds)):
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN, "zone_boundaries must all be finite"
-        )
+        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "zone_boundaries must all be finite")
     if np.any(np.diff(bounds) <= 0.0):
         return Unavailable(
             UnavailableReason.OUT_OF_DOMAIN,
@@ -319,13 +313,10 @@ def _validate_zone_spec(
     if wts.size != bounds.size + 1:
         return Unavailable(
             UnavailableReason.OUT_OF_DOMAIN,
-            f"weights length ({wts.size}) must equal len(zone_boundaries) + 1 "
-            f"({bounds.size + 1})",
+            f"weights length ({wts.size}) must equal len(zone_boundaries) + 1 ({bounds.size + 1})",
         )
     if not np.all(np.isfinite(wts)):
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN, "weights must all be finite"
-        )
+        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "weights must all be finite")
     return None
 
 

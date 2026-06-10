@@ -167,9 +167,7 @@ async def _the_activity(session: AsyncSession) -> Activity:
     return (await session.execute(select(Activity))).scalars().one()
 
 
-async def _live_candidates(
-    session: AsyncSession, activity_id: uuid.UUID
-) -> list[SourceCandidate]:
+async def _live_candidates(session: AsyncSession, activity_id: uuid.UUID) -> list[SourceCandidate]:
     """The live (non-superseded) activity candidates resolved to ``activity_id``.
 
     This IS the cross-source lineage the resolver consumes: every retained per-source
@@ -198,9 +196,7 @@ async def _provenance(
     """
     candidates = await _live_candidates(session, activity_id)
     policy = await load_trust_policy(session, uuid.UUID(athlete_id), candidates)
-    contributors = field_candidates(
-        candidates, field_name, lambda c: policy.tier(c, field_name)
-    )
+    contributors = field_candidates(candidates, field_name, lambda c: policy.tier(c, field_name))
     resolved = resolve_field(contributors, dispute_tolerance=0.05)
     assert resolved is not None
     return resolved
@@ -238,13 +234,18 @@ async def test_two_sources_same_session_collapse_to_one_activity(session: AsyncS
     athlete_id, file_src, api_src = await _seed(session)
     ingest = IngestService(session)
     file_cand = _ride(
-        native_id="file-1", scalars={"avg_power_w": 250.0}, seconds=3600,
+        native_id="file-1",
+        scalars={"avg_power_w": 250.0},
+        seconds=3600,
         tier=Fidelity.RAW_STREAM,
     )
     # Same real session from the API source: start drifts +90s, duration +5s — within tol.
     api_cand = _ride(
-        native_id="api-1", scalars={"avg_power_w": 251.0}, seconds=3605,
-        tier=Fidelity.PLATFORM_COMPUTED, start=_START + _dt.timedelta(seconds=90),
+        native_id="api-1",
+        scalars={"avg_power_w": 251.0},
+        seconds=3605,
+        tier=Fidelity.PLATFORM_COMPUTED,
+        start=_START + _dt.timedelta(seconds=90),
     )
     await ingest.ingest(athlete_id, file_src, [file_cand])
     await ingest.ingest(athlete_id, api_src, [api_cand])
@@ -282,16 +283,22 @@ async def test_different_fields_win_from_different_sources(session: AsyncSession
     athlete_id, src_a, src_b = await _seed(session)
     # A is the power authority; B is the HR + cadence authority (declared per channel).
     await _set_profile(
-        session, src_a,
-        {"avg_power_w": Fidelity.RAW_STREAM.value,
-         "avg_hr_bpm": Fidelity.SUMMARY_ONLY.value,
-         "avg_cadence_rpm": Fidelity.SUMMARY_ONLY.value},
+        session,
+        src_a,
+        {
+            "avg_power_w": Fidelity.RAW_STREAM.value,
+            "avg_hr_bpm": Fidelity.SUMMARY_ONLY.value,
+            "avg_cadence_rpm": Fidelity.SUMMARY_ONLY.value,
+        },
     )
     await _set_profile(
-        session, src_b,
-        {"avg_power_w": Fidelity.SUMMARY_ONLY.value,
-         "avg_hr_bpm": Fidelity.RAW_STREAM.value,
-         "avg_cadence_rpm": Fidelity.RAW_STREAM.value},
+        session,
+        src_b,
+        {
+            "avg_power_w": Fidelity.SUMMARY_ONLY.value,
+            "avg_hr_bpm": Fidelity.RAW_STREAM.value,
+            "avg_cadence_rpm": Fidelity.RAW_STREAM.value,
+        },
     )
     ingest = IngestService(session)
     cand_a = _ride(
@@ -356,12 +363,19 @@ async def test_recency_breaks_tie_through_ingest(session: AsyncSession) -> None:
     athlete_id, src_a, src_b = await _seed(session)
     ingest = IngestService(session)
     older = _ride(
-        native_id="old-1", scalars={"avg_power_w": 200.0}, tier=Fidelity.PLATFORM_COMPUTED,
-        confidence=1.0, observed_at=_dt.datetime(2026, 6, 1, 7, 0, tzinfo=UTC),
+        native_id="old-1",
+        scalars={"avg_power_w": 200.0},
+        tier=Fidelity.PLATFORM_COMPUTED,
+        confidence=1.0,
+        observed_at=_dt.datetime(2026, 6, 1, 7, 0, tzinfo=UTC),
     )
     newer = _ride(
-        native_id="new-1", scalars={"avg_power_w": 240.0}, tier=Fidelity.PLATFORM_COMPUTED,
-        confidence=1.0, observed_at=_dt.datetime(2026, 6, 1, 10, 0, tzinfo=UTC), hash_salt="n",
+        native_id="new-1",
+        scalars={"avg_power_w": 240.0},
+        tier=Fidelity.PLATFORM_COMPUTED,
+        confidence=1.0,
+        observed_at=_dt.datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+        hash_salt="n",
     )
     await ingest.ingest(athlete_id, src_a, [older])
     await ingest.ingest(athlete_id, src_b, [newer])
@@ -383,12 +397,19 @@ async def test_confidence_decides_before_recency(session: AsyncSession) -> None:
     athlete_id, src_a, src_b = await _seed(session)
     ingest = IngestService(session)
     confident_old = _ride(
-        native_id="old-1", scalars={"avg_power_w": 200.0}, tier=Fidelity.PLATFORM_COMPUTED,
-        confidence=0.95, observed_at=_dt.datetime(2026, 6, 1, 7, 0, tzinfo=UTC),
+        native_id="old-1",
+        scalars={"avg_power_w": 200.0},
+        tier=Fidelity.PLATFORM_COMPUTED,
+        confidence=0.95,
+        observed_at=_dt.datetime(2026, 6, 1, 7, 0, tzinfo=UTC),
     )
     unsure_new = _ride(
-        native_id="new-1", scalars={"avg_power_w": 240.0}, tier=Fidelity.PLATFORM_COMPUTED,
-        confidence=0.40, observed_at=_dt.datetime(2026, 6, 1, 10, 0, tzinfo=UTC), hash_salt="n",
+        native_id="new-1",
+        scalars={"avg_power_w": 240.0},
+        tier=Fidelity.PLATFORM_COMPUTED,
+        confidence=0.40,
+        observed_at=_dt.datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+        hash_salt="n",
     )
     await ingest.ingest(athlete_id, src_a, [confident_old])
     await ingest.ingest(athlete_id, src_b, [unsure_new])
@@ -405,9 +426,7 @@ async def test_confidence_decides_before_recency(session: AsyncSession) -> None:
 # Ingest-order independence / determinism (CONF-R4 / GBO-AC-1).
 
 
-async def _ingest_pair_in_order(
-    first_native: str, second_native: str
-) -> tuple[float, bool, int]:
+async def _ingest_pair_in_order(first_native: str, second_native: str) -> tuple[float, bool, int]:
     """Ingest two conflicting sources in a given order into a FRESH store; report outcome.
 
     Returns ``(winning_power, disputed_flag, activity_count)`` so two orders can be
@@ -417,13 +436,23 @@ async def _ingest_pair_in_order(
     try:
         athlete_id, file_src, api_src = await _seed(s)
         by_src = {
-            "file": (file_src, _ride(
-                native_id="file-1", scalars={"avg_power_w": 200.0}, tier=Fidelity.RAW_STREAM,
-            )),
-            "api": (api_src, _ride(
-                native_id="api-1", scalars={"avg_power_w": 320.0},
-                tier=Fidelity.PLATFORM_COMPUTED, hash_salt="api",
-            )),
+            "file": (
+                file_src,
+                _ride(
+                    native_id="file-1",
+                    scalars={"avg_power_w": 200.0},
+                    tier=Fidelity.RAW_STREAM,
+                ),
+            ),
+            "api": (
+                api_src,
+                _ride(
+                    native_id="api-1",
+                    scalars={"avg_power_w": 320.0},
+                    tier=Fidelity.PLATFORM_COMPUTED,
+                    hash_salt="api",
+                ),
+            ),
         }
         ingest = IngestService(s)
         for key in (first_native, second_native):
@@ -474,11 +503,16 @@ async def test_shared_native_id_outside_window_stays_separate(session: AsyncSess
     athlete_id, file_src, api_src = await _seed(session)
     ingest = IngestService(session)
     first = _ride(
-        native_id="device-uuid-xyz", scalars={"avg_power_w": 200.0}, tier=Fidelity.RAW_STREAM,
+        native_id="device-uuid-xyz",
+        scalars={"avg_power_w": 200.0},
+        tier=Fidelity.RAW_STREAM,
     )
     far = _ride(
-        native_id="device-uuid-xyz", scalars={"avg_power_w": 210.0},
-        tier=Fidelity.PLATFORM_COMPUTED, start=_START + _dt.timedelta(hours=6), hash_salt="far",
+        native_id="device-uuid-xyz",
+        scalars={"avg_power_w": 210.0},
+        tier=Fidelity.PLATFORM_COMPUTED,
+        start=_START + _dt.timedelta(hours=6),
+        hash_salt="far",
     )
     await ingest.ingest(athlete_id, file_src, [first])
     await ingest.ingest(athlete_id, api_src, [far])
@@ -508,12 +542,18 @@ async def test_fuzzy_match_inside_window_collapses_outside_stays_separate(
     ingest = IngestService(session)
     base = _ride(native_id="f-1", scalars={"avg_power_w": 200.0}, tier=Fidelity.RAW_STREAM)
     near = _ride(
-        native_id="a-1", scalars={"avg_power_w": 205.0}, tier=Fidelity.PLATFORM_COMPUTED,
-        start=_START + _dt.timedelta(seconds=90), hash_salt="near",
+        native_id="a-1",
+        scalars={"avg_power_w": 205.0},
+        tier=Fidelity.PLATFORM_COMPUTED,
+        start=_START + _dt.timedelta(seconds=90),
+        hash_salt="near",
     )
     far = _ride(
-        native_id="a-2", scalars={"avg_power_w": 210.0}, tier=Fidelity.PLATFORM_COMPUTED,
-        start=_START + _dt.timedelta(minutes=10), hash_salt="far",
+        native_id="a-2",
+        scalars={"avg_power_w": 210.0},
+        tier=Fidelity.PLATFORM_COMPUTED,
+        start=_START + _dt.timedelta(minutes=10),
+        hash_salt="far",
     )
     await ingest.ingest(athlete_id, file_src, [base])
     await ingest.ingest(athlete_id, api_src, [near])  # within window → collapses with base
@@ -547,15 +587,21 @@ async def test_disputed_field_keeps_winner_and_retains_both_candidates(
     athlete_id, file_src, api_src = await _seed(session)
     ingest = IngestService(session)
     await ingest.ingest(
-        athlete_id, file_src,
+        athlete_id,
+        file_src,
         [_ride(native_id="file-1", scalars={"avg_power_w": 200.0}, tier=Fidelity.RAW_STREAM)],
     )
     await ingest.ingest(
-        athlete_id, api_src,
-        [_ride(
-            native_id="api-1", scalars={"avg_power_w": 320.0},
-            tier=Fidelity.PLATFORM_COMPUTED, hash_salt="api",
-        )],
+        athlete_id,
+        api_src,
+        [
+            _ride(
+                native_id="api-1",
+                scalars={"avg_power_w": 320.0},
+                tier=Fidelity.PLATFORM_COMPUTED,
+                hash_salt="api",
+            )
+        ],
     )
     await session.commit()
 

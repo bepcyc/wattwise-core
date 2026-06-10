@@ -89,9 +89,7 @@ async def provisioned() -> AsyncIterator[dict[DbRole, str]]:
         async with admin.begin() as conn:
             await conn.execute(text(f'CREATE SCHEMA "{_SCHEMA}"'))
             for table in (_CANON_TABLE, _MASTER_TABLE, _STATE_TABLE):
-                await conn.execute(
-                    text(f"CREATE TABLE {table} (id integer PRIMARY KEY, val text)")
-                )
+                await conn.execute(text(f"CREATE TABLE {table} (id integer PRIMARY KEY, val text)"))
         # Provision the four roles + grant the per-domain privileges (the unit under test).
         await provision_roles(
             admin,

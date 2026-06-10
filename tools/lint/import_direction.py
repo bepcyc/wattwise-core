@@ -348,9 +348,7 @@ def _evaluate_edge(
     # (2) Source-name adapter import — forbidden for any consumer that is NOT itself
     # inside the adapter package (an adapter may import its own siblings).
     importer_is_adapter = (
-        len(own_parts) >= 2
-        and own_parts[0] == "ingestion"
-        and own_parts[1] == "adapters"
+        len(own_parts) >= 2 and own_parts[0] == "ingestion" and own_parts[1] == "adapters"
     )
     if _is_source_specific_adapter(target) and not importer_is_adapter:
         found.append(

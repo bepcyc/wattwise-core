@@ -134,9 +134,7 @@ def test_valid_scope_passes_and_subject_is_server_derived() -> None:
     """A token with the right scope passes; the subject comes from the token (AUTH-R3)."""
     client = _app_with_probe_routes()
     token = _token(scopes=["read"])
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     assert resp.json() == {"subject": "owner"}
 
@@ -145,9 +143,7 @@ def test_expired_token_is_401() -> None:
     """An expired token -> 401 (signature/expiry verified every request, AUTH-R6)."""
     client = _app_with_probe_routes()
     token = _token(scopes=["read"], ttl_seconds=-10)
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 401
     assert resp.json()["type"] == f"{PROBLEM_BASE_URI}unauthenticated"
 
@@ -155,9 +151,7 @@ def test_expired_token_is_401() -> None:
 def test_non_bearer_scheme_is_401() -> None:
     """A non-bearer Authorization scheme is rejected as unauthenticated (AUTH-R2)."""
     client = _app_with_probe_routes()
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": "Basic abc123"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": "Basic abc123"})
     assert resp.status_code == 401
 
 
@@ -176,9 +170,7 @@ def test_wrong_audience_token_is_401() -> None:
         _SIGNING_KEY,
         algorithm=TOKEN_ALGORITHM,
     )
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {bad}"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {bad}"})
     assert resp.status_code == 401
 
 

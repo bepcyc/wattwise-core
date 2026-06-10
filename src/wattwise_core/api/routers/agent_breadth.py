@@ -108,9 +108,7 @@ class BreadthEngine(Protocol):
         self, *, athlete_id: str, limit: int, offset: int
     ) -> Sequence[RecalledItem]: ...
 
-    async def get_memory(
-        self, *, athlete_id: str, memory_item_id: str
-    ) -> RecalledItem | None: ...
+    async def get_memory(self, *, athlete_id: str, memory_item_id: str) -> RecalledItem | None: ...
 
     async def delete_memory(self, *, athlete_id: str, memory_item_id: str) -> bool: ...
 
@@ -333,9 +331,7 @@ async def _active_subscription(
     dependencies=[_Agent],
     operation_id="agentDigestList",
 )
-async def agent_digest_list(
-    athlete_id: AthleteId, session: Session
-) -> DigestSubscriptionList:
+async def agent_digest_list(athlete_id: AthleteId, session: Session) -> DigestSubscriptionList:
     """List the owner's standing digest subscriptions (API-R14).
 
     Requires the ``agent`` scope (AUTH-R13). Reads ONLY the server-derived owner's subscriptions

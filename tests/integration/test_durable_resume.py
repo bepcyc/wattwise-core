@@ -242,8 +242,10 @@ async def test_concurrent_ensure_thread_is_idempotent(
 
     async with factory() as session:
         rows = (
-            await session.execute(select(AgentThread).where(AgentThread.thread_id == THREAD_ID))
-        ).scalars().all()
+            (await session.execute(select(AgentThread).where(AgentThread.thread_id == THREAD_ID)))
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1, "exactly one agent_thread row despite the concurrent get-or-create"
     assert rows[0].athlete_id == uuid.UUID(ATHLETE_A)
 
@@ -269,10 +271,10 @@ async def _load_writes(
     saver = _saver(factory)
     async with factory() as session:
         rows = (
-            await session.execute(
-                select(AgentWrite).where(AgentWrite.task_id == task_id)
-            )
-        ).scalars().all()
+            (await session.execute(select(AgentWrite).where(AgentWrite.task_id == task_id)))
+            .scalars()
+            .all()
+        )
     out: dict[str, tuple[int, Any]] = {}
     for row in rows:
         value = saver.serde.loads_typed((row.value_type, row.value_blob))
@@ -366,9 +368,7 @@ async def test_cross_identity_refused_on_probe_path(
     real_resolve = type(saver_b)._resolve_thread  # unbound; called with (saver, session, tid)
     calls = {"n": 0}
 
-    async def _resolve_first_miss(
-        session: AsyncSession, thread_id: str
-    ) -> AgentThread | None:
+    async def _resolve_first_miss(session: AsyncSession, thread_id: str) -> AgentThread | None:
         # First call = the ``_ensure_thread`` fast-path: pretend the thread is absent so B
         # proceeds to INSERT (and collides). Every later call = the probe: use the REAL
         # resolver so it loads A's row under identity B and refuses (CKPT-R3).
@@ -380,9 +380,7 @@ async def test_cross_identity_refused_on_probe_path(
     saver_b._resolve_thread = _resolve_first_miss  # type: ignore[method-assign]
 
     with pytest.raises(CheckpointIdentityError):
-        await saver_b.aput(
-            _config(thread_id=cross_thread), _checkpoint("cp-b")[1], _metadata(), {}
-        )
+        await saver_b.aput(_config(thread_id=cross_thread), _checkpoint("cp-b")[1], _metadata(), {})
     # The fast-path miss + at least one probe call must both have run (probe truly exercised).
     assert calls["n"] >= 2, "the IntegrityError probe branch was not reached"
 
@@ -468,10 +466,14 @@ async def _interrupt_rows(
     """Return the ledger rows for a thread (newest grouping not needed; few rows)."""
     async with factory() as session:
         rows = (
-            await session.execute(
-                select(AgentInterrupt).where(AgentInterrupt.thread_id == thread_id)
+            (
+                await session.execute(
+                    select(AgentInterrupt).where(AgentInterrupt.thread_id == thread_id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     return list(rows)
 
 

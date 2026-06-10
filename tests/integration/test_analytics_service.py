@@ -201,9 +201,7 @@ async def test_endurance_score_unknown_athlete_fails_closed(session: AsyncSessio
 
 async def _add_hr_channel(session: AsyncSession, activity_id: str, bpm: float) -> None:
     """Attach a constant-HR channel to the activity's existing stream set."""
-    stmt = select(ActivityStreamSet).where(
-        ActivityStreamSet.activity_id == uuid.UUID(activity_id)
-    )
+    stmt = select(ActivityStreamSet).where(ActivityStreamSet.activity_id == uuid.UUID(activity_id))
     stream_set = (await session.execute(stmt)).scalar_one()
     session.add(
         StreamChannel(

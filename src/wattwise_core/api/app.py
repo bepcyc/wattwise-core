@@ -257,9 +257,7 @@ def _wire_router_seams(app: FastAPI) -> None:
         overrides[connections_router.credential_sink] = lambda: sink
 
 
-def _wire_planning(
-    overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object
-) -> None:
+def _wire_planning(overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object) -> None:
     """Bind the planning router's seams to the real gates + the shared agent engine (API-R32).
 
     The planning surface mirrors the agent/performance routers: GENERATION (``POST

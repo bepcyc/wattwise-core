@@ -305,10 +305,7 @@ def _merge_revealed_citations(
     """
     seen = {c.record_id for c in citations}
     extra = [
-        c
-        for obs in revealed
-        for c in obs.citations
-        if c.record_id and c.record_id not in seen
+        c for obs in revealed for c in obs.citations if c.record_id and c.record_id not in seen
     ]
     return (*citations, *extra)
 
@@ -348,9 +345,7 @@ async def weekly_digest(
     # (COACH-R7), and hold the standard-length number cap (VOICE-R7). Presentation only — the
     # grounded citations below are untouched (GROUND-R5/-R7).
     policy = presentation if presentation is not None else _DEFAULT_PRESENTATION
-    html, text = enforce_presentation(
-        html, text, response_length="standard", presentation=policy
-    )
+    html, text = enforce_presentation(html, text, response_length="standard", presentation=policy)
     observations = _project_observations(_as_seq(final.get("observations")))
     return Digest(
         status=status,

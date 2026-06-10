@@ -230,9 +230,7 @@ def build_agent_state_database(
     on a separate engine/pool. ``pool_size`` / ``max_overflow`` optionally cap the
     non-memory pool (see :func:`create_agent_state_engine`).
     """
-    return AgentStateDatabase(
-        settings, dsn=dsn, pool_size=pool_size, max_overflow=max_overflow
-    )
+    return AgentStateDatabase(settings, dsn=dsn, pool_size=pool_size, max_overflow=max_overflow)
 
 
 __all__ = [

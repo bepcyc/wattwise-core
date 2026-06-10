@@ -29,6 +29,7 @@ from wattwise_core.analytics.result import (
 if TYPE_CHECKING:
     from wattwise_core.analytics.service import AnalyticsService
 
+
 async def _gather_endurance_score(
     svc: AnalyticsService, athlete_id: str, as_of: _dt.date
 ) -> MetricResult[float]:
@@ -91,4 +92,3 @@ async def _latest_decoupling(
         UnavailableReason.MISSING_REQUIRED_INPUT,
         "no activity in the window yields a computed aerobic decoupling",
     )
-

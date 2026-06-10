@@ -240,10 +240,7 @@ def _mmp_result_for_duration(
     if win is None:
         return Unavailable(
             reason=UnavailableReason.INSUFFICIENT_DATA,
-            detail=(
-                f"no valid contiguous window of length >= {di}s "
-                "(longest valid run too short)"
-            ),
+            detail=(f"no valid contiguous window of length >= {di}s (longest valid run too short)"),
         )
     if not np.isfinite(win.mean_power_w):  # pragma: no cover - guard (ANL-R32)
         return Unavailable(

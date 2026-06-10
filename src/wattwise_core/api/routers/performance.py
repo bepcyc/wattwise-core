@@ -23,35 +23,17 @@ HRV-R0, HRV-R5, DEC-R1, TRIMP-R1, TRIMP-R3.
 from __future__ import annotations
 
 import datetime as _dt
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
-from wattwise_core.analytics.result import (
-    Computed,
-    MetricResult,
-    Unavailable,
-    UnavailableReason,
-    is_computed,
-)
+from wattwise_core.analytics.result import Unavailable, is_computed
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.api.chart_schemas import ChartSeries, CoverageDescriptor, SeriesPoint
 from wattwise_core.api.deps import RateLimit
 from wattwise_core.api.errors import ProblemError
 from wattwise_core.api.perf_helpers import (
-    absent_coverage as _absent_coverage,
-)
-from wattwise_core.api.perf_helpers import (
     activities_in_local_range as _activities_in_range,
-)
-from wattwise_core.api.perf_helpers import (
-    coverage_for as _coverage_for,
-)
-from wattwise_core.api.perf_helpers import (
-    day_label as _day_label,
-)
-from wattwise_core.api.perf_helpers import (
-    duration_label as _duration_label,
 )
 from wattwise_core.api.perf_helpers import (
     empty_coverage as _empty_coverage,
@@ -60,23 +42,27 @@ from wattwise_core.api.perf_helpers import (
     now as _now,
 )
 from wattwise_core.api.perf_helpers import (
-    opt_float as _opt_float,
-)
-from wattwise_core.api.perf_helpers import (
     present_coverage as _present_coverage,
-)
-from wattwise_core.api.perf_helpers import (
-    value_of as _value_of,
 )
 from wattwise_core.api.problems import precondition_unmet, range_reversed
 
-router = APIRouter(prefix="/v1/performance", tags=["performance"], dependencies=[RateLimit])
-
-# HRV series keys (HRV-R3/R5): time-domain + frequency-domain band powers (doc 60 §8).
-_HRV_KEYS: tuple[str, ...] = (
-    "rmssd_ms", "sdnn_ms", "pnn50_pct", "mean_nn_ms", "lf_power", "hf_power", "lf_hf_ratio",
+# The pure per-point payload builders (one per doc-40 chart model, API-R30) live in the
+# focused :mod:`performance_points` sibling (QUAL-R9 size split); behavior is unchanged.
+from wattwise_core.api.routers.performance_points import (
+    _coggan_point,
+    _cp_point,
+    _dec_point,
+    _guard_trimp_domain,
+    _hrv_point,
+    _load_point,
+    _mmp_point,
+    _pmc_point,
+    _pmc_summary,
+    _trimp_point,
+    _wbal_point,
 )
 
+router = APIRouter(prefix="/v1/performance", tags=["performance"], dependencies=[RateLimit])
 
 # --- dependency seams (overridden by the app factory) ---------------------------
 
@@ -147,35 +133,13 @@ async def load_fitness(svc: Service, athlete_id: AthleteId, rng: Range) -> Chart
     last = series[-1] if series else None
     summary = _pmc_summary(last)
     return ChartSeries(
-        items=items, x_axis="local_date", method="pmc_ewma",
-        summary=summary, coverage=_empty_coverage(), computed_at=_now(),
+        items=items,
+        x_axis="local_date",
+        method="pmc_ewma",
+        summary=summary,
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
-
-
-def _pmc_point(day: _dt.date, res: MetricResult[Any]) -> SeriesPoint:
-    """One PMC calendar point: fitness/fatigue/form values + coverage (PMC-R1/R6)."""
-    if is_computed(res):
-        vals: dict[str, float | None] = {
-            "fitness": res.value.ctl, "fatigue": res.value.atl, "form": res.value.tsb,
-            "load": None,
-        }
-    else:
-        vals = {"fitness": None, "fatigue": None, "form": None, "load": None}
-    return SeriesPoint(
-        local_date=day, label=_day_label(day), values=vals, coverage=_coverage_for(res)
-    )
-
-
-def _pmc_summary(last: MetricResult[Any] | None) -> dict[str, Any]:
-    """Precomputed current CTL/ATL/TSB + EWMA constants + seed (PMC-R3)."""
-    cur = last.value if last is not None and is_computed(last) else None
-    return {
-        "fitness": cur.ctl if cur else None,
-        "fatigue": cur.atl if cur else None,
-        "form": cur.tsb if cur else None,
-        "ewma_constants": {"tau_fitness": 42, "tau_fatigue": 7},
-        "seed": None,
-    }
 
 
 # --- §2 daily load vs. stress ---------------------------------------------------
@@ -195,20 +159,13 @@ async def load_metrics(svc: Service, athlete_id: AthleteId, rng: Range) -> Chart
     total = sum(v for v in loads.values() if v is not None)
     summary = {"canonical_load_total": total, "trimp_points_total": None, "load_model": "power_tss"}
     return ChartSeries(
-        items=items, x_axis="local_date", method="daily_load_sum",
-        summary=summary, coverage=_empty_coverage(), computed_at=_now(),
+        items=items,
+        x_axis="local_date",
+        method="daily_load_sum",
+        summary=summary,
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
-
-
-def _load_point(day: _dt.date, value: float | None) -> SeriesPoint:
-    """One daily-load point; a ``None`` is a surfaced typed-unavailable, never ``0``."""
-    present = value is not None
-    cov = CoverageDescriptor(present=present, fidelity="raw_stream" if present else "absent_true",
-                             gap_fraction=0.0 if present else 1.0)
-    vals: dict[str, float | None] = {
-        "canonical_load": value, "power_load": value, "hr_load": None, "trimp_points": None,
-    }
-    return SeriesPoint(local_date=day, label=_day_label(day), values=vals, coverage=cov)
 
 
 # --- §3 critical power ----------------------------------------------------------
@@ -230,26 +187,19 @@ async def critical_power(svc: Service, athlete_id: AthleteId, rng: Range) -> Cha
     items = [_cp_point(d, curve.get(d), fit) for d in sorted(curve)]
     extra = fit.quality.extra
     summary = {
-        "cp_w": fit.value.cp_w, "w_prime_j": fit.value.w_prime_j,
-        "r_squared": fit.value.r2, "points_used": extra.get("n_points"),
+        "cp_w": fit.value.cp_w,
+        "w_prime_j": fit.value.w_prime_j,
+        "r_squared": fit.value.r2,
+        "points_used": extra.get("n_points"),
         "model": "linear_work_time",
     }
     return ChartSeries(
-        items=items, x_axis="duration_s", method="cp_linear_work_time",
-        summary=summary, coverage=_present_coverage(fit.quality), computed_at=_now(),
-    )
-
-
-def _cp_point(d: int, observed: MetricResult[Any] | None, fit: Computed[Any]) -> SeriesPoint:
-    """One duration-grid point: observed MMP + CP-model prediction ``W'/t + CP``."""
-    obs = observed.value.mean_power_w if observed is not None and is_computed(observed) else None
-    predicted = fit.value.w_prime_j / d + fit.value.cp_w if d > 0 else None
-    cov = _coverage_for(observed) if observed is not None else _absent_coverage(
-        Unavailable(UnavailableReason.INSUFFICIENT_DATA)
-    )
-    return SeriesPoint(
-        duration_s=d, label=_duration_label(d),
-        values={"power_watts": obs, "predicted_power_watts": predicted}, coverage=cov,
+        items=items,
+        x_axis="duration_s",
+        method="cp_linear_work_time",
+        summary=summary,
+        coverage=_present_coverage(fit.quality),
+        computed_at=_now(),
     )
 
 
@@ -268,17 +218,12 @@ async def power_curve(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartS
     curve = await svc.power_curve(athlete_id, frm, to)
     items = [_mmp_point(d, curve[d]) for d in sorted(curve)]
     return ChartSeries(
-        items=items, x_axis="duration_s", method="mean_maximal_power",
-        summary={}, coverage=_empty_coverage(), computed_at=_now(),
-    )
-
-
-def _mmp_point(d: int, res: MetricResult[Any]) -> SeriesPoint:
-    """One MMP duration point: best mean power for the duration (nullable per MMP-R5)."""
-    val = res.value.mean_power_w if is_computed(res) else None
-    return SeriesPoint(
-        duration_s=d, label=_duration_label(d),
-        values={"power_watts": val}, coverage=_coverage_for(res),
+        items=items,
+        x_axis="duration_s",
+        method="mean_maximal_power",
+        summary={},
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
 
 
@@ -297,26 +242,12 @@ async def coggan(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries
     activities = await _activities_in_range(svc, athlete_id, frm, to)
     items = [_coggan_point(aid, day, await svc.coggan(aid)) for aid, day in activities]
     return ChartSeries(
-        items=items, x_axis="local_date", method="coggan_np_if_tss",
-        summary={"ftp_w": None}, coverage=_empty_coverage(), computed_at=_now(),
-    )
-
-
-def _coggan_point(activity_id: str, day: _dt.date, res: MetricResult[Any]) -> SeriesPoint:
-    """One per-activity Coggan point: TSS / IF / VI, each propagating unavailable."""
-    if is_computed(res):
-        b = res.value
-        vals: dict[str, float | None] = {
-            "tss": _value_of(b.tss), "intensity_factor": _value_of(b.if_),
-            "variability_index": _value_of(b.variability_index),
-        }
-        cov = _coverage_for(b.tss)
-    else:
-        vals = {"tss": None, "intensity_factor": None, "variability_index": None}
-        cov = _coverage_for(res)
-    return SeriesPoint(
-        local_date=day, activity_id=activity_id, label=_day_label(day),
-        values=vals, coverage=cov,
+        items=items,
+        x_axis="local_date",
+        method="coggan_np_if_tss",
+        summary={"ftp_w": None},
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
 
 
@@ -335,29 +266,12 @@ async def w_balance(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSer
     activities = await _activities_in_range(svc, athlete_id, frm, to)
     items = [_wbal_point(aid, day, await svc.w_balance(aid)) for aid, day in activities]
     return ChartSeries(
-        items=items, x_axis="local_date", method="skiba_2012_differential",
+        items=items,
+        x_axis="local_date",
+        method="skiba_2012_differential",
         summary={"clamping_policy": "raw", "model": "skiba_2012_differential"},
-        coverage=_empty_coverage(), computed_at=_now(),
-    )
-
-
-def _wbal_point(activity_id: str, day: _dt.date, res: MetricResult[Any]) -> SeriesPoint:
-    """One per-activity W'-balance point: start/end/min W' in joules (may be negative)."""
-    if is_computed(res):
-        series = res.value.series
-        start = float(series[0]) if series.size else None
-        end = float(series[-1]) if series.size else None
-        vals: dict[str, float | None] = {
-            "w_prime_start_joules": start, "w_prime_end_joules": end,
-            "w_prime_min_joules": float(res.value.w_prime_balance_min),
-        }
-    else:
-        vals = dict.fromkeys(
-            ("w_prime_start_joules", "w_prime_end_joules", "w_prime_min_joules")
-        )
-    return SeriesPoint(
-        local_date=day, activity_id=activity_id, label=_day_label(day),
-        values=vals, coverage=_coverage_for(res),
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
 
 
@@ -379,24 +293,13 @@ async def hrv(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
         raise _precondition_unmet("hrv_dsp_unavailable", "no HRV recording in range")
     summary = {"avg_rmssd_ms": None, "hrv_spectral_method": None}
     return ChartSeries(
-        items=items, x_axis="local_date", method="hrv_time_domain",
-        summary=summary, coverage=_empty_coverage(), computed_at=_now(),
+        items=items,
+        x_axis="local_date",
+        method="hrv_time_domain",
+        summary=summary,
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
-
-
-def _hrv_point(day: _dt.date, res: MetricResult[Any]) -> SeriesPoint:
-    """One HRV day: time-domain metrics; freq-domain typed-unavailable when absent."""
-    vals: dict[str, float | None] = dict.fromkeys(_HRV_KEYS)
-    if is_computed(res):
-        td = res.value
-        vals.update(
-            rmssd_ms=_opt_float(td.rmssd_ms), sdnn_ms=_opt_float(td.sdnn_ms),
-            pnn50_pct=_opt_float(td.pnn50_pct), mean_nn_ms=_opt_float(td.mean_nn_ms),
-        )
-        cov = _present_coverage(res.quality)
-    else:
-        cov = _absent_coverage(res)
-    return SeriesPoint(local_date=day, label=_day_label(day), values=vals, coverage=cov)
 
 
 # --- §9 aerobic decoupling ------------------------------------------------------
@@ -414,25 +317,12 @@ async def aerobic_decoupling(svc: Service, athlete_id: AthleteId, rng: Range) ->
     activities = await _activities_in_range(svc, athlete_id, frm, to)
     items = [_dec_point(aid, day, await svc.aerobic_decoupling(aid)) for aid, day in activities]
     return ChartSeries(
-        items=items, x_axis="local_date", method="aerobic_decoupling",
-        summary={}, coverage=_empty_coverage(), computed_at=_now(),
-    )
-
-
-def _dec_point(activity_id: str, day: _dt.date, res: MetricResult[float]) -> SeriesPoint:
-    """One per-activity decoupling point: %, plus first/second-half efficiency ratios."""
-    if is_computed(res):
-        extra = res.quality.extra
-        vals: dict[str, float | None] = {
-            "decoupling_pct": float(res.value),
-            "first_half_ratio": _opt_float(extra.get("eff_first_half")),
-            "second_half_ratio": _opt_float(extra.get("eff_second_half")),
-        }
-    else:
-        vals = {"decoupling_pct": None, "first_half_ratio": None, "second_half_ratio": None}
-    return SeriesPoint(
-        local_date=day, activity_id=activity_id, label=_day_label(day),
-        values=vals, coverage=_coverage_for(res),
+        items=items,
+        x_axis="local_date",
+        method="aerobic_decoupling",
+        summary={},
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
 
 
@@ -455,33 +345,12 @@ async def trimp(svc: Service, athlete_id: AthleteId, rng: Range) -> ChartSeries:
     total = sum(float(r.value) for _, _, r in results if is_computed(r))
     summary = {"trimp_points_total": total, "load_model": "hr_load"}
     return ChartSeries(
-        items=items, x_axis="local_date", method="banister_hr_load",
-        summary=summary, coverage=_empty_coverage(), computed_at=_now(),
-    )
-
-
-def _guard_trimp_domain(results: list[tuple[str, _dt.date, MetricResult[float]]]) -> None:
-    """Map a wholly-uncomputable series to ``422`` with the TRIMP-R3 machine code.
-
-    Every point missing thresholds → ``trimp_missing_thresholds``; an out-of-domain HR
-    reserve → ``trimp_hr_domain_invalid``. A mix with ≥1 computed point degrades visibly
-    per-point instead (API-R29).
-    """
-    if any(is_computed(r) for _, _, r in results):
-        return
-    reasons = {r.reason for _, _, r in results if isinstance(r, Unavailable)}
-    if UnavailableReason.OUT_OF_DOMAIN in reasons:
-        raise _precondition_unmet("trimp_hr_domain_invalid", "HR_max must exceed HR_rest")
-    if reasons and reasons <= {UnavailableReason.MISSING_REQUIRED_INPUT}:
-        raise _precondition_unmet("trimp_missing_thresholds", "HR thresholds absent")
-
-
-def _trimp_point(activity_id: str, day: _dt.date, res: MetricResult[float]) -> SeriesPoint:
-    """One per-activity TRIMP point: Banister-HRR points (zonal variant null here)."""
-    vals: dict[str, float | None] = {"trimp_points": _value_of(res), "trimp_zonal": None}
-    return SeriesPoint(
-        local_date=day, activity_id=activity_id, label=_day_label(day),
-        values=vals, coverage=_coverage_for(res),
+        items=items,
+        x_axis="local_date",
+        method="banister_hr_load",
+        summary=summary,
+        coverage=_empty_coverage(),
+        computed_at=_now(),
     )
 
 
@@ -489,6 +358,11 @@ def _trimp_point(activity_id: str, day: _dt.date, res: MetricResult[float]) -> S
 
 
 __all__ = [
-    "ChartSeries", "CoverageDescriptor", "SeriesPoint",
-    "analytics_service", "current_athlete_id", "require_read_scope", "router",
+    "ChartSeries",
+    "CoverageDescriptor",
+    "SeriesPoint",
+    "analytics_service",
+    "current_athlete_id",
+    "require_read_scope",
+    "router",
 ]

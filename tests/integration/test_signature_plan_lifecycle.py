@@ -67,13 +67,19 @@ async def test_record_signature_closes_prior_open_interval(session: AsyncSession
     closed interval so the OLD thresholds resolve for an as-of inside it."""
     athlete = await _seed(session)
     first = await record_signature(
-        session, athlete_id=athlete, signature_type="cycling",
-        effective_date=_dt.date(2026, 1, 1), origin=SignatureOrigin.USER_ENTERED,
+        session,
+        athlete_id=athlete,
+        signature_type="cycling",
+        effective_date=_dt.date(2026, 1, 1),
+        origin=SignatureOrigin.USER_ENTERED,
         ftp_w=250.0,
     )
     await record_signature(
-        session, athlete_id=athlete, signature_type="cycling",
-        effective_date=_dt.date(2026, 6, 1), origin=SignatureOrigin.USER_ENTERED,
+        session,
+        athlete_id=athlete,
+        signature_type="cycling",
+        effective_date=_dt.date(2026, 6, 1),
+        origin=SignatureOrigin.USER_ENTERED,
         ftp_w=270.0,
     )
     await session.refresh(first)
@@ -90,14 +96,20 @@ async def test_out_of_order_signature_write_is_refused(session: AsyncSession) ->
     overlap — the write seam refuses it loudly instead of silently reordering."""
     athlete = await _seed(session)
     await record_signature(
-        session, athlete_id=athlete, signature_type="cycling",
-        effective_date=_dt.date(2026, 6, 1), origin=SignatureOrigin.USER_ENTERED,
+        session,
+        athlete_id=athlete,
+        signature_type="cycling",
+        effective_date=_dt.date(2026, 6, 1),
+        origin=SignatureOrigin.USER_ENTERED,
         ftp_w=270.0,
     )
     with pytest.raises(SignatureIntervalError):
         await record_signature(
-            session, athlete_id=athlete, signature_type="cycling",
-            effective_date=_dt.date(2026, 3, 1), origin=SignatureOrigin.USER_ENTERED,
+            session,
+            athlete_id=athlete,
+            signature_type="cycling",
+            effective_date=_dt.date(2026, 3, 1),
+            origin=SignatureOrigin.USER_ENTERED,
             ftp_w=260.0,
         )
 
@@ -109,9 +121,12 @@ async def test_modeled_signature_below_fit_floor_is_refused(session: AsyncSessio
     athlete = await _seed(session)
     session.add(
         FitnessSignature(
-            athlete_id=athlete, signature_type="cycling",
-            effective_date=_dt.date(2026, 1, 1), origin=SignatureOrigin.MODELED,
-            cp_w=260.0, fit_quality={"r_squared": 0.41, "n_points": 3},
+            athlete_id=athlete,
+            signature_type="cycling",
+            effective_date=_dt.date(2026, 1, 1),
+            origin=SignatureOrigin.MODELED,
+            cp_w=260.0,
+            fit_quality={"r_squared": 0.41, "n_points": 3},
         )
     )
     await session.flush()
@@ -133,8 +148,11 @@ async def test_modeled_signature_without_fit_quality_is_refused_at_write(
     athlete = await _seed(session)
     with pytest.raises(SignatureIntervalError):
         await record_signature(
-            session, athlete_id=athlete, signature_type="cycling",
-            effective_date=_dt.date(2026, 1, 1), origin=SignatureOrigin.MODELED,
+            session,
+            athlete_id=athlete,
+            signature_type="cycling",
+            effective_date=_dt.date(2026, 1, 1),
+            origin=SignatureOrigin.MODELED,
             cp_w=260.0,
         )
 
@@ -145,15 +163,24 @@ async def test_workout_step_schema_enforced_on_orm_write(session: AsyncSession) 
     athlete = await _seed(session)
     with pytest.raises(WorkoutStepError):
         Workout(
-            athlete_id=athlete, name="bad", sport="cycling",
+            athlete_id=athlete,
+            name="bad",
+            sport="cycling",
             steps=[{"intent": "work", "duration_s": 600, "source_field": "x"}],
         )
     workout = Workout(
-        athlete_id=athlete, name="good", sport="cycling",
-        steps=[{
-            "target_type": "power_pct_cp", "intent": "work",
-            "target_low": 88.0, "target_high": 94.0, "duration_s": 1200,
-        }],
+        athlete_id=athlete,
+        name="good",
+        sport="cycling",
+        steps=[
+            {
+                "target_type": "power_pct_cp",
+                "intent": "work",
+                "target_low": 88.0,
+                "target_high": 94.0,
+                "duration_s": 1200,
+            }
+        ],
     )
     session.add(workout)
     await session.flush()
@@ -170,12 +197,19 @@ async def test_plan_requires_lineage_and_is_immutable_after_generation(
     days = [PlanDaySpec(plan_date=_dt.date(2026, 7, 1), intent=PlanDayIntent.EASY)]
     with pytest.raises(PlanLineageError):
         await create_plan(
-            session, athlete_id=athlete, start_date=_dt.date(2026, 7, 1),
-            end_date=_dt.date(2026, 7, 7), days=days, lineage={"engine_version": "1.2.3"},
+            session,
+            athlete_id=athlete,
+            start_date=_dt.date(2026, 7, 1),
+            end_date=_dt.date(2026, 7, 7),
+            days=days,
+            lineage={"engine_version": "1.2.3"},
         )
     plan = await create_plan(
-        session, athlete_id=athlete, start_date=_dt.date(2026, 7, 1),
-        end_date=_dt.date(2026, 7, 7), days=days,
+        session,
+        athlete_id=athlete,
+        start_date=_dt.date(2026, 7, 1),
+        end_date=_dt.date(2026, 7, 7),
+        days=days,
         lineage={"engine_version": "1.2.3", "input_snapshot_ids": {"signature": "sig-1"}},
     )
     day = (

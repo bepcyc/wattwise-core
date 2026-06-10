@@ -199,9 +199,7 @@ async def _account_for(session: AsyncSession, athlete_id: uuid.UUID) -> UserAcco
     )
 
 
-async def _owner_routes(
-    session: AsyncSession, athlete_id: uuid.UUID
-) -> list[NotificationRoute]:
+async def _owner_routes(session: AsyncSession, athlete_id: uuid.UUID) -> list[NotificationRoute]:
     """All of the owner's per-channel notification routes, channel-ordered (GBO-R49)."""
     stmt = (
         select(NotificationRoute)

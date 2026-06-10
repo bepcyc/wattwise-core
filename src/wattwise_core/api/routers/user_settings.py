@@ -218,9 +218,7 @@ async def get_zones(session: Session, athlete_id: AthleteId) -> ZonesSettings:
 @router.put(
     "/zones", response_model=ZonesSettings, operation_id="putUserZones", dependencies=[_Write]
 )
-async def put_zones(
-    body: ZonesSettings, session: Session, athlete_id: AthleteId
-) -> ZonesSettings:
+async def put_zones(body: ZonesSettings, session: Session, athlete_id: AthleteId) -> ZonesSettings:
     """Write the owner's zone definitions as a today-effective :class:`TrainingZoneSet`.
 
     Backs a real canonical entity (API-R32): a new effective interval for ``(athlete_id,
@@ -240,8 +238,11 @@ async def put_zones(
         await _close_open_zone_intervals(session, athlete_id, body.kind, today)
         session.add(
             TrainingZoneSet(
-                athlete_id=_uid(athlete_id), zone_kind=body.kind, effective_date=today,
-                basis=body.basis, boundaries=boundaries,
+                athlete_id=_uid(athlete_id),
+                zone_kind=body.kind,
+                effective_date=today,
+                basis=body.basis,
+                boundaries=boundaries,
             )
         )
     else:
@@ -273,9 +274,7 @@ async def _close_open_zone_intervals(
         row.effective_to = boundary
 
 
-async def _latest_zone_set(
-    session: AsyncSession, athlete_id: str
-) -> TrainingZoneSet | None:
+async def _latest_zone_set(session: AsyncSession, athlete_id: str) -> TrainingZoneSet | None:
     """The most-recent effective zone set for the owner (any kind), or ``None``."""
     stmt = (
         select(TrainingZoneSet)
@@ -343,9 +342,7 @@ async def put_language(
     operation_id="getUserResponseLength",
     dependencies=[_Read],
 )
-async def get_response_length(
-    store: LengthStore, athlete_id: AthleteId
-) -> ResponseLengthSettings:
+async def get_response_length(store: LengthStore, athlete_id: AthleteId) -> ResponseLengthSettings:
     """Read the owner's persisted answer-length; defaults to ``standard`` (API-R11f).
 
     Reads the AGENT-STATE preference (doc 50 VOICE-R8 §382 — an agent-interaction preference, NOT a
@@ -377,9 +374,7 @@ async def put_response_length(
     PUT is not an orphan write (API-R32). An unsupported value is rejected ``422`` by the typed
     ``ResponseLength`` enum (ERR-R6). The HTTP contract is unchanged — only the backing store moved.
     """
-    await store.set_response_length_preference(
-        athlete_id=athlete_id, value=body.response_length
-    )
+    await store.set_response_length_preference(athlete_id=athlete_id, value=body.response_length)
     return ResponseLengthSettings(response_length=body.response_length)
 
 

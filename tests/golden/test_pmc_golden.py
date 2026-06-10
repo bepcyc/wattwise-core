@@ -156,11 +156,7 @@ def test_calendar_completeness_dict_input() -> None:
     assert prov.value.atl == pytest.approx(prev.atl + ALPHA_ATL * (0.0 - prev.atl), abs=TOL)
 
     # Local dates are carried in lineage in calendar order with no skip.
-    iso = [
-        r.provenance.reference_params["local_date"]
-        for r in series
-        if isinstance(r, Computed)
-    ]
+    iso = [r.provenance.reference_params["local_date"] for r in series if isinstance(r, Computed)]
     assert iso == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
 
 

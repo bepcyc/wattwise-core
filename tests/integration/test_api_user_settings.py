@@ -55,9 +55,15 @@ def _enable_sqlite_wal(dbapi_conn: object, _record: object) -> None:
     cur.execute("PRAGMA busy_timeout=30000")
     cur.close()
 
+
 #: Model/tier/catalog tokens that MUST NOT appear on any end-user settings response (API-R38).
 _FORBIDDEN_MODEL_FIELDS = (
-    "model_tier", "reasoning", "model_name", "model_catalog", "flash", "frontier",
+    "model_tier",
+    "reasoning",
+    "model_name",
+    "model_catalog",
+    "flash",
+    "frontier",
 )
 
 
@@ -102,9 +108,7 @@ async def seeded(tmp_path: Path) -> AsyncIterator[Env]:
         athlete_id = str(athlete.athlete_id)
         await session.commit()
         app = _build_app(session, athlete_id, agent_engine, write_allowed=True)
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://t"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
             yield Env(client, app, session, athlete_id, agent_engine, state_db)
     await state_db.dispose()
     await engine.dispose()
@@ -197,9 +201,7 @@ async def test_unsupported_response_length_is_422(seeded: Env) -> None:
 
 async def test_response_length_carries_no_model_machinery(seeded: Env) -> None:
     """No model/tier/catalog control appears on the answer-length surface (API-R38/API-R11c)."""
-    await seeded.client.put(
-        "/v1/user-settings/response-length", json={"response_length": "short"}
-    )
+    await seeded.client.put("/v1/user-settings/response-length", json={"response_length": "short"})
     flat = json.dumps((await seeded.client.get("/v1/user-settings/response-length")).json())
     for field in _FORBIDDEN_MODEL_FIELDS:
         assert field not in flat, f"model-selection token {field!r} leaked (API-R38)"
@@ -297,9 +299,7 @@ async def test_default_load_model_null_clears(seeded: Env) -> None:
 
 async def test_writes_without_write_scope_are_403(seeded: Env) -> None:
     """Every settings PUT with only the read scope is 403 insufficient-scope (AUTH-R7/R11)."""
-    no_write = _build_app(
-        seeded.session, seeded.athlete_id, seeded.engine, write_allowed=False
-    )
+    no_write = _build_app(seeded.session, seeded.athlete_id, seeded.engine, write_allowed=False)
     async with AsyncClient(transport=ASGITransport(app=no_write), base_url="http://t") as client:
         length = await client.put(
             "/v1/user-settings/response-length", json={"response_length": "short"}

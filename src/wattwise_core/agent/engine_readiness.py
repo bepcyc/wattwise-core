@@ -40,6 +40,7 @@ from wattwise_core.persistence.types import utcnow
 # look-back finds the most-recent computed day without dragging in stale state.
 _READINESS_WINDOW_DAYS = 14
 
+
 async def gather_readiness_inputs(
     svc: AnalyticsService, athlete_id: str
 ) -> tuple[float | None, str | None, float | None, float | None]:
@@ -68,9 +69,7 @@ async def gather_readiness_inputs(
     return form, as_of, rmssd, baseline
 
 
-def _latest_form(
-    series: Sequence[Any], start: _dt.date
-) -> tuple[float | None, str | None]:
+def _latest_form(series: Sequence[Any], start: _dt.date) -> tuple[float | None, str | None]:
     """The most-recent computed TSB (form) + its ISO date, or ``(None, None)`` (fail-closed).
 
     The PMC series is returned oldest-first over ``[start, today]``; the latest computed

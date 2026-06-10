@@ -64,9 +64,7 @@ def test_np_never_fabricates_for_non_power_sport(values: list[float], sport: str
 
 @given(values=power_lists, sport=NON_POWER_SPORTS)
 @CI_SETTINGS
-def test_if_tss_wbal_never_fabricate_for_non_power_sport(
-    values: list[float], sport: str
-) -> None:
+def test_if_tss_wbal_never_fabricate_for_non_power_sport(values: list[float], sport: str) -> None:
     """SPORT-T3/TEST-R3: IF/TSS/W'bal never emit a number for an inapplicable sport."""
     np_res = normalized_power(Stream.from_values(values), sport=sport)
     if_res = intensity_factor(np_res, 250.0)
@@ -83,9 +81,7 @@ def test_bundle_power_fields_never_fabricate_for_non_power_sport(
     values: list[float], sport: str
 ) -> None:
     """SPORT-T3: the bundle's power fields are all NOT_APPLICABLE_FOR_SPORT (no 0/number)."""
-    bundle = load_metrics_bundle(
-        Stream.from_values(values), None, 250.0, 200.0, 140.0, sport=sport
-    )
+    bundle = load_metrics_bundle(Stream.from_values(values), None, 250.0, 200.0, 140.0, sport=sport)
     for field in (bundle.np, bundle.if_, bundle.tss, bundle.intensity_class):
         assert isinstance(field, Unavailable)
         assert field.reason == UnavailableReason.NOT_APPLICABLE_FOR_SPORT
@@ -93,9 +89,7 @@ def test_bundle_power_fields_never_fabricate_for_non_power_sport(
 
 @given(values=power_lists, sport=NON_POWER_SPORTS)
 @CI_SETTINGS
-def test_mmp_curve_never_fabricates_for_non_power_sport(
-    values: list[float], sport: str
-) -> None:
+def test_mmp_curve_never_fabricates_for_non_power_sport(values: list[float], sport: str) -> None:
     """SPORT-T3/TEST-R3: the WHOLE MMP curve on a non-power sport is per-duration gated.
 
     For a valid power trace, EVERY grid duration maps to ``NOT_APPLICABLE_FOR_SPORT``

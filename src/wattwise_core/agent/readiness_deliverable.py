@@ -195,9 +195,7 @@ async def readiness_assessment(
     narration so numbers are verbatim canonical (GROUND-R7), enforce the state-first /
     number-cap / no-"readiness score" voice gates (COACH-R7 / VOICE-R7), and project.
     """
-    assessment = assess_readiness(
-        form=form, hrv_rmssd=hrv_rmssd, hrv_baseline=hrv_baseline
-    )
+    assessment = assess_readiness(form=form, hrv_rmssd=hrv_rmssd, hrv_baseline=hrv_baseline)
     verdict = assessment.verdict
     if verdict is None:
         return _abstain_readiness(assessment, as_of)
@@ -398,9 +396,7 @@ def _readiness_citations(result: GroundingResult) -> tuple[Citation, ...]:
     return _project_citations(raw)
 
 
-def _coverage_map(
-    assessment: ReadinessAssessment, *, override: bool | None
-) -> Mapping[str, Any]:
+def _coverage_map(assessment: ReadinessAssessment, *, override: bool | None) -> Mapping[str, Any]:
     """The typed coverage map from the oracle's inputs + any consistency override caveat.
 
     ``inputs_used``/``inputs_unavailable`` come straight from the deterministic oracle

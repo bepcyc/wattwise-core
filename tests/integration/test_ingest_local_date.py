@@ -73,9 +73,7 @@ async def _seed(
     """Seed cycling, a non-UTC athlete, and one source descriptor."""
     async with factory() as s:
         s.add(Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True))
-        athlete = Athlete(
-            sex="male", reference_timezone=tz, reference_timezone_effective_from=eff
-        )
+        athlete = Athlete(sex="male", reference_timezone=tz, reference_timezone_effective_from=eff)
         descriptor = SourceDescriptor(
             source_key="other_src", display_name="Other", kind="oauth_api"
         )
@@ -93,8 +91,10 @@ def _ride(native_id: str, start: _dt.datetime) -> GboCandidate:
         source_native_id=native_id,
         content_hash=content_hash(f"{native_id}:{start.isoformat()}".encode()),
         payload={
-            "start_time": start, "sport": "cycling",
-            "elapsed_time_s": 1800, "avg_power_w": 200.0,
+            "start_time": start,
+            "sport": "cycling",
+            "elapsed_time_s": 1800,
+            "avg_power_w": 200.0,
         },
         trust_tier=Fidelity.RAW_STREAM,
         fetched_at=_dt.datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
@@ -126,7 +126,9 @@ async def test_write_path_assigns_local_date_across_midnight(
     # start_time_local carries the LOCAL wall-clock for display (GBO-R13/§3.8).
     assert act.start_time_local is not None
     assert (act.start_time_local.year, act.start_time_local.month, act.start_time_local.day) == (
-        2026, 6, 1,
+        2026,
+        6,
+        1,
     )
     assert (act.start_time_local.hour, act.start_time_local.minute) == (23, 0)
 
@@ -178,9 +180,7 @@ async def test_missing_reference_timezone_fails_closed_on_write_path(
     athlete_id, descriptor = await _seed(pool, tz="")  # no reference timezone configured
     instant = _dt.datetime(2026, 6, 2, 3, 0, tzinfo=UTC)
     async with pool() as session:
-        result = await IngestService(session).ingest(
-            athlete_id, descriptor, [_ride("r1", instant)]
-        )
+        result = await IngestService(session).ingest(athlete_id, descriptor, [_ride("r1", instant)])
         await session.commit()
     assert result.candidates_failed == 1  # fail-closed: isolated, not bucketed under UTC
     async with pool() as session:

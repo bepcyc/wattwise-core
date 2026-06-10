@@ -313,9 +313,7 @@ async def set_signature(
         raise ProblemError(
             "validation-error",
             errors=[
-                FieldError(
-                    code="signature_type_required", message="", pointer="/signature_type"
-                )
+                FieldError(code="signature_type_required", message="", pointer="/signature_type")
             ],
         )
     if not await _sport_exists(session, sport):

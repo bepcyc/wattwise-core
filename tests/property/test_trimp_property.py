@@ -51,9 +51,7 @@ _hr_sample = st.one_of(
 _hr_list = st.lists(_hr_sample, min_size=1, max_size=120)
 
 
-def _oracle_banister(
-    stream: Stream, hr_max: float, hr_rest: float, a: float, b: float
-) -> float:
+def _oracle_banister(stream: Stream, hr_max: float, hr_rest: float, a: float, b: float) -> float:
     """Independent closed-form oracle for the Banister-HRR sum at 1 Hz.
 
     Computed over the SAME resampled 1 Hz grid the implementation uses (ANL-R8), so
@@ -121,9 +119,7 @@ def test_nonpositive_reserve_out_of_domain(
 
 @settings(max_examples=50)
 @given(hr_values=_hr_list, bad=st.sampled_from([math.inf, -math.inf, math.nan]))
-def test_nonfinite_params_out_of_domain(
-    hr_values: list[float | None], bad: float
-) -> None:
+def test_nonfinite_params_out_of_domain(hr_values: list[float | None], bad: float) -> None:
     # Non-finite HR_max or HR_rest violates the domain precondition (ANL-R32).
     r1 = banister_hr_load(Stream.from_values(hr_values), bad, 60.0, "male")
     r2 = banister_hr_load(Stream.from_values(hr_values), 200.0, bad, "male")
@@ -174,9 +170,7 @@ def test_sex_absent_default_pair_reduced_confidence() -> None:
 
 @settings(max_examples=150)
 @given(
-    base=st.lists(
-        st.floats(min_value=70.0, max_value=170.0), min_size=1, max_size=60
-    ),
+    base=st.lists(st.floats(min_value=70.0, max_value=170.0), min_size=1, max_size=60),
     bump=st.floats(min_value=0.0, max_value=25.0),
     hr_rest=st.floats(min_value=40.0, max_value=60.0),
     reserve=st.floats(min_value=100.0, max_value=140.0),
@@ -267,13 +261,9 @@ def test_zonal_bad_shapes_out_of_domain() -> None:
 @settings(max_examples=150)
 @given(
     hr_values=_hr_list,
-    weights=st.lists(
-        st.floats(min_value=0.0, max_value=5.0), min_size=4, max_size=4
-    ),
+    weights=st.lists(st.floats(min_value=0.0, max_value=5.0), min_size=4, max_size=4),
 )
-def test_zonal_matches_oracle(
-    hr_values: list[float | None], weights: list[float]
-) -> None:
+def test_zonal_matches_oracle(hr_values: list[float | None], weights: list[float]) -> None:
     bounds = [120.0, 150.0, 180.0]  # 4 zones
     stream = Stream.from_values(hr_values)
     result = hr_load_zonal(stream, bounds, weights)

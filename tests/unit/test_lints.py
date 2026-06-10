@@ -185,7 +185,7 @@ def test_english_only_honors_line_suppression(tmp_path: Path) -> None:
         tmp_path / "src" / "wattwise_core" / "domain",
         "supp.py",
         '"""Mod."""\n\n\ndef compute() -> int:\n'
-        "    table = {\"µs\": 1}  # i18n-ok: unit symbol\n"
+        '    table = {"µs": 1}  # i18n-ok: unit symbol\n'
         '    """Doc."""\n    return table["µs"]\n',
     )
     found = english_only.check_paths([tmp_path])
@@ -521,14 +521,12 @@ def test_content_leak_flags_inline_named_prompt_body(tmp_path: Path) -> None:
         tmp_path / "src" / "wattwise_core" / "agent",
         "leaky.py",
         '"""Mod."""\n\n\n'
-        '_REFLECT_SYSTEM = (\n'
+        "_REFLECT_SYSTEM = (\n"
         '    "You are the coaching agent\'s reflection step. Decide the next move over the "\n'
         '    "closed verdict set and never invent a capability."\n'
         ")\n",
     )
-    leaks = [
-        v for v in content_leak.check_paths([tmp_path]) if v.rule == "content-leak-prompt"
-    ]
+    leaks = [v for v in content_leak.check_paths([tmp_path]) if v.rule == "content-leak-prompt"]
     assert leaks, "an inline named prompt body must be flagged (ARCH-R29)"
     assert leaks[0].requirement == "ARCH-R29"
 
@@ -539,7 +537,7 @@ def test_content_leak_flags_unnamed_persona_prose_literal(tmp_path: Path) -> Non
         tmp_path / "src" / "wattwise_core" / "agent",
         "sneaky.py",
         '"""Mod."""\n\n\n'
-        'X = "You are the athlete\'s endurance coach; answer only from the canonical data and '
+        "X = \"You are the athlete's endurance coach; answer only from the canonical data and "
         'never call this a readiness score, return only the structured narration."\n',
     )
     rules = _rules(content_leak.check_paths([tmp_path]))
@@ -571,21 +569,17 @@ def test_content_leak_clean_engine_source_is_silent(tmp_path: Path) -> None:
         '"""A focused module."""\n\n\n'
         "class Bundle:\n"
         '    """Holds a loaded prompt (from config, never inline)."""\n\n'
-        "    system_prompt: str = \"\"\n"
-        "    plan_system: str = \"\"\n",
+        '    system_prompt: str = ""\n'
+        '    plan_system: str = ""\n',
     )
-    leaks = [
-        v for v in content_leak.check_paths([tmp_path]) if v.rule == "content-leak-prompt"
-    ]
+    leaks = [v for v in content_leak.check_paths([tmp_path]) if v.rule == "content-leak-prompt"]
     assert leaks == [], "empty/short config-field defaults are not a leaked prompt body"
 
 
 def test_content_leak_real_engine_source_has_no_inline_prompts() -> None:
     """The REAL engine source embeds NO inline prompt/persona body (ARCH-R29 over src)."""
     src = Path(__file__).resolve().parents[2] / "src"
-    leaks = [
-        v for v in content_leak.check_paths([src]) if v.rule == "content-leak-prompt"
-    ]
+    leaks = [v for v in content_leak.check_paths([src]) if v.rule == "content-leak-prompt"]
     assert leaks == [], f"engine source leaks a prompt/persona body: {[v.render() for v in leaks]}"
 
 

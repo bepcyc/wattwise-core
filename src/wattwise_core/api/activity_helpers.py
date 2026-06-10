@@ -38,11 +38,18 @@ def local_date_of(act: Activity, athlete: Athlete) -> _dt.date:
 def summary(act: Activity, local_date: _dt.date) -> ActivitySummary:
     """Project a canonical ``Activity`` row onto the ``ActivitySummary`` wire shape (§13)."""
     return ActivitySummary(
-        activity_id=str(act.activity_id), local_date=local_date,
-        sport=act.sport, start_time=act.start_time, elapsed_time_s=act.elapsed_time_s,
-        moving_time_s=act.moving_time_s, distance_m=f(act.distance_m),
-        avg_power_w=f(act.avg_power_w), has_power=act.has_power, has_hr=act.has_hr,
-        has_gps=act.has_gps, has_cadence=act.has_cadence,
+        activity_id=str(act.activity_id),
+        local_date=local_date,
+        sport=act.sport,
+        start_time=act.start_time,
+        elapsed_time_s=act.elapsed_time_s,
+        moving_time_s=act.moving_time_s,
+        distance_m=f(act.distance_m),
+        avg_power_w=f(act.avg_power_w),
+        has_power=act.has_power,
+        has_hr=act.has_hr,
+        has_gps=act.has_gps,
+        has_cadence=act.has_cadence,
     )
 
 

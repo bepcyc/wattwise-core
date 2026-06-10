@@ -224,15 +224,11 @@ def test_consistent_respects_hrv_nudge() -> None:
     """Consistency uses the SAME inputs incl. HRV: nudged verdict is the certified one."""
     # neutral form nudged to EASE by suppressed HRV.
     assert (
-        readiness_consistent(
-            ReadinessVerdict.EASE, form=0.0, hrv_rmssd=40.0, hrv_baseline=50.0
-        )
+        readiness_consistent(ReadinessVerdict.EASE, form=0.0, hrv_rmssd=40.0, hrv_baseline=50.0)
         is True
     )
     # the un-nudged MAINTAIN is NOT consistent once HRV suppression is present.
     assert (
-        readiness_consistent(
-            ReadinessVerdict.MAINTAIN, form=0.0, hrv_rmssd=40.0, hrv_baseline=50.0
-        )
+        readiness_consistent(ReadinessVerdict.MAINTAIN, form=0.0, hrv_rmssd=40.0, hrv_baseline=50.0)
         is False
     )

@@ -228,10 +228,7 @@ async def _query_goals(
         anchor = (_cursor_axis_value(sort, c_time), uuid.UUID(c_id))
         clauses.append(keyset < anchor if order == "desc" else keyset > anchor)
     stmt = (
-        select(Goal)
-        .where(*clauses)
-        .order_by(direction(axis), direction(Goal.goal_id))
-        .limit(limit)
+        select(Goal).where(*clauses).order_by(direction(axis), direction(Goal.goal_id)).limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
 
@@ -286,8 +283,17 @@ async def list_goals(
         raise range_reversed("from")
     bounded = clamp_limit(int(limit))
     rows = await _query_goals(
-        session, athlete_id, status=status, sport=sport, frm=frm, to=to,
-        sort=sort, order=order, cursor=cursor, key=key, limit=bounded + 1,
+        session,
+        athlete_id,
+        status=status,
+        sport=sport,
+        frm=frm,
+        to=to,
+        sort=sort,
+        order=order,
+        cursor=cursor,
+        key=key,
+        limit=bounded + 1,
     )
     has_more = len(rows) > bounded
     page_rows = rows[:bounded]
