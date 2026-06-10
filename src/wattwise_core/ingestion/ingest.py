@@ -134,8 +134,15 @@ class IngestService:
         wellness_dates: set[_dt.date] = set()
         for batch in _batched(candidates, self._batch_size):
             await _land_batch(
-                self, athlete, descriptor, batch, connection_id, run_id,
-                files_by_native, wellness_dates, result,
+                self,
+                athlete,
+                descriptor,
+                batch,
+                connection_id,
+                run_id,
+                files_by_native,
+                wellness_dates,
+                result,
             )
             # ING-UPS-R3 / ACC-4: commit each batch as its own durable unit so a later
             # batch's failure cannot lose an already-completed batch.
@@ -148,7 +155,11 @@ class IngestService:
             # ING-GAP-R4) AFTER all batch data is committed above, so cursor/gap state never
             # diverge from durable data and a crash never advances past un-committed data (ING-R6).
             advanced = await advance_and_heal(
-                self._session, athlete, descriptor, candidates, synced_range,
+                self._session,
+                athlete,
+                descriptor,
+                candidates,
+                synced_range,
                 ingest_run_id=run_id,
             )
             result.watermarks_advanced = advanced.watermarks_advanced
@@ -166,9 +177,7 @@ class IngestService:
         """
         return await _resolve_activity_id(self, athlete, cand)
 
-    async def _write_activity_canonical(
-        self, athlete: uuid.UUID, activity_id: uuid.UUID
-    ) -> None:
+    async def _write_activity_canonical(self, athlete: uuid.UUID, activity_id: uuid.UUID) -> None:
         """Resolve every field across candidates and write the canonical activity (UPS-R2).
 
         Delegates to :func:`._ingest_steps._write_activity_canonical`; kept as a

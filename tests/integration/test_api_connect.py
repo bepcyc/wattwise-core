@@ -504,8 +504,15 @@ def test_list_connections_names_the_source(harness: _Harness) -> None:
     # (API-R46) -> the API-R47 first_sync_state stays `not_started`.
     assert row["first_sync_state"] == "not_started"  # the SECOND API-R47 additive field
     assert set(row) >= {
-        "connection_id", "source", "display_name", "status",
-        "connected_at", "last_synced_at", "scopes", "auth_archetype", "first_sync_state",
+        "connection_id",
+        "source",
+        "display_name",
+        "status",
+        "connected_at",
+        "last_synced_at",
+        "scopes",
+        "auth_archetype",
+        "first_sync_state",
     }
 
 
@@ -543,9 +550,7 @@ def test_disconnect_is_data_preserving_204(harness: _Harness) -> None:
     )
     _land_activity(harness)
     connection_id = str(_only_connection(harness).connection_id)
-    resp = harness.client.post(
-        f"/v1/connections/{connection_id}/disconnect", headers=_auth()
-    )
+    resp = harness.client.post(f"/v1/connections/{connection_id}/disconnect", headers=_auth())
     assert resp.status_code == 204
     assert resp.content == b""
     conn = _only_connection(harness)

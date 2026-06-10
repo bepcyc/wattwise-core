@@ -36,9 +36,7 @@ def _extrema_indices(values: Sequence[object]) -> set[int]:
     return {min(nums, key=lambda p: p[1])[0], max(nums, key=lambda p: p[1])[0]}
 
 
-def minmax_index(
-    length: int, max_points: int, channels: Sequence[Sequence[object]]
-) -> list[int]:
+def minmax_index(length: int, max_points: int, channels: Sequence[Sequence[object]]) -> list[int]:
     """A decimation index set that PRESERVES every channel's global min/max (API-R48).
 
     Starts from a uniform-stride sample and unions in the global-extrema indices of each

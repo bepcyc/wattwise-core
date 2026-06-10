@@ -56,9 +56,7 @@ def _sync_engine_grades(name: str) -> SuiteGrades | None:
     if name == "multilingual":
         # A parity check expressed via the all-or-nothing termination grade shape.
         total, failures = suites.grade_multilingual()
-        return SuiteGrades(
-            termination=TerminationGrade(total, total - len(failures), failures)
-        )
+        return SuiteGrades(termination=TerminationGrade(total, total - len(failures), failures))
     return None
 
 

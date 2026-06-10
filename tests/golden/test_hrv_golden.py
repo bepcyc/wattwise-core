@@ -79,9 +79,7 @@ def test_time_domain_artifact_correction_is_zero_on_clean_series() -> None:
 @pytest.mark.golden
 def test_rmssd_independent_recomputation() -> None:
     """A second, independent RMSSD computation (pure Python) agrees (TEST-R4)."""
-    diffs = [
-        GOLDEN_NN_MS[i + 1] - GOLDEN_NN_MS[i] for i in range(len(GOLDEN_NN_MS) - 1)
-    ]
+    diffs = [GOLDEN_NN_MS[i + 1] - GOLDEN_NN_MS[i] for i in range(len(GOLDEN_NN_MS) - 1)]
     rmssd = math.sqrt(sum(d * d for d in diffs) / len(diffs))
     result = time_domain_hrv(rr_intervals_ms=GOLDEN_NN_MS, min_duration_s=0.0)
     assert isinstance(result, Computed)
@@ -89,7 +87,10 @@ def test_rmssd_independent_recomputation() -> None:
 
 
 def _hf_sinusoid_tachogram(
-    *, mean_rr_ms: float = 1000.0, amp_ms: float = 40.0, f_hz: float = 0.25,
+    *,
+    mean_rr_ms: float = 1000.0,
+    amp_ms: float = 40.0,
+    f_hz: float = 0.25,
     duration_s: float = 300.0,
 ) -> list[float]:
     """Synthesize an NN series whose RR is sinusoidally modulated at ``f_hz`` (HF band).

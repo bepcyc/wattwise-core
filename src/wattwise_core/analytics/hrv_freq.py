@@ -220,8 +220,7 @@ def _corrected_nn_for_spectrum(
     if nn.size < 4 or usable_s < min_duration_s:
         return Unavailable(
             UnavailableReason.INSUFFICIENT_DATA,
-            f"usable recording {usable_s:.1f}s below minimum {min_duration_s:.1f}s "
-            f"(HRV-R4)",
+            f"usable recording {usable_s:.1f}s below minimum {min_duration_s:.1f}s (HRV-R4)",
         )
     return correction, nn, usable_s
 
@@ -236,9 +235,7 @@ def _band_powers_to_result(spec: _SpectralResult) -> tuple[float, float, float] 
     lf = spec.lf_power
     hf = spec.hf_power
     if not (math.isfinite(lf) and math.isfinite(hf)) or lf < 0.0 or hf < 0.0:
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN, "non-finite or negative band power"
-        )
+        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "non-finite or negative band power")
     if hf <= 0.0:
         return Unavailable(
             UnavailableReason.INSUFFICIENT_DATA,

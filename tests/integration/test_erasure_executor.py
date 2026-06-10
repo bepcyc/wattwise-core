@@ -199,9 +199,7 @@ async def _seed_canonical(
                 resolved_activity_id=act.activity_id,
             )
         )
-        s.add(
-            DailyWellness(athlete_id=aid, local_date=_dt.date(2026, 6, 1), resting_hr_bpm=44)
-        )
+        s.add(DailyWellness(athlete_id=aid, local_date=_dt.date(2026, 6, 1), resting_hr_bpm=44))
         goal = Goal(
             athlete_id=aid,
             sport="cycling",

@@ -198,9 +198,7 @@ def _redact_one(key: str, value: Any) -> Any:
     return _MASK
 
 
-def redact_processor(
-    _logger: WrappedLogger, _method_name: str, event_dict: EventDict
-) -> EventDict:
+def redact_processor(_logger: WrappedLogger, _method_name: str, event_dict: EventDict) -> EventDict:
     """Central emit-boundary redactor (LOG-R5 / PRIV-R5).
 
     Runs on EVERY event of EVERY stream before emission. ALLOWLIST-based: emits

@@ -269,9 +269,7 @@ async def _on_problem_error(request: Request, exc: ProblemError) -> JSONResponse
     return _render(problem, headers=exc.headers)
 
 
-async def _on_http_exception(
-    request: Request, exc: StarletteHTTPException
-) -> JSONResponse:
+async def _on_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Map a framework ``HTTPException`` onto the catalog (ERR-R1).
 
     A few statuses framework code raises directly (e.g. ``404`` for an unmatched
@@ -295,9 +293,7 @@ async def _on_http_exception(
     return _render(problem, headers=headers)
 
 
-async def _on_validation_error(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Render a request-validation failure as ``422 validation-error`` (ERR-R6)."""
     problem_type = CATALOG["validation-error"]
     errors = tuple(_field_errors(exc))
@@ -335,9 +331,7 @@ def _field_errors(exc: RequestValidationError) -> list[FieldError]:
         code = str(raw.get("type", "invalid"))
         message = _safe_validation_message(raw)
         pointer, parameter = _locate(loc)
-        out.append(
-            FieldError(code=code, message=message, pointer=pointer, parameter=parameter)
-        )
+        out.append(FieldError(code=code, message=message, pointer=pointer, parameter=parameter))
     return out
 
 

@@ -302,9 +302,7 @@ def _answer_voice_problem(case: dict[str, Any], answer: AgentAnswer) -> str | No
     return _canonical_problem(cid, answer, case)
 
 
-def _canonical_problem(
-    cid: str, answer: AgentAnswer, case: dict[str, Any]
-) -> str | None:
+def _canonical_problem(cid: str, answer: AgentAnswer, case: dict[str, Any]) -> str | None:
     """Flag any surfaced citation value that is not the canonical one (GROUND-R7 intact)."""
     expected = {str(k): float(v) for k, v in case.get("expected_canonical_metrics", {}).items()}
     for cit in answer.citations:

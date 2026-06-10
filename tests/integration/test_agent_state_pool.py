@@ -143,9 +143,7 @@ async def _checkout_then_inner(
             return int(result.scalar_one())
 
 
-async def test_shared_pool_deadlocks(
-    backend_dsn: str | None, tmp_path: Path
-) -> None:
+async def test_shared_pool_deadlocks(backend_dsn: str | None, tmp_path: Path) -> None:
     """SHARED pool (one engine, size=1): holding the connection while needing a second hangs.
 
     The inner session draws from the SAME single-connection pool as the held outer session,
@@ -165,9 +163,7 @@ async def test_shared_pool_deadlocks(
         await engine.dispose()
 
 
-async def test_dedicated_pool_is_deadlock_free(
-    backend_dsn: str | None, tmp_path: Path
-) -> None:
+async def test_dedicated_pool_is_deadlock_free(backend_dsn: str | None, tmp_path: Path) -> None:
     """DEDICATED pools: the saver's own AgentStateDatabase pool removes the contention.
 
     Outer (canonical-like) connection from engine-1; inner (saver) connection from a SEPARATE
@@ -187,9 +183,7 @@ async def test_dedicated_pool_is_deadlock_free(
     # The dedicated agent-state DB owns its OWN engine/pool (separate DB file for sqlite),
     # ALSO at pool_size=1/max_overflow=0 so the ONLY variable vs the shared arm is separation.
     agent_dsn = (
-        f"sqlite+aiosqlite:///{tmp_path}/agent_state.sqlite"
-        if backend_dsn is None
-        else backend_dsn
+        f"sqlite+aiosqlite:///{tmp_path}/agent_state.sqlite" if backend_dsn is None else backend_dsn
     )
     agent_db = AgentStateDatabase(dsn=agent_dsn, pool_size=1, max_overflow=0)
     # WAL + busy_timeout for the file-sqlite agent engine too (mirrors _make_engine), so its

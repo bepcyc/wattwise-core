@@ -69,9 +69,7 @@ class CapabilityGateway(Protocol):
 class CoverageAssessor(Protocol):
     """Deterministically reports which planned needs remain uncovered (PLAN-R*)."""
 
-    def assess(
-        self, *, request_text: str | None, retrieved: Mapping[str, Any]
-    ) -> set[str]: ...
+    def assess(self, *, request_text: str | None, retrieved: Mapping[str, Any]) -> set[str]: ...
 
 
 @runtime_checkable

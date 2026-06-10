@@ -139,7 +139,11 @@ class _ProceedGrounder:
     """A grounder that PROCEEDs over a single grounded survivor (no redraft/replan from here)."""
 
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any],
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
         request_text: str | None = None,
     ) -> GroundingResult:
         survivor = GroundedClaim(

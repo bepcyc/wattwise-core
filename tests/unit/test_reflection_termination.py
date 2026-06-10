@@ -134,7 +134,11 @@ class _ScriptedGrounder:
         self.calls = 0
 
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any],
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
         request_text: str | None = None,
     ) -> GroundingResult:
         self.calls += 1

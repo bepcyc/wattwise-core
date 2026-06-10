@@ -52,9 +52,7 @@ def _nn_streams(min_size: int = 2, max_size: int = 400) -> st.SearchStrategy[lis
     return st.lists(_NN_MS, min_size=min_size, max_size=max_size)
 
 
-def _long_steady_nn(
-    *, mean_rr_ms: float, jitter_ms: float, n: int, seed: int
-) -> list[float]:
+def _long_steady_nn(*, mean_rr_ms: float, jitter_ms: float, n: int, seed: int) -> list[float]:
     """A steady NN series long enough to clear the 2-min gate (deterministic)."""
     rng = np.random.default_rng(seed)
     jitter = rng.uniform(-jitter_ms, jitter_ms, size=n)

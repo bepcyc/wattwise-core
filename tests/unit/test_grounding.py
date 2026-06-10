@@ -147,9 +147,7 @@ def test_unextracted_number_is_swept_and_does_not_proceed() -> None:
     """
     evidence = _FakeEvidence(metrics={"ctl": 60.0})
     # Only the CTL number is extracted; the "TSB is 999" span is NOT a claim.
-    result = ground(
-        "Your CTL is 60 and TSB is 999.", [_number("60", "ctl", 60.0)], evidence, []
-    )
+    result = ground("Your CTL is 60 and TSB is 999.", [_number("60", "ctl", 60.0)], evidence, [])
     assert "999" not in result.scrubbed_text, "the unextracted fabricated number must be swept (H4)"
     assert "60" in result.scrubbed_text, "the grounded canonical value survives the sweep"
     assert result.decision is not GroundDecision.PROCEED, "an uncovered number must block proceed"

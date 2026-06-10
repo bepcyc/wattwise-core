@@ -59,9 +59,7 @@ def ensure_ranked_tier(raw: object, *, field: str) -> Fidelity:
     try:
         fidelity = Fidelity(str(raw))
     except ValueError as exc:
-        raise NonTierTrustError(
-            f"{field}: {raw!r} is not a valid Fidelity trust tier"
-        ) from exc
+        raise NonTierTrustError(f"{field}: {raw!r} is not a valid Fidelity trust tier") from exc
     if fidelity not in TRUST_TIER_ORDER:
         raise NonTierTrustError(
             f"{field}: {fidelity.value!r} is a non-tier outcome state, not one of the "

@@ -1,11 +1,12 @@
 """Concrete production agent services: planner, gateway, coverage, grounder (doc 50).
 
 The focused sibling of :mod:`wattwise_core.agent.engine` (QUAL-R9 size split) that owns the
-CONCRETE production implementations of the injected agent seams the graph runs on — a model-driven
-retrieval planner (PLAN-R1/R2), the canonical capability gateway (TOOL-R1), a deterministic
-coverage assessor, and a model-extract + code-verify grounder over canonical evidence
-(GROUND-R1/R2/R7) — plus the closed structured-output schemas the model fills and the
-``_build_services`` bundle assembler. ``engine`` imports these and re-exports the public ones
+CONCRETE production implementations of the injected agent seams the graph runs on — the canonical
+capability gateway (TOOL-R1), a deterministic coverage assessor, and a model-extract + code-verify
+grounder over canonical evidence (GROUND-R1/R2/R7) — plus the claim structured-output schemas the
+model fills and the ``build_services`` bundle assembler. The model-driven retrieval planner +
+its closed plan schema live in the focused :mod:`engine_planner` sibling (QUAL-R9 size split)
+and are re-exported here. ``engine`` imports these and re-exports the public ones
 (``ModelPlanner`` / ``RegistryGateway`` / ``DeterministicCoverage`` / ``ClaimGrounder``) so every
 historical ``from wattwise_core.agent.engine import ...`` path stays stable.
 
@@ -21,115 +22,25 @@ from __future__ import annotations
 
 import datetime as _dt
 from collections.abc import Mapping, Sequence
-from enum import StrEnum
 from typing import Any
-
-from pydantic import BaseModel, Field
 
 from wattwise_core.agent import grounding as _grounding
 from wattwise_core.agent.capabilities import (
-    CAPABILITY_BY_KEY,
     MetricEquivalence,
     gather,
 )
 from wattwise_core.agent.contracts import ChatModel, RetrievalRequest
+from wattwise_core.agent.engine_planner import ModelPlanner, PlanCapability
+from wattwise_core.agent.engine_planner import (
+    _PlanSchema as _PlanSchema,  # noqa: PLC0414  explicit re-export (historical import path)
+)
 from wattwise_core.agent.grounding_evidence import CANONICAL_WORKOUT_NAMES, ClaimGrounder
 from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.seams import AgentServices
 from wattwise_core.agent.skills import CoachManifest, load_manifest
-from wattwise_core.agent.structured import StructuredOutputError, run_structured
 from wattwise_core.agent.voice import VoicePresentation
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.observability import runtrace
-from wattwise_core.persistence.types import utcnow
-
-
-class PlanCapability(StrEnum):
-    """The CLOSED set of capabilities the headline planner may request (PLAN-R3 schema enum).
-
-    The date-range capabilities the planner can request without an activity id (the per-activity /
-    per-day capabilities need an id the planner does not have at plan time). PLAN-R3: the planner
-    MUST be structurally UNABLE to express a capability outside this set — the schema enum (not a
-    post-hoc filter) constrains it, so an out-of-registry request is a structured-output VALIDATION
-    failure (the model emitting a non-member value never validates), routed as a re-plan, never
-    silently dropped. Each member is a key of the single shared capability registry.
-    """
-
-    WEEKLY_LOAD = "weekly_load"
-    CRITICAL_POWER = "critical_power"
-    POWER_CURVE = "power_curve"
-
-
-_DEFAULT_WINDOW_DAYS = 42
-
-
-class _PlanSchema(BaseModel):
-    """Provider-enforced retrieval plan (PLAN-R2/-R3): which canonical capabilities to gather.
-
-    ``capabilities`` is a list of the CLOSED :class:`PlanCapability` ENUM (PLAN-R3): the model
-    cannot emit a capability outside the registry — a non-member value is a structured-output
-    validation failure handled as a re-plan (the planner's fail-closed default), NOT a silently
-    dropped key. ``extra="forbid"`` rejects any unknown field (STRUCT-R3).
-    """
-
-    model_config = {"extra": "forbid"}
-    capabilities: list[PlanCapability] = Field(default_factory=list)
-    window_days: int = Field(default=_DEFAULT_WINDOW_DAYS, ge=1, le=365)
-
-
-class ModelPlanner:
-    """Model-driven retrieval planner (PLAN-R1/R2): the structured plan IS the selection.
-
-    ``plan_system`` is the loaded planner system prompt (§16 / SKILL-R1): the engine embeds NO
-    prompt inline (CFG-R3 / ARCH-R29) — the production wiring injects the verbatim fragment loaded
-    from the coach-config bundle, and the empty default (``""``) preserves the prior behaviour for
-    any seam that injects no coach-config (the FakeModel suite scripts the plan, so the prompt text
-    is immaterial offline).
-    """
-
-    def __init__(
-        self,
-        model: ChatModel,
-        *,
-        reference_date: _dt.date | None = None,
-        plan_system: str = "",
-    ) -> None:
-        self._model = model
-        self._today = reference_date or utcnow().date()
-        self._plan_system = plan_system
-
-    async def plan(
-        self, *, request_text: str | None, gaps: Sequence[str], already: Sequence[str]
-    ) -> Sequence[RetrievalRequest]:
-        """Emit the next batch of capability requests; fail-closed to a default on error (PLAN-R3).
-
-        The plan's ``capabilities`` are the CLOSED :class:`PlanCapability` enum, so the model cannot
-        express an out-of-registry capability: a non-member value is a structured-output validation
-        failure (STRUCT-R2) that ``run_structured`` surfaces as :class:`StructuredOutputError`,
-        handled here as a RE-PLAN to the default capability (PLAN-R3 "handled as a re-plan, not a
-        crash") — never silently dropped.
-        """
-        try:
-            plan = await run_structured(
-                self._model,
-                system=self._plan_system,
-                data=f"question: {request_text}\nopen_gaps: {list(gaps)}\nalready: {list(already)}",
-                schema=_PlanSchema,
-            )
-            keys = [c.value for c in plan.capabilities]
-            window = plan.window_days
-        except (StructuredOutputError, NotImplementedError):
-            keys, window = [PlanCapability.WEEKLY_LOAD.value], _DEFAULT_WINDOW_DAYS
-        if not keys:
-            keys = [PlanCapability.WEEKLY_LOAD.value]
-        frm = self._today - _dt.timedelta(days=window)
-        params = {"from_date": frm.isoformat(), "to_date": self._today.isoformat()}
-        seen = set(already)
-        return [
-            RetrievalRequest(capability=k, params=dict(params))
-            for k in keys
-            if k in CAPABILITY_BY_KEY and k not in seen
-        ]
 
 
 class RegistryGateway:
@@ -181,9 +92,20 @@ class CoachBundle:
     """
 
     __slots__ = (
-        "allowed_hosts", "claim_system", "detailed_compose_directive", "equivalence", "locales",
-        "lookback_days", "manifest", "plan_system", "presentation", "readiness_system",
-        "reflect_system", "shared_preamble", "system_prompt", "tolerance",
+        "allowed_hosts",
+        "claim_system",
+        "detailed_compose_directive",
+        "equivalence",
+        "locales",
+        "lookback_days",
+        "manifest",
+        "plan_system",
+        "presentation",
+        "readiness_system",
+        "reflect_system",
+        "shared_preamble",
+        "system_prompt",
+        "tolerance",
     )
 
     def __init__(
@@ -309,9 +231,7 @@ class CoachBundle:
                 passthrough_enabled=settings.agent__coach__language_passthrough,
                 passthrough_directive=settings.agent__coach__language_passthrough_directive,
             ),
-            detailed_compose_directive=settings.agent__coach__prompts[
-                "detailed_compose_directive"
-            ],
+            detailed_compose_directive=settings.agent__coach__prompts["detailed_compose_directive"],
         )
 
     def services(

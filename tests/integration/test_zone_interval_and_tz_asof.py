@@ -155,9 +155,7 @@ async def test_changing_reference_timezone_stamps_effective_from(seeded: Env) ->
 
     owner = (
         await seeded.session.execute(
-            select(Athlete).where(
-                Athlete.athlete_id == uuid.UUID(seeded.athlete_id)
-            )
+            select(Athlete).where(Athlete.athlete_id == uuid.UUID(seeded.athlete_id))
         )
     ).scalar_one()
     assert owner.reference_timezone == "Europe/Berlin"
@@ -171,9 +169,7 @@ async def test_unchanged_reference_timezone_does_not_restamp(seeded: Env) -> Non
     await seeded.client.put("/v1/athlete", json={"reference_timezone": "Europe/Berlin"})
     owner = (
         await seeded.session.execute(
-            select(Athlete).where(
-                Athlete.athlete_id == uuid.UUID(seeded.athlete_id)
-            )
+            select(Athlete).where(Athlete.athlete_id == uuid.UUID(seeded.athlete_id))
         )
     ).scalar_one()
     first_eff = owner.reference_timezone_effective_from

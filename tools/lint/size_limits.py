@@ -95,9 +95,7 @@ def _docstring_line_range(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[i
     return set()
 
 
-def _function_code_lines(
-    lines: list[str], node: ast.FunctionDef | ast.AsyncFunctionDef
-) -> int:
+def _function_code_lines(lines: list[str], node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     """Count a function's significant CODE lines (non-blank, non-comment, non-docstring).
 
     This is the function analogue of the module's non-blank/non-comment measure

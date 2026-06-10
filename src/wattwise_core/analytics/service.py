@@ -210,9 +210,7 @@ class AnalyticsService:  # noqa: size-limits
             # inapplicable sport is gated as NOT_APPLICABLE_FOR_SPORT inside wbal().
             return _wbal.wbal(None, None, None, sport=act.sport)
         sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
-        return _wbal.wbal(
-            resample_to_1hz(power), sig.cp_w, sig.w_prime_j, sport=act.sport
-        )
+        return _wbal.wbal(resample_to_1hz(power), sig.cp_w, sig.w_prime_j, sport=act.sport)
 
     async def aerobic_decoupling(self, activity_id: str) -> MetricResult[float]:
         """Compute aerobic decoupling for an activity (DEC-R1)."""
@@ -418,9 +416,7 @@ class AnalyticsService:  # noqa: size-limits
         """Composed ``[0,100]`` endurance score as-of a local date (ES-R1/R2/R3)."""
         return await _gather_endurance_score(self, athlete_id, as_of)
 
-    async def hrv(
-        self, athlete_id: str, local_date: _dt.date
-    ) -> MetricResult[_hrv.TimeDomainHrv]:
+    async def hrv(self, athlete_id: str, local_date: _dt.date) -> MetricResult[_hrv.TimeDomainHrv]:
         """Compute time-domain HRV for a wellness day (HRV-R0/R3, fail-closed)."""
         rr = await _load_wellness_rr(self._session, athlete_id, local_date)
         summary = await _load_wellness_hrv_summary(self._session, athlete_id, local_date)

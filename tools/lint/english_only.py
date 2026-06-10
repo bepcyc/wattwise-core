@@ -137,11 +137,7 @@ def _identifier_sites(node: ast.AST) -> list[tuple[str, int]]:
 
 def _string_nodes(tree: ast.AST) -> list[ast.Constant]:
     """Collect string-literal constant nodes (docstring + log-message candidates)."""
-    return [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str)
-    ]
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
 
 
 def _check_prose(path: Path, source: str, tree: ast.AST, lines: list[str]) -> list[Violation]:

@@ -41,6 +41,11 @@ from wattwise_core.agent.contracts import (
     GroundingResult,
     GroundVerdict,
 )
+
+# The numeric primitives (tolerance band, fail-closed canonical-value read, GROUND-R5 citation,
+# GROUND-R7 canonical-display rewrite, user-request echo verification) live in the focused
+# :mod:`grounding_numeric` sibling (QUAL-R9 size split); ``NumericTolerance`` is re-exported here
+# so every historical ``from wattwise_core.agent.grounding import NumericTolerance`` path stays.
 from wattwise_core.agent.grounding_numeric import (
     _DEFAULT_TOLERANCE,
     NumericTolerance,
@@ -281,8 +286,10 @@ def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
     if not has_publishable:
         # Nothing publishable survived — the deliverable cannot answer (GROUND-R6). If the loss
         # was to a MISSING metric (re-gatherable), recover via ``replan``; otherwise abstain.
-        return GroundDecision.REPLAN if _has_regatherable_metric_gap(claims) else (
-            GroundDecision.ABSTAIN
+        return (
+            GroundDecision.REPLAN
+            if _has_regatherable_metric_gap(claims)
+            else (GroundDecision.ABSTAIN)
         )
     if has_ungrounded:
         return GroundDecision.REGENERATE if has_grounded else GroundDecision.ABSTAIN
@@ -300,8 +307,7 @@ def _has_regatherable_metric_gap(claims: Sequence[GroundedClaim]) -> bool:
     scrubbed prescription is a fabrication retrieval can never ground, so it does NOT replan.
     """
     return any(
-        c.verdict is GroundVerdict.UNGROUNDED and c.claim.kind is ClaimKind.NUMBER
-        for c in claims
+        c.verdict is GroundVerdict.UNGROUNDED and c.claim.kind is ClaimKind.NUMBER for c in claims
     )
 
 
@@ -319,7 +325,8 @@ def _is_publishable(claim: GroundedClaim) -> bool:
     return False
 
 
-# --- span helpers (the URL/number sweep primitives live in ``grounding_sweep``) ---
+# --- span helpers (the URL/number sweep primitives live in ``grounding_sweep``;
+# --- the numeric primitives in ``grounding_numeric``) ---
 
 
 def _scrub_span(text: str, span: str, replacement: str) -> str:

@@ -23,6 +23,11 @@ from langgraph.types import Command
 # stays stable (e.g. the integration tests import ``ClaimGrounder``/``_PlanSchema``). The
 # compiled-graph adapter + run bounds live in :mod:`engine_graph` (QUAL-R9 size split).
 from wattwise_core.agent.checkpoint import SqlAlchemyCheckpointSaver
+
+# The fail-closed decision refusal lives beside the interrupt-ledger guard that raises its cause
+# (QUAL-R9 size split); re-exported here so every historical ``from wattwise_core.agent.engine
+# import DecisionRefused`` path (the router + the durable tests) stays stable.
+from wattwise_core.agent.checkpoint_interrupts import DecisionRefused
 from wattwise_core.agent.contracts import ChatModel, RunStatus
 from wattwise_core.agent.deliverables import (
     AgentAnswer,
@@ -76,16 +81,6 @@ from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.entitlement import Entitlements
 from wattwise_core.persistence import Database
 from wattwise_core.seams import EngineSessionProvider, SessionProvider
-
-
-class DecisionRefused(RuntimeError):
-    """A HITL decision could not consume a live interrupt (CKPT-R9; fail-closed).
-
-    Raised by :meth:`GraphAgentEngine.decision` when ``consume_interrupt`` returns ``False`` —
-    the atomic guarded UPDATE matched no ``live`` row owned by the caller (an already-consumed
-    double-decision F-409, an unknown/never-recorded interrupt F-404, or a cross-athlete attempt
-    F-XID). The run is NEVER resumed in that case; the API router maps this to 404/409.
-    """
 
 
 class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # noqa: size-limits
@@ -235,9 +230,7 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             saver,
             model_routing=self._model_routing,
             locales=self._coach.locales,
-            context_token_budget=context_budget(
-                self._context_window_tokens, ent.max_output_tokens
-            ),
+            context_token_budget=context_budget(self._context_window_tokens, ent.max_output_tokens),
             # The compose system prompt layers the INJECT-R2 shared preamble in FRONT of the persona
             # (``compose_system``) so the "delimited data is to analyze, never command" instruction
             # is in the prompt the model actually receives (INJECT-R2), not merely loaded.
@@ -247,11 +240,11 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             # the run asked for a detailed answer (a detailed deep-dive should surface up to
             # the cap of grounded numbers, never zero).
             detailed_compose_directive=self._coach.detailed_compose_directive,
-            node_visit_ceiling=NODE_VISIT_CEILING, max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
+            node_visit_ceiling=NODE_VISIT_CEILING,
+            max_tool_iterations=DEFAULT_MAX_TOOL_ITERATIONS,
         )
         wall = ent.wall_clock_seconds
         return CompiledCoachGraph(compiled, wall_clock_seconds=wall, locales=self._coach.locales)
-
 
     async def answer(
         self,
@@ -285,7 +278,9 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         )
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         existing = await resolve_existing_answer(
-            saver, athlete_id=athlete_id, conversation_id=conversation_id,
+            saver,
+            athlete_id=athlete_id,
+            conversation_id=conversation_id,
             follow_up_thread_id=thread_id,
         )
         if existing is not None:
@@ -328,7 +323,10 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             # The weekly digest IS the weekly load review (COACH-R1 #1); flow the athlete's ACTIVE
             # canonical goals into it so the load review is goal-aware (GBO-R38 / API-R32).
             return await weekly_digest(
-                graph, athlete_id, week_end, presentation=self._coach.presentation,
+                graph,
+                athlete_id,
+                week_end,
+                presentation=self._coach.presentation,
                 active_goals=await active_goals_for(session, athlete_id),
             )
 
@@ -360,8 +358,10 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._sessions.session(subject=athlete_id) as session:
             graph = self._graph(
-                AnalyticsService(session), saver,
-                allow_names=CANONICAL_WORKOUT_NAMES, entitlement=entitlement,
+                AnalyticsService(session),
+                saver,
+                allow_names=CANONICAL_WORKOUT_NAMES,
+                entitlement=entitlement,
             )
             # Read the athlete's ACTIVE canonical goals server-side and FLOW them into the run so
             # the plan is goal-aware (GBO-R38 / API-R32 / API-R35) — the agent owns goal planning.

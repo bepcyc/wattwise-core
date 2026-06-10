@@ -153,4 +153,3 @@ async def test_two_sources_same_session_resolve_to_one_activity(session: AsyncSe
     assert len(activities) == 1  # single-count: one real session -> one canonical activity
     # The higher-trust (raw_stream file) avg_power wins the field resolution (CONF-R2).
     assert float(activities[0].avg_power_w) == pytest.approx(250.0)
-

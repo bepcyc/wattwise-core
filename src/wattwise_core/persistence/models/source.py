@@ -63,9 +63,7 @@ class SourceDescriptor(Base, TimestampMixin):
     """
 
     __tablename__ = "source_descriptor"
-    __table_args__ = (
-        UniqueConstraint("source_key", name="uq_source_descriptor_source_key"),
-    )
+    __table_args__ = (UniqueConstraint("source_key", name="uq_source_descriptor_source_key"),)
 
     source_descriptor_id: Mapped[uuid.UUID] = pk_column()
     source_key: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -175,9 +173,7 @@ class SourceCandidate(Base, TimestampMixin):
         ),
         Index("ix_source_candidate_resolved_activity_id", "resolved_activity_id"),
         Index("ix_source_candidate_resolved_daily_wellness_id", "resolved_daily_wellness_id"),
-        Index(
-            "ix_source_candidate_resolved_stream_set_id", "resolved_stream_set_id"
-        ),
+        Index("ix_source_candidate_resolved_stream_set_id", "resolved_stream_set_id"),
         Index(
             "ix_source_candidate_resolved_wellness_stream_set_id",
             "resolved_wellness_stream_set_id",

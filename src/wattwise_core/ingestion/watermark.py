@@ -80,20 +80,28 @@ async def advance_and_heal(
     closed = 0
     for gbo_type, (high_water_at, content_hint) in high_water.items():
         await advance_watermark(
-            session, athlete_id, source_descriptor_id, gbo_type,
+            session,
+            athlete_id,
+            source_descriptor_id,
+            gbo_type,
             high_water_at=high_water_at or synced_range.newest,
             content_hint=content_hint,
             ingest_run_id=ingest_run_id,
         )
         advanced += 1
         closed += await close_covering_gaps(
-            session, athlete_id, source_descriptor_id, gbo_type,
+            session,
+            athlete_id,
+            source_descriptor_id,
+            gbo_type,
             range_start_at=synced_range.oldest,
             range_end_at=synced_range.newest,
             closed_at=synced_range.now,
         )
     closed += await close_token_gaps(
-        session, athlete_id, source_descriptor_id,
+        session,
+        athlete_id,
+        source_descriptor_id,
         {c.source_native_id for c in committed},
         closed_at=synced_range.now,
     )
@@ -138,9 +146,7 @@ async def advance_watermark(
     (SYN-R2). The write rides the caller's transaction; it is the SAME transaction as the
     batch upsert (ING-UPS-R2), so the cursor never advances past un-committed data.
     """
-    row = await watermark_for(
-        session, athlete_id, source_descriptor_id, gbo_type, stream=stream
-    )
+    row = await watermark_for(session, athlete_id, source_descriptor_id, gbo_type, stream=stream)
     if row is None:
         row = IngestionWatermark(
             athlete_id=athlete_id,
@@ -209,9 +215,7 @@ async def open_gap(
     session.add(gap)
     await session.flush()
     # ING-OBS-R2: open-gap counts are queryable by reason on the metrics surface.
-    _metrics.get_registry().increment(
-        _metrics.INGEST_GAPS_OPENED, labels={"reason": reason.value}
-    )
+    _metrics.get_registry().increment(_metrics.INGEST_GAPS_OPENED, labels={"reason": reason.value})
     return gap
 
 

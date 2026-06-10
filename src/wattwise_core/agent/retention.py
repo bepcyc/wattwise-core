@@ -132,12 +132,8 @@ async def _delete_threads(
     # Remove any remaining children of these threads first (a child younger than the cutoff
     # whose parent thread is itself expired) so a RESTRICT foreign key still holds.
     await session.execute(delete(AgentWrite).where(AgentWrite.thread_id.in_(thread_ids)))
-    await session.execute(
-        delete(AgentCheckpoint).where(AgentCheckpoint.thread_id.in_(thread_ids))
-    )
-    await session.execute(
-        delete(AgentInterrupt).where(AgentInterrupt.thread_id.in_(thread_ids))
-    )
+    await session.execute(delete(AgentCheckpoint).where(AgentCheckpoint.thread_id.in_(thread_ids)))
+    await session.execute(delete(AgentInterrupt).where(AgentInterrupt.thread_id.in_(thread_ids)))
     result = cast(
         CursorResult[Any],
         await session.execute(delete(AgentThread).where(AgentThread.thread_id.in_(thread_ids))),

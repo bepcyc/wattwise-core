@@ -208,11 +208,13 @@ async def test_disputed_flag_set_on_material_disagreement(session: AsyncSession)
     ingest = IngestService(session)
     # Same real ride, two sources, power disagreeing far beyond tolerance (200 vs 320).
     await ingest.ingest(
-        athlete_id, file_src,
+        athlete_id,
+        file_src,
         [_ride(native_id="file-1", watts=200.0, seconds=3600, tier=Fidelity.RAW_STREAM)],
     )
     await ingest.ingest(
-        athlete_id, api_src,
+        athlete_id,
+        api_src,
         [_ride(native_id="api-1", watts=320.0, seconds=3600, tier=Fidelity.PLATFORM_COMPUTED)],
     )
     await session.commit()
@@ -227,11 +229,13 @@ async def test_disputed_flag_absent_when_sources_agree(session: AsyncSession) ->
     athlete_id, file_src, api_src = await _seed(session)
     ingest = IngestService(session)
     await ingest.ingest(
-        athlete_id, file_src,
+        athlete_id,
+        file_src,
         [_ride(native_id="file-1", watts=250.0, seconds=3600, tier=Fidelity.RAW_STREAM)],
     )
     await ingest.ingest(
-        athlete_id, api_src,
+        athlete_id,
+        api_src,
         [_ride(native_id="api-1", watts=251.0, seconds=3600, tier=Fidelity.PLATFORM_COMPUTED)],
     )
     await session.commit()
@@ -251,9 +255,7 @@ async def test_file_import_stores_bytes_and_creates_activity_file(
     ingest = IngestService(session, object_store=store)
     cand = _ride(native_id="ride-1", watts=250.0, seconds=3600, tier=Fidelity.RAW_STREAM)
     raw = b"<<verbatim fit bytes>>"
-    original = OriginalFile(
-        data=raw, file_format=ActivityFileFormat.FIT, source_native_id="ride-1"
-    )
+    original = OriginalFile(data=raw, file_format=ActivityFileFormat.FIT, source_native_id="ride-1")
     await ingest.ingest(athlete_id, file_src, [cand], original_files=[original])
     await session.commit()
     files = (await session.execute(select(ActivityFile))).scalars().all()
@@ -312,9 +314,13 @@ def test_completeness_breaks_tie_stream_over_summary() -> None:
         if streamed:
             payload["streams"] = {"power_w": {"values": [value]}}
         return SourceCandidate(
-            athlete_id=None, source_descriptor_id=sid, source_native_id=sid,
-            content_hash=sid, trust_profile={"tier": Fidelity.PLATFORM_COMPUTED.value},
-            payload=payload, confidence=1.0,
+            athlete_id=None,
+            source_descriptor_id=sid,
+            source_native_id=sid,
+            content_hash=sid,
+            trust_profile={"tier": Fidelity.PLATFORM_COMPUTED.value},
+            payload=payload,
+            confidence=1.0,
         )
 
     def _tier_of(c: SourceCandidate) -> Fidelity:
@@ -361,9 +367,7 @@ async def test_streams_resolved_per_channel_across_sources(session: AsyncSession
     athlete_id, file_src, api_src = await _seed(session)
     ingest = IngestService(session)
     # Higher-trust source has only power; lower-trust source has only HR.
-    hi = _ride_channels(
-        native_id="hi", channels={"power_w": [200.0] * 5}, tier=Fidelity.RAW_STREAM
-    )
+    hi = _ride_channels(native_id="hi", channels={"power_w": [200.0] * 5}, tier=Fidelity.RAW_STREAM)
     lo = _ride_channels(
         native_id="lo", channels={"hr_bpm": [140.0] * 5}, tier=Fidelity.SUMMARY_ONLY
     )
@@ -372,10 +376,14 @@ async def test_streams_resolved_per_channel_across_sources(session: AsyncSession
     await session.commit()
     ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
     chans = (
-        await session.execute(
-            select(StreamChannel).where(StreamChannel.stream_set_id == ss.stream_set_id)
+        (
+            await session.execute(
+                select(StreamChannel).where(StreamChannel.stream_set_id == ss.stream_set_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     by_name = {c.channel.value: c for c in chans}
     # Both channels present — the HR channel was filled from the lower-trust source.
     assert "power_w" in by_name and "hr_bpm" in by_name
@@ -419,11 +427,13 @@ async def _ingest_two_source_power(
     """Two sources report the same ride; file_src=RAW_STREAM(200W), api_src=PLATFORM(320W)."""
     ingest = IngestService(session)
     await ingest.ingest(
-        athlete_id, file_src,
+        athlete_id,
+        file_src,
         [_ride(native_id="file-1", watts=200.0, seconds=3600, tier=Fidelity.RAW_STREAM)],
     )
     await ingest.ingest(
-        athlete_id, api_src,
+        athlete_id,
+        api_src,
         [_ride(native_id="api-1", watts=320.0, seconds=3600, tier=Fidelity.PLATFORM_COMPUTED)],
     )
     await session.commit()
@@ -487,13 +497,17 @@ async def test_lower_trust_stream_never_overwrites_higher_trust(session: AsyncSe
     await session.commit()
     ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
     power = (
-        await session.execute(
-            select(StreamChannel).where(
-                StreamChannel.stream_set_id == ss.stream_set_id,
-                StreamChannel.channel == "power_w",
+        (
+            await session.execute(
+                select(StreamChannel).where(
+                    StreamChannel.stream_set_id == ss.stream_set_id,
+                    StreamChannel.channel == "power_w",
+                )
             )
         )
-    ).scalars().one()
+        .scalars()
+        .one()
+    )
     # The higher-trust raw_stream power survives the lower-trust write.
     assert power.values == [200.0] * 5
 
@@ -560,13 +574,17 @@ async def test_per_channel_stream_trust_profile_flips_stream_winner(
     await session.commit()
     ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
     power = (
-        await session.execute(
-            select(StreamChannel).where(
-                StreamChannel.stream_set_id == ss.stream_set_id,
-                StreamChannel.channel == "power_w",
+        (
+            await session.execute(
+                select(StreamChannel).where(
+                    StreamChannel.stream_set_id == ss.stream_set_id,
+                    StreamChannel.channel == "power_w",
+                )
             )
         )
-    ).scalars().one()
+        .scalars()
+        .one()
+    )
     # The override flips the STREAM winner: api_src (333) wins the channel for this athlete.
     assert power.values == [333.0] * 5
     cov = power.coverage
@@ -608,10 +626,14 @@ async def test_whole_source_override_keeps_sole_carrier_stream_channel(
     await session.commit()
     ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
     chans = (
-        await session.execute(
-            select(StreamChannel).where(StreamChannel.stream_set_id == ss.stream_set_id)
+        (
+            await session.execute(
+                select(StreamChannel).where(StreamChannel.stream_set_id == ss.stream_set_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     by_name = {c.channel.value: c for c in chans}
     # The sole-carrier power_w channel is PRESERVED, not dropped by the whole-source demotion.
     assert "power_w" in by_name, "whole-source demotion dropped the SOLE-carrier power_w stream"
@@ -641,7 +663,8 @@ async def test_gap_r3_no_contributor_field_is_typed_absent_true(session: AsyncSe
     athlete_id, file_src, _ = await _seed(session)
     ingest = IngestService(session)
     await ingest.ingest(
-        athlete_id, file_src,
+        athlete_id,
+        file_src,
         [_ride(native_id="ride-1", watts=250.0, seconds=3600, tier=Fidelity.RAW_STREAM)],
     )
     await session.commit()

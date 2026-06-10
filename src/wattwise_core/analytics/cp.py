@@ -136,8 +136,7 @@ def _select_cp_domain_points(
         return Unavailable(
             reason=UnavailableReason.INSUFFICIENT_DATA,
             detail=(
-                f"durations too clustered: max/min = "
-                f"{max_dur / min_dur:.3f} < {duration_ratio_min}"
+                f"durations too clustered: max/min = {max_dur / min_dur:.3f} < {duration_ratio_min}"
             ),
         )
     return distinct_durations, in_domain

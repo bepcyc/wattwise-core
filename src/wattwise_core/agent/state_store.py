@@ -95,9 +95,7 @@ class AgentThread(AgentStateBase):
     thread_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     athlete_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
     conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 class AgentCheckpoint(AgentStateBase):
@@ -143,9 +141,7 @@ class AgentCheckpoint(AgentStateBase):
     checkpoint_type: Mapped[str] = mapped_column(String(64), nullable=False)
     checkpoint_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     metadata_blob: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 class AgentWrite(AgentStateBase):
@@ -186,9 +182,7 @@ class AgentWrite(AgentStateBase):
     channel: Mapped[str] = mapped_column(String(255), nullable=False)
     value_type: Mapped[str] = mapped_column(String(64), nullable=False)
     value_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 class AgentInterrupt(AgentStateBase):
@@ -225,9 +219,7 @@ class AgentInterrupt(AgentStateBase):
     athlete_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
     interrupt_id: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="live")
-    created_at: Mapped[_dt.datetime] = mapped_column(
-        UtcDateTime(), default=utcnow, nullable=False
-    )
+    created_at: Mapped[_dt.datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
 
 
 __all__ = [

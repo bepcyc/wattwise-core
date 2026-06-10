@@ -89,11 +89,7 @@ def _verdict_map(claims: tuple[GroundedClaim, ...]) -> dict[str, GroundVerdict]:
     The self-cert STATEMENT is excluded so the comparison is over the REAL (number/url)
     claims only: adding the self-claim must not change the verdict of any real claim.
     """
-    return {
-        gc.claim.text: gc.verdict
-        for gc in claims
-        if gc.claim.kind is not ClaimKind.STATEMENT
-    }
+    return {gc.claim.text: gc.verdict for gc in claims if gc.claim.kind is not ClaimKind.STATEMENT}
 
 
 def _number_scrubbed(claims: tuple[GroundedClaim, ...], fabricated: Claim) -> bool:

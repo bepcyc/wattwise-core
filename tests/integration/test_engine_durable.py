@@ -506,9 +506,7 @@ async def test_plan_edit_fully_canonical_grounds_and_completes(
     engine._model.set_response(  # type: ignore[attr-defined]
         _ClaimSchema(
             claims=[
-                _ExtractedClaim(
-                    kind=ClaimKind.NAME, text="recovery ride", as_of="recovery ride"
-                ),
+                _ExtractedClaim(kind=ClaimKind.NAME, text="recovery ride", as_of="recovery ride"),
                 _ExtractedClaim(
                     kind=ClaimKind.NAME, text="threshold intervals", as_of="threshold intervals"
                 ),
