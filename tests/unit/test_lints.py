@@ -28,6 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from tools.lint import (  # noqa: E402  (import after sys.path bootstrap, intentional)
     content_copy,
+    content_leak,
     core,
     english_only,
     import_direction,
@@ -509,6 +510,83 @@ def test_content_copy_allows_catalog_key_reference(tmp_path: Path) -> None:
     )
     orphans = [v for v in content_copy.check_paths([tmp_path]) if v.rule == "copy-orphan-literal"]
     assert orphans == []
+
+
+# ----------------------------------------------------------------- content-leak (ARCH-R29)
+
+
+def test_content_leak_flags_inline_named_prompt_body(tmp_path: Path) -> None:
+    """ARCH-R29: a prompt body assigned to a behavior-asset NAME in engine source is flagged."""
+    _write(
+        tmp_path / "src" / "wattwise_core" / "agent",
+        "leaky.py",
+        '"""Mod."""\n\n\n'
+        '_REFLECT_SYSTEM = (\n'
+        '    "You are the coaching agent\'s reflection step. Decide the next move over the "\n'
+        '    "closed verdict set and never invent a capability."\n'
+        ")\n",
+    )
+    leaks = [
+        v for v in content_leak.check_paths([tmp_path]) if v.rule == "content-leak-prompt"
+    ]
+    assert leaks, "an inline named prompt body must be flagged (ARCH-R29)"
+    assert leaks[0].requirement == "ARCH-R29"
+
+
+def test_content_leak_flags_unnamed_persona_prose_literal(tmp_path: Path) -> None:
+    """ARCH-R29: a long persona/prompt prose literal under an innocuous name is still flagged."""
+    _write(
+        tmp_path / "src" / "wattwise_core" / "agent",
+        "sneaky.py",
+        '"""Mod."""\n\n\n'
+        'X = "You are the athlete\'s endurance coach; answer only from the canonical data and '
+        'never call this a readiness score, return only the structured narration."\n',
+    )
+    rules = _rules(content_leak.check_paths([tmp_path]))
+    assert "content-leak-prompt" in rules
+
+
+def test_content_leak_flags_short_multiline_named_persona_body(tmp_path: Path) -> None:
+    """ARCH-R29: even a SHORT (<40-char) multi-line body under a behaviour-asset NAME is flagged.
+
+    Guards the false-negative the bare-length threshold missed: a multi-line persona body whose
+    stripped length is under the char threshold is still a leaked body (multi-line signal trips).
+    """
+    body = "Be warm.\nGround it.\n"  # stripped length < 40 chars, but multi-line
+    assert len(body.strip()) < 40
+    _write(
+        tmp_path / "src" / "wattwise_core" / "agent",
+        "tripled.py",
+        '"""Mod."""\n\n\n_COACH_PERSONA = """' + body + '"""\n',
+    )
+    rules = _rules(content_leak.check_paths([tmp_path]))
+    assert "content-leak-prompt" in rules
+
+
+def test_content_leak_clean_engine_source_is_silent(tmp_path: Path) -> None:
+    """A module with NO inline prompt/persona body (empty/short defaults only) is clean."""
+    _write(
+        tmp_path / "src" / "wattwise_core" / "agent",
+        "clean.py",
+        '"""A focused module."""\n\n\n'
+        "class Bundle:\n"
+        '    """Holds a loaded prompt (from config, never inline)."""\n\n'
+        "    system_prompt: str = \"\"\n"
+        "    plan_system: str = \"\"\n",
+    )
+    leaks = [
+        v for v in content_leak.check_paths([tmp_path]) if v.rule == "content-leak-prompt"
+    ]
+    assert leaks == [], "empty/short config-field defaults are not a leaked prompt body"
+
+
+def test_content_leak_real_engine_source_has_no_inline_prompts() -> None:
+    """The REAL engine source embeds NO inline prompt/persona body (ARCH-R29 over src)."""
+    src = Path(__file__).resolve().parents[2] / "src"
+    leaks = [
+        v for v in content_leak.check_paths([src]) if v.rule == "content-leak-prompt"
+    ]
+    assert leaks == [], f"engine source leaks a prompt/persona body: {[v.render() for v in leaks]}"
 
 
 # ------------------------------------------------------------------------ runner

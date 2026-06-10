@@ -203,17 +203,18 @@ def _make_assess_coverage(svc: AgentServices) -> GraphNode:
     return assess_coverage
 
 
-def _make_reflect(model: ChatModel) -> GraphNode:
+def _make_reflect(model: ChatModel, reflect_system: str) -> GraphNode:
     async def reflect(state: AgentState) -> dict[str, Any]:
         """Emit a structured §6 reflect verdict over the closed enum (REFLECT-R2).
 
         Spends one unit of the bounded reflection budget (REFLECT-R4) and obtains a
-        provider-enforced ``ReflectDecision`` via ``run_structured`` (STRUCT-R1); the
+        provider-enforced ``ReflectDecision`` via ``run_structured`` (STRUCT-R1) using the
+        externalized reflection system prompt (§16 / SKILL-R1, CFG-R3 — not inline, ARCH-R29); the
         routing function reads the verdict.
         """
         gs.athlete_id(state)
         count = state.get("reflection_count", 0) + 1
-        decision = await gs.reflect_decision(model, state)
+        decision = await gs.reflect_decision(model, state, system=reflect_system)
         note = {
             "role": "system",
             "kind": "reflect",
@@ -388,6 +389,7 @@ def build_graph(
     checkpointer: BaseCheckpointSaver[Any],
     *,
     coach_system: str = "",
+    reflect_system: str = "",
     node_visit_ceiling: int = DEFAULT_NODE_VISIT_CEILING,
     max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
 ) -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
@@ -427,7 +429,7 @@ def build_graph(
     builder.add_node("plan_retrieval", _make_plan_retrieval(svc), input_schema=AgentState)
     builder.add_node("gather", _make_gather(svc), input_schema=AgentState)
     builder.add_node("assess_coverage", _make_assess_coverage(svc), input_schema=AgentState)
-    builder.add_node("reflect", _make_reflect(model), input_schema=AgentState)
+    builder.add_node("reflect", _make_reflect(model, reflect_system), input_schema=AgentState)
     builder.add_node("redraft_tick", routing.make_redraft_tick(), input_schema=AgentState)
     builder.add_node("compose", _make_compose(svc, model, coach_system), input_schema=AgentState)
     builder.add_node("ground", _make_ground(svc), input_schema=AgentState)

@@ -78,7 +78,20 @@ def _read_toml(path: Path) -> dict[str, Any]:
 # set of scalar settings. The flattener stops at these and assigns the whole sub-mapping to
 # the single ``section__key`` field, so a free-form alias table is one ``dict[str, str]``
 # setting (CFG-R1a) instead of one settings key per alias.
-_LEAF_TABLE_KEYS: frozenset[str] = frozenset({"agent__metric_aliases"})
+_LEAF_TABLE_KEYS: frozenset[str] = frozenset(
+    {
+        "agent__metric_aliases",
+        # The externalized coach-config behavior-asset tables (§16 / SKILL-R1/-R3): each is a
+        # free-form name->content map (prompt fragments, grounding rules) or a single closed
+        # record (the bundle manifest) the engine consumes WHOLE, not a nested set of scalar
+        # settings. Stopping the flattener here keeps each as ONE dict-valued setting (CFG-R1a),
+        # so a fragment/rule is addressed by name inside the loaded map, not by a per-entry
+        # settings key. (``agent__coach__skills`` is a TOML array-of-tables → already a list.)
+        "agent__coach__prompts",
+        "agent__coach__grounding_rules",
+        "agent__coach__manifest",
+    }
+)
 
 
 def _flatten(prefix: str, value: Mapping[str, Any], out: dict[str, Any]) -> None:
@@ -245,6 +258,18 @@ class Settings(BaseSettings):
     agent__coach__grounding_abs_tolerance: float = Field(ge=0.0)
     agent__coach__grounding_display_decimals: int = Field(ge=0, le=6)
     agent__coach__latest_lookback_days: int = Field(ge=1)
+    # The externalized skill/prompt bundle (SKILL-R1..R4 / CFG-R3): EVERY system/agent prompt is
+    # loaded CONTENT here, never inline engine code (ARCH-R29). ``prompts`` is the name->fragment
+    # map (the verbatim system prompts the verdict/compose nodes drive); ``grounding_rules`` the
+    # name->policy-text map a skill's ``grounding_refs`` resolve against; ``manifest`` the closed
+    # bundle identity/schema-version record (SKILL-R3b); ``skills`` the array of named/versioned
+    # composable skill records (SKILL-R2/-R3a). These are SHAPE-only here (typed maps/list); the
+    # CLOSED skill/manifest schema + cross-reference resolution + fail-closed validation are owned
+    # by ``CoachManifest.load`` (SKILL-R4 / CFG-R6), not by this settings schema.
+    agent__coach__prompts: dict[str, str]
+    agent__coach__grounding_rules: dict[str, str]
+    agent__coach__manifest: dict[str, str]
+    agent__coach__skills: list[dict[str, Any]]
     agent__metric_aliases: dict[str, str]
 
     # --- retention ---

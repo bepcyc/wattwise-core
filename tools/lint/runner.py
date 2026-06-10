@@ -15,6 +15,7 @@ from pathlib import Path
 
 from tools.lint import (
     content_copy,
+    content_leak,
     english_only,
     import_direction,
     no_vendor_sql,
@@ -29,6 +30,8 @@ _LINTERS: tuple[Callable[[Iterable[Path]], list[Violation]], ...] = (
     test_docstrings.check_paths,
     english_only.check_paths,
     content_copy.check_paths,
+    # ARCH-R29 / CFG-R3 content-IP-leak gate: no persona/prompt/skill body inline in engine source.
+    content_leak.check_paths,
     no_vendor_sql.check_paths,
     import_direction.check_paths,
 )

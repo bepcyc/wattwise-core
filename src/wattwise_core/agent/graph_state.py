@@ -228,25 +228,22 @@ def plan_requires_approval(state: AgentState) -> bool:
 
 # --- reflect verdict (REFLECT-R2 / STRUCT-R1) ---
 
-_REFLECT_SYSTEM = (
-    "You are the coaching agent's reflection step. Given the open coverage gaps and "
-    "what has already been retrieved, decide the next move over the CLOSED verdict set "
-    "{replan, answer_with_caveat, give_up_gracefully}. Choose replan only when adding or "
-    "widening capability requests could close a gap; answer_with_caveat when a useful "
-    "grounded answer is possible despite a gap; give_up_gracefully when nothing more can "
-    "be retrieved. For replan, list the capability keys to add/widen."
-)
 
+async def reflect_decision(
+    model: ChatModel, state: AgentState, *, system: str = ""
+) -> ReflectDecision:
+    """Obtain the structured reflect verdict, fail-closed on a structured-output error.
 
-async def reflect_decision(model: ChatModel, state: AgentState) -> ReflectDecision:
-    """Obtain the structured reflect verdict, fail-closed on a structured-output error."""
+    ``system`` is the externalized reflection system prompt (§16 / SKILL-R1, CFG-R3): the engine
+    embeds NO prompt inline (ARCH-R29) — the graph threads the verbatim fragment loaded from the
+    coach-config bundle. The empty default keeps the FakeModel suite green (it scripts the verdict,
+    so the prompt text is immaterial offline).
+    """
     gaps = sorted(read_coverage_gaps(state))
     already = sorted(read_retrieved(state).keys())
     data = f"open_gaps: {gaps}\nalready_retrieved: {already}"
     try:
-        return await run_structured(
-            model, system=_REFLECT_SYSTEM, data=data, schema=ReflectDecision
-        )
+        return await run_structured(model, system=system, data=data, schema=ReflectDecision)
     except (StructuredOutputError, NotImplementedError):
         return ReflectDecision(verdict=ReflectVerdict.GIVE_UP_GRACEFULLY)
 

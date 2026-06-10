@@ -40,14 +40,6 @@ from wattwise_core.persistence.types import utcnow
 # look-back finds the most-recent computed day without dragging in stale state.
 _READINESS_WINDOW_DAYS = 14
 
-_READINESS_SYSTEM = (
-    "You are the coaching agent narrating an athlete's readiness/form state. Given the "
-    "canonical verdict and metrics, write ONE warm, plain-language state sentence to lead "
-    "the summary; keep numbers out of the first sentence; never call this a 'readiness "
-    "score'. Echo the given verdict. Return ONLY the structured narration."
-)
-
-
 async def gather_readiness_inputs(
     svc: AnalyticsService, athlete_id: str
 ) -> tuple[float | None, str | None, float | None, float | None]:
@@ -119,19 +111,26 @@ async def _latest_hrv_rmssd(
     return float(result.value.rmssd_ms) if is_computed(result) else None
 
 
-def readiness_narrator(model: ChatModel) -> Callable[[str], Awaitable[_ReadinessNarration]]:
+def readiness_narrator(
+    model: ChatModel, *, system: str = ""
+) -> Callable[[str], Awaitable[_ReadinessNarration]]:
     """Build the structured-narration closure the readiness deliverable drives (STRUCT-R1).
 
     Wraps ``run_structured`` over the closed :class:`_ReadinessNarration` schema at
     temperature 0 (provider-enforced); on a structured-output failure it raises
     :class:`StructuredNarrationError` so the deliverable falls back to the deterministic
     per-verdict state sentence rather than surfacing a model failure (fail-closed voice).
+
+    ``system`` is the externalized readiness-narration system prompt (§16 / SKILL-R1, CFG-R3): the
+    engine embeds NO prompt inline (ARCH-R29) — the engine threads the verbatim fragment loaded from
+    the coach-config bundle. The empty default keeps the FakeModel suite green (it scripts the
+    narration, so the prompt text is immaterial offline).
     """
 
     async def narrate(context: str) -> _ReadinessNarration:
         try:
             return await run_structured(
-                model, system=_READINESS_SYSTEM, data=context, schema=_ReadinessNarration
+                model, system=system, data=context, schema=_ReadinessNarration
             )
         except (StructuredOutputError, NotImplementedError) as exc:
             raise StructuredNarrationError("readiness narration unavailable") from exc

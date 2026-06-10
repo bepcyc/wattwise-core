@@ -143,7 +143,7 @@ class DeliverableEngineMixin:
                 as_of=as_of,
                 hrv_rmssd=rmssd,
                 hrv_baseline=baseline,
-                narrate=readiness_narrator(self._model),
+                narrate=readiness_narrator(self._model, system=self._coach.readiness_system),
                 grounder=self._coach.grounder(self._model, svc),
                 response_length=response_length,  # type: ignore[arg-type]
             )
