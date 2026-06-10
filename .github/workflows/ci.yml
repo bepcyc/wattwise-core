@@ -189,8 +189,12 @@ jobs:
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
         run: |
-          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')" >> "$GITHUB_ENV"
-          echo "WATTWISE_TOKEN_SIGNING_KEY=$(python3 -c 'import secrets;print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
+          ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+          echo "::add-mask::$ROOT_KEY"
+          echo "::add-mask::$SIGNING_KEY"
+          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
+          echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
       - run: just test-integration      # CI-R1 item 4
 
@@ -235,8 +239,12 @@ jobs:
       # foreground, so here we start it backgrounded, poll health, then tear down.
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
         run: |
-          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')" >> "$GITHUB_ENV"
-          echo "WATTWISE_TOKEN_SIGNING_KEY=$(python3 -c 'import secrets;print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
+          ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+          echo "::add-mask::$ROOT_KEY"
+          echo "::add-mask::$SIGNING_KEY"
+          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
+          echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - name: Bootstrap acceptance (health endpoint serves)
         run: |
           just migrate
@@ -275,8 +283,12 @@ jobs:
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
         run: |
-          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')" >> "$GITHUB_ENV"
-          echo "WATTWISE_TOKEN_SIGNING_KEY=$(python3 -c 'import secrets;print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
+          ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+          echo "::add-mask::$ROOT_KEY"
+          echo "::add-mask::$SIGNING_KEY"
+          echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
+          echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
       - run: just test-e2e              # CI-R1 item 12
 
