@@ -500,3 +500,153 @@ def test_evidence_without_sync_accessor_scrubs_numbers() -> None:
     # The metric is missing -> re-gatherable, so the aggregate is the recovery replan (GROUND-R6);
     # the reflection_count bound is what forces the eventual abstain (REFLECT-R4).
     assert result.decision is GroundDecision.REPLAN
+
+
+# --- positional rewrite + positional numeric coverage (issue #4, GROUND-R7/R9) ---
+
+
+def test_shared_token_claims_each_rewrite_their_own_span() -> None:
+    """Two NUMBER claims sharing a token each rewrite THEIR OWN span (GROUND-R7).
+
+    Canonical ctl=100 (claimed 100, grounded) and tss=98.5 (claimed 100, within band ->
+    grounded, published as the canonical 98.5). The pre-fix ``str.find`` rewrite landed the
+    SECOND claim's canonical value on the FIRST claim's span, shipping BOTH numbers wrong
+    under ``proceed`` — the exact fail-open the grounding gate exists to make impossible.
+    The published text must carry each canonical value in the claim's own position.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 100.0, "tss": 98.5})
+    draft = "Your CTL is 100 and your TSS is 100 today."
+    # ANCHORED claims (the issue's exact repro): claim.text carries the surrounding words,
+    # so each rewrite is located inside its own span. The bare-token ambiguity variant is
+    # covered separately and fails closed instead.
+    claims = [
+        _number("CTL is 100", "ctl", 100.0),
+        _number("TSS is 100", "tss", 100.0),
+    ]
+    result = ground(draft, claims, evidence, [])
+    assert result.decision is GroundDecision.PROCEED
+    assert result.scrubbed_text == "Your CTL is 100 and your TSS is 98.5 today."
+
+
+def test_contradicted_shared_token_corrects_its_own_span_only() -> None:
+    """A contradicted claim sharing a token never leaves its wrong figure in place (GROUND-R9).
+
+    Canonical ctl=50 (claimed 50, grounded) and tss=90 (claimed 50, contradicted). Pre-fix,
+    the canonical correction ("90") overwrote the FIRST "50" (the grounded CTL span) and the
+    contradicted figure stayed published in the TSS span. The contradicted figure must be
+    corrected in ITS OWN span; the grounded claim's span stays untouched.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 50.0, "tss": 90.0})
+    draft = "Your CTL is 50 and your TSS is 50 today."
+    claims = [_number("50", "ctl", 50.0), _number("50", "tss", 50.0)]
+    result = ground(draft, claims, evidence, [])
+    assert result.decision is GroundDecision.REGENERATE  # contradicted never proceeds
+    # BARE-token claims with multiple uncovered occurrences carry no anchor, so the gate
+    # refuses to GUESS which span is whose (review finding 1): the contradicted figure is
+    # never published, nothing is corrected into the WRONG span, and the ambiguous
+    # occurrences are swept for regeneration.
+    assert "TSS is 50" not in result.scrubbed_text
+    assert "CTL is 90" not in result.scrubbed_text  # never the swap
+
+
+def test_token_rewrite_never_lands_inside_a_longer_number() -> None:
+    """A token rewrite is word-bounded: ``102`` never rewrites inside ``1029`` (GROUND-R7).
+
+    Pre-fix, ``str.find("102")`` matched the prefix of the structural ``1029`` and the
+    canonical value was spliced INSIDE it, corrupting an unrelated figure while the claim's
+    own span kept the unverified number.
+    """
+    evidence = _FakeEvidence(metrics={"tss": 100.0})
+    draft = "Day 1029 went well. Your TSS is 102 today."
+    result = ground(draft, [_number("102", "tss", 102.0)], evidence, [])
+    assert result.decision is GroundDecision.PROCEED
+    assert result.scrubbed_text == "Day 1029 went well. Your TSS is 100 today."
+
+
+def test_leftover_token_equal_to_a_published_value_is_still_swept() -> None:
+    """Numeric coverage is POSITIONAL: a leftover token is not excused by string equality (H4).
+
+    The draft repeats the grounded CTL value for an unverified FTP figure the extractor
+    missed. Pre-fix coverage was a flat string SET, so the leftover wrong token was
+    "covered" by the OTHER claim's published value and shipped under ``proceed``. Only the
+    character range the grounder actually verified/rewrote is covered; the leftover is
+    swept and the decision is forced off ``proceed`` (fail-closed, GROUND-R3/R7).
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 100.0})
+    draft = "Your CTL is 100 and your FTP is 100."
+    result = ground(draft, [_number("100", "ctl", 100.0)], evidence, [])
+    assert result.decision is not GroundDecision.PROCEED
+    # A bare-token claim facing TWO uncovered occurrences is ambiguous — text order is not
+    # semantics (the "CTL" occurrence could equally be the FTP span). The gate publishes
+    # neither and sweeps both; the pre-fix bug (PROCEED with the leftover excused by string
+    # equality) stays pinned by the decision + leftover assertions.
+    assert "FTP is 100" not in result.scrubbed_text
+
+
+def test_rewrite_anchors_to_the_claims_own_text_span() -> None:
+    """A rewrite locates the token WITHIN the claim's own span first (GROUND-R7).
+
+    The claim text ("Your CTL is 70") is verbatim in the draft, but the same token also
+    appears EARLIER in an unrelated unit-bearing figure ("70km"). Pre-fix, the unanchored
+    ``str.find`` rewrote the earlier occurrence, corrupting the distance and leaving the
+    claim's own span unverified.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 71.0})
+    draft = "You rode 70km. Your CTL is 70."
+    result = ground(draft, [_number("Your CTL is 70", "ctl", 70.0)], evidence, [])
+    assert result.decision is GroundDecision.PROCEED
+    assert result.scrubbed_text == "You rode 70km. Your CTL is 71."
+
+
+def test_covered_ranges_survive_an_earlier_span_scrub() -> None:
+    """Coverage ranges shift with later text edits: an earlier scrub never strands them.
+
+    A prescriptive statement BEFORE the grounded number is scrubbed AFTER the number's
+    rewrite (claim order), shifting every character position. The verified number's
+    coverage must follow the shift so the sweep does not scrub the very value the grounder
+    just published (GROUND-R7).
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 100.0})
+    draft = "Push harder this week. Your CTL is 100."
+    claims = [
+        _number("100", "ctl", 100.0),
+        _statement("Push harder this week.", prescriptive=True),
+    ]
+    result = ground(draft, claims, evidence, [])
+    assert result.scrubbed_text == "Your CTL is 100."
+    assert result.decision is GroundDecision.REGENERATE  # the scrubbed statement, not the sweep
+
+
+def test_reversed_bare_token_claims_never_swap_values() -> None:
+    """Two BARE-token claims in reversed list order never publish swapped values (issue #4 review).
+
+    With claim.text equal to the bare token there is no anchor; claim-list order carries no
+    semantics (STRUCT-R5). The gate must either publish both canonical values in the RIGHT
+    spans or refuse to publish — never proceed with the figures exchanged.
+    """
+    draft = "Your CTL is 100 and your weekly TSS was 100."
+    claims = [
+        Claim(kind=ClaimKind.NUMBER, text="100", metric="tss", value=100.0),
+        Claim(kind=ClaimKind.NUMBER, text="100", metric="ctl", value=100.0),
+    ]
+    res = ground(draft, claims, _FakeEvidence(metrics={"ctl": 100.0, "tss": 98.0}), [])
+    swapped = "CTL is 98" in res.scrubbed_text and "TSS was 100" in res.scrubbed_text
+    assert not (res.decision is GroundDecision.PROCEED and swapped), (
+        f"swapped values published with PROCEED: {res.scrubbed_text!r}"
+    )
+    if res.decision is GroundDecision.PROCEED:
+        assert "CTL is 100" in res.scrubbed_text and "TSS was 98" in res.scrubbed_text
+
+
+def test_thousands_separated_token_rewrites_as_one_figure() -> None:
+    """A locale-formatted figure ("1,000") rewrites as ONE token, never a spliced digit group.
+
+    Splicing the canonical value over only the leading digit group garbled the draft handed
+    to regeneration ("950,000" for canonical 950 — issue #4 review). The figure must be
+    replaced whole (or removed whole); the published text never contains a chimera.
+    """
+    draft = "You burned 1,000 kJ today."
+    claims = [Claim(kind=ClaimKind.NUMBER, text="1,000", metric="work_kj", value=1000.0)]
+    res = ground(draft, claims, _FakeEvidence(metrics={"work_kj": 950.0}), [])
+    assert "950,000" not in res.scrubbed_text
+    assert ",000" not in res.scrubbed_text

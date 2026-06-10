@@ -342,6 +342,36 @@ def test_cp_fit_gates_fail_closed() -> None:
     assert noisy.reason is UnavailableReason.POOR_FIT
 
 
+def test_cp_constant_power_refused_before_any_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CP-R3/R4: a (near-)constant-power MMP curve is refused PRE-FIT, never fitted.
+
+    A constant-power curve makes ``W = P*t`` exactly linear through the origin, so the
+    regression's intercept (W') is pure floating-point noise whose sign varies by
+    platform/BLAS build — on some CI runners the fit "converges" with a tiny positive
+    intercept. The verdict MUST come from the declared pre-fit degeneracy gate
+    (``INSUFFICIENT_DATA``), not from whether the optimizer happens to fail; the
+    regression entry point is poisoned to PROVE no fit is ever attempted.
+    """
+
+    def _no_fit_allowed(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("np.polyfit reached: degenerate input must be refused PRE-FIT")
+
+    monkeypatch.setattr("wattwise_core.analytics.cp.np.polyfit", _no_fit_allowed)
+    # Exactly constant power across well-spread in-domain durations.
+    constant = cp_wprime({120: 250.0, 300: 250.0, 600: 250.0, 1200: 250.0})
+    assert isinstance(constant, Unavailable)
+    assert constant.reason is UnavailableReason.INSUFFICIENT_DATA
+    assert "constant" in (constant.detail or "")
+    # Near-constant power (relative spread below the declared epsilon) is also refused.
+    near = cp_wprime({120: 250.0, 300: 250.0 + 1e-7, 600: 250.0, 1200: 250.0})
+    assert isinstance(near, Unavailable)
+    assert near.reason is UnavailableReason.INSUFFICIENT_DATA
+    # All-zero power (zero scale) cannot divide-by-zero its way past the gate.
+    zeros = cp_wprime({120: 0.0, 300: 0.0, 600: 0.0, 1200: 0.0})
+    assert isinstance(zeros, Unavailable)
+    assert zeros.reason is UnavailableReason.INSUFFICIENT_DATA
+
+
 # ------------------------------------------------------------------------ wbal.py
 
 
