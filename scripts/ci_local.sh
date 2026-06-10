@@ -14,6 +14,11 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# Tooling exactly as CI provisions it (scripts/ci_tools.sh installs into ~/.local/bin).
+export PATH="$HOME/.local/bin:$PATH"
+command -v gitleaks >/dev/null 2>&1 && command -v trivy >/dev/null 2>&1 \
+  || bash scripts/ci_tools.sh gitleaks trivy
+
 PG_PORT="${WW_CI_PG_PORT:-55461}"
 MD_PORT="${WW_CI_MD_PORT:-53361}"
 PG_NAME="wwci-pg-$$"
