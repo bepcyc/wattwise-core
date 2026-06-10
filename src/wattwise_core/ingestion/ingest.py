@@ -36,6 +36,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.domain.candidate import GboCandidate
+from wattwise_core.domain.enums import GboType
 from wattwise_core.ingestion._canonical import OriginalFile
 from wattwise_core.ingestion._ingest_steps import (
     _land_batch,
@@ -44,7 +45,6 @@ from wattwise_core.ingestion._ingest_steps import (
     _write_wellness,
 )
 from wattwise_core.ingestion.capability import (
-    UndeclaredGboTypeError,
     require_declared_types,
 )
 from wattwise_core.ingestion.watermark import SyncedRange, advance_and_heal
@@ -183,28 +183,6 @@ class IngestService:
         (the re-resolution path calls it on the service).
         """
         await _write_wellness(self, athlete, local_date)
-
-
-async def _windowed_activities(
-    session: AsyncSession, athlete: uuid.UUID, start: _dt.datetime
-) -> list[Activity]:
-    """Existing activities whose ``start_time`` falls within ±2h of ``start``.
-
-    Returns them in a stable order (start_time, then activity_id) so identity
-    resolution is deterministic (CONF-R4). The fuzzy start/duration/sport matcher
-    is run per candidate; nothing outside the window is considered (DEDUP-R7).
-    """
-    lo, hi = start - _IDENTITY_WINDOW, start + _IDENTITY_WINDOW
-    stmt = (
-        select(Activity)
-        .where(
-            Activity.athlete_id == athlete,
-            Activity.start_time >= lo,
-            Activity.start_time <= hi,
-        )
-        .order_by(Activity.start_time, Activity.activity_id)
-    )
-    return list((await session.execute(stmt)).scalars().all())
 
 
 def _batched(candidates: list[GboCandidate], size: int | None) -> list[list[GboCandidate]]:

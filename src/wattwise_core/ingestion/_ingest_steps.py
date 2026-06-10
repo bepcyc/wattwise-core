@@ -29,7 +29,6 @@ from wattwise_core.ingestion._candidate_store import (
     prepare_batch,
 )
 from wattwise_core.ingestion._canonical import OriginalFile
-from wattwise_core.ingestion.capability import UndeclaredGboTypeError
 from wattwise_core.ingestion._mapping import (
     _ACTIVITY_SCALARS,
     _LAP_SCALARS,
@@ -41,6 +40,7 @@ from wattwise_core.ingestion._mapping import (
     _validate_payload,
     _whole_source_tier_of,
 )
+from wattwise_core.ingestion.capability import UndeclaredGboTypeError
 from wattwise_core.ingestion.trust import load_trust_policy
 from wattwise_core.ingestion.validation import validate_candidate
 from wattwise_core.persistence.localdate import (
