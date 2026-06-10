@@ -83,6 +83,12 @@ LOAD_MODEL_HR_LOAD_ZONAL = "hr_load_zonal"
 # can see the value is sex-modelled, not sex-resolved. Defined here (not in
 # constants.py) because the shared constants module owns only the two published
 # per-sex pairs; this is a derived, metric-local degradation default.
+# ANL-R11: sport-agnostic — meaningful for EVERY sport that supplies the required HR
+# channel; ``None`` (not an enumerated set) is the declared sport-agnostic marker, so
+# there is NO sport gate (absence of HR is MISSING_REQUIRED_INPUT, never
+# NOT_APPLICABLE_FOR_SPORT).
+APPLICABLE_SPORTS: None = None
+
 TRIMP_A_SEX_NEUTRAL = (TRIMP_A_MALE + TRIMP_A_FEMALE) / 2.0  # = 0.75
 TRIMP_B_SEX_NEUTRAL = (TRIMP_B_MALE + TRIMP_B_FEMALE) / 2.0  # = 1.795
 
@@ -450,6 +456,7 @@ def _build_zonal_result(
 
 
 __all__ = [
+    "APPLICABLE_SPORTS",
     "LOAD_MODEL_HR_LOAD",
     "LOAD_MODEL_HR_LOAD_ZONAL",
     "TRIMP_A_SEX_NEUTRAL",

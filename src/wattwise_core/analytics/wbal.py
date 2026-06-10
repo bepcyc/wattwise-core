@@ -65,7 +65,7 @@ from wattwise_core.analytics.result import (
 )
 from wattwise_core.analytics.series import FloatArray
 
-__all__ = ["WBalResult", "wbal"]
+__all__ = ["APPLICABLE_SPORTS", "WBalResult", "wbal"]
 
 # Cycling-power-specific metric (doc 40 §5): true mechanical power required.
 APPLICABLE_SPORTS: tuple[str, ...] = ("cycling",)

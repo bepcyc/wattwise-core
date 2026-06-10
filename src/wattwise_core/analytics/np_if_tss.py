@@ -113,6 +113,14 @@ def _valid_moving_seconds(power_1hz: FloatArray) -> int:
     first 29 s ramp and any post-gap re-accumulation. It is DISTINCT from the NP
     analysis window (which drops the warm-up seconds where ``R(t)`` is not yet seeded).
     Gaps (NaN) never count.
+
+    Stop/pause exclusion (TSS-R1/TSS-R2) is grounded on the canonical-stream contract:
+    stops, pauses, and dropouts arrive as TYPED missing samples (``null`` → ``NaN``,
+    data-model GBO-R22), so genuine non-moving seconds are excluded here as NaN
+    (the ``> max_interp_gap_s`` long-gap rule of ANL-R8; shorter gaps are declared
+    interpolatable dropouts, not stops). A VALID ``0 W`` sample is COASTING — real
+    exercise time (descending/soft-pedalling) — and counts; the engine has no
+    canonical moving flag (GBO-R20) and never guesses one from the wattage.
     """
     if power_1hz.size == 0:
         return 0

@@ -68,6 +68,13 @@ _PACE_SPORTS: Final[frozenset[str]] = frozenset(
     {"running", "run", "virtualrun", "walking", "walk", "hiking", "hike"}
 )
 
+# ANL-R11/ANL-R13: decoupling is sport-PARAMETERIZED on its output channel — defined for
+# any sport with a declared output mapping (power for _POWER_SPORTS, speed/pace for
+# _PACE_SPORTS). The set is derived from the SAME per-sport mappings consumed by
+# ``_output_channel_for_sport`` (the NOT_APPLICABLE_FOR_SPORT gate), so the declaration
+# can never drift from the gate.
+APPLICABLE_SPORTS: Final[frozenset[str]] = _POWER_SPORTS | _PACE_SPORTS
+
 # Declared minimum number of included (non-coasting) samples per half (DEC-R2).
 # Below this a half is statistically meaningless and the metric fails closed.
 MIN_INCLUDED_SAMPLES_PER_HALF: Final = 60
@@ -414,6 +421,7 @@ def aerobic_decoupling(
 
 
 __all__ = [
+    "APPLICABLE_SPORTS",
     "MIN_INCLUDED_SAMPLES_PER_HALF",
     "STEADINESS_MAX_OUTPUT_CV",
     "aerobic_decoupling",

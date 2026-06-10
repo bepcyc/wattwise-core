@@ -15,14 +15,27 @@ from __future__ import annotations
 
 import datetime as _dt
 import uuid
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from wattwise_core.analytics import endurance_score as _es
 from wattwise_core.analytics import mmp_cp as _mmp
-from wattwise_core.analytics.result import Computed, MetricResult, is_computed
+from wattwise_core.analytics.constants import (
+    ES_LONG_DURATION_S,
+    ES_SHORT_DURATION_S,
+    ES_WINDOW_DAYS,
+)
+from wattwise_core.analytics.result import (
+    Computed,
+    MetricResult,
+    Unavailable,
+    UnavailableReason,
+    is_computed,
+)
 from wattwise_core.analytics.series import Stream, resample_to_1hz
 from wattwise_core.domain.enums import StreamChannelName
 from wattwise_core.persistence.localdate import (
@@ -37,6 +50,9 @@ from wattwise_core.persistence.models import (
     StreamChannel,
     WellnessStreamSet,
 )
+
+if TYPE_CHECKING:  # the service imports this module; quote-only typing avoids the cycle
+    from wattwise_core.analytics.service import AnalyticsService
 
 
 def _uid(value: str | uuid.UUID) -> uuid.UUID:
@@ -287,6 +303,87 @@ def _better_mmp(
     return candidate.value.mean_power_w > current.value.mean_power_w
 
 
+def _curve_point(
+    curve: dict[int, MetricResult[_mmp.MMPWindow]], duration_s: int
+) -> MetricResult[float]:
+    """One MMP curve point's mean power as a scalar result (ES-R1 durability input).
+
+    An absent / non-``Computed`` duration is a typed ``Unavailable`` (fail-closed),
+    never a fabricated point — the ES-R2 missing-component policy decides downstream.
+    """
+    res = curve.get(duration_s)
+    if res is None or not is_computed(res):
+        return Unavailable(
+            UnavailableReason.MISSING_REQUIRED_INPUT,
+            f"no computed MMP point at {duration_s} s in the gather window",
+        )
+    return Computed(value=float(res.value.mean_power_w))
+
+
+async def _gather_endurance_score(
+    svc: AnalyticsService, athlete_id: str, as_of: _dt.date
+) -> MetricResult[float]:
+    """Gather the ES-R1 upstream components through the service and compose (ES-R2).
+
+    Reads ONLY upstream `MetricResult`s produced by the canonical service capabilities
+    (CTL from :meth:`~wattwise_core.analytics.service.AnalyticsService.pmc`, the
+    durability ratio from the sport-partitioned power curve, the most recent computed
+    aerobic decoupling in the window) — never a raw stream (ES-R2); the numeric
+    composition lives in the pure :mod:`~wattwise_core.analytics.endurance_score`.
+    The power components are gathered for the athlete's canonical ``current_sport``
+    (no hardcoded sport): an unset sport fails those components closed and the
+    configured ES-R2 missing-component policy decides the outcome.
+    """
+    ctl: MetricResult[float]
+    if await svc._earliest_activity_date(athlete_id) is None:
+        # PMC's honest (0,0) cold-start origin means an athlete with NO training history
+        # "computes" CTL == 0 — a wrong-but-plausible chronic-load signal for scoring
+        # (ANL-R4); with no history the score abstains instead (mirrors the readiness
+        # READINESS_MIN_FITNESS_CTL guard's reasoning).
+        ctl = Unavailable(
+            UnavailableReason.MISSING_REQUIRED_INPUT,
+            "no training history: CTL carries no chronic-load signal to score",
+        )
+    elif (pmc_days := await svc.pmc(athlete_id, as_of, as_of)) and is_computed(pmc_days[-1]):
+        ctl = Computed(value=float(pmc_days[-1].value.ctl))
+    else:
+        ctl = Unavailable(UnavailableReason.MISSING_REQUIRED_INPUT, "no computed PMC day (CTL)")
+    sport = await svc.current_sport(athlete_id)
+    from_date = as_of - _dt.timedelta(days=ES_WINDOW_DAYS)
+    no_sport = Unavailable(
+        UnavailableReason.MISSING_REQUIRED_INPUT,
+        "athlete has no canonical current_sport to partition power components by",
+    )
+    ratio: MetricResult[float] = no_sport
+    decoupling: MetricResult[float] = no_sport
+    if sport is not None:
+        curve = await svc.power_curve(athlete_id, from_date, as_of, sport=sport)
+        ratio = _es.durability_ratio(
+            _curve_point(curve, ES_LONG_DURATION_S), _curve_point(curve, ES_SHORT_DURATION_S)
+        )
+        decoupling = await _latest_decoupling(svc, athlete_id, from_date, as_of)
+    return _es.endurance_score(ctl, ratio, decoupling, sport=sport)
+
+
+async def _latest_decoupling(
+    svc: AnalyticsService, athlete_id: str, from_date: _dt.date, to_date: _dt.date
+) -> MetricResult[float]:
+    """The most recent activity's ``Computed`` aerobic decoupling in the window.
+
+    Scans the resolved canonical activities newest-first and returns the first
+    computed decoupling; none computable ⇒ typed ``Unavailable`` (never ``0``-drift).
+    """
+    activities = await svc._activities_in_range(athlete_id, from_date, to_date)
+    for act in sorted(activities, key=lambda a: a.start_time, reverse=True):
+        res = await svc.aerobic_decoupling(str(act.activity_id))
+        if is_computed(res):
+            return res
+    return Unavailable(
+        UnavailableReason.MISSING_REQUIRED_INPUT,
+        "no activity in the window yields a computed aerobic decoupling",
+    )
+
+
 __all__ = [
     "_activities_in_local_range",
     "_activity_local_date",
@@ -295,6 +392,7 @@ __all__ = [
     "_day_bounds_for_tz",
     "_f",
     "_fold_curve_point",
+    "_gather_endurance_score",
     "_hrv_baseline_midpoint",
     "_load_athlete",
     "_load_athlete_or_fail",
