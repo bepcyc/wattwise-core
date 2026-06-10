@@ -496,6 +496,7 @@ def _require_strong_signing_key(self: Settings) -> None:
             "the service refuses to start (SEC-R3)"
         )
 
+
 def _reject_wildcard_cors_with_credentials(self: Settings) -> None:
     """Reject the wildcard-origin + credentials configuration cliff (SEC-R10 / SEC-R10-AC).
 

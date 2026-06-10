@@ -181,11 +181,7 @@ class IntentPlanGrade:
         if self.total == 0:
             return True
         floor = INTENT_PLAN_MIN_ACCURACY
-        return (
-            self.precision >= floor
-            and self.recall >= floor
-            and self.intent_accuracy >= floor
-        )
+        return self.precision >= floor and self.recall >= floor and self.intent_accuracy >= floor
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,9 +308,7 @@ class SuiteGrades:
     """The aggregate of every grader for one suite run (EVAL-R9 machine-readable)."""
 
     grounding: GroundingGrade = field(default_factory=lambda: GroundingGrade(0, 0, 0))
-    abstention: AbstentionGrade = field(
-        default_factory=lambda: AbstentionGrade(0, 0, 0)
-    )
+    abstention: AbstentionGrade = field(default_factory=lambda: AbstentionGrade(0, 0, 0))
     schema: SchemaGrade = field(default_factory=lambda: SchemaGrade(0, 0))
     injection: InjectionGrade = field(default_factory=lambda: InjectionGrade(0, 0))
     termination: TerminationGrade = field(default_factory=lambda: TerminationGrade(0, 0))

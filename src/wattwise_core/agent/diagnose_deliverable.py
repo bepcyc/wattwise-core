@@ -174,9 +174,7 @@ async def _critical_power_coverage(
     )
 
 
-async def _hrv_coverage(
-    svc: AnalyticsService, athlete_id: str, today: _dt.date
-) -> InputCoverage:
+async def _hrv_coverage(svc: AnalyticsService, athlete_id: str, today: _dt.date) -> InputCoverage:
     """Probe canonical HRV coverage for today (API-R15); fail-closed when no wellness row."""
     result = await svc.hrv(athlete_id, today)
     return InputCoverage(

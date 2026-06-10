@@ -63,9 +63,7 @@ def _grounded_terminal() -> AgentState:
                 ],
             }
         ],
-        "citations": [
-            {"record_id": "pmc-1", "metric": "tsb", "value": 4.0, "as_of": "2026-06-09"}
-        ],
+        "citations": [{"record_id": "pmc-1", "metric": "tsb", "value": 4.0, "as_of": "2026-06-09"}],
         "coverage_caveat": None,
     }
 
@@ -133,15 +131,12 @@ async def test_insight_carries_thread_id_and_stable_observations() -> None:
 class _ScriptedReadinessGrounder:
     """A readiness grounder double replaying one grounded form survivor (GROUND-R5/R7)."""
 
-    async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Any
-    ) -> GroundingResult:
+    async def ground(self, *, athlete_id: str, draft: str, retrieved: Any) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="form 4.0", metric="form", value=4.0)
         survivor = GroundedClaim(
             claim=claim,
             verdict=GroundVerdict.GROUNDED,
-            citation={"record_id": "pmc-1", "metric": "tsb", "value": 4.0,
-                      "as_of": "2026-06-09"},
+            citation={"record_id": "pmc-1", "metric": "tsb", "value": 4.0, "as_of": "2026-06-09"},
         )
         return GroundingResult(
             decision=GroundDecision.PROCEED, claims=(survivor,), scrubbed_text=draft

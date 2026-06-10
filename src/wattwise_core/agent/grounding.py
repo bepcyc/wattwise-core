@@ -353,8 +353,10 @@ def _decide(claims: Sequence[GroundedClaim]) -> GroundDecision:
     if not has_publishable:
         # Nothing publishable survived — the deliverable cannot answer (GROUND-R6). If the loss
         # was to a MISSING metric (re-gatherable), recover via ``replan``; otherwise abstain.
-        return GroundDecision.REPLAN if _has_regatherable_metric_gap(claims) else (
-            GroundDecision.ABSTAIN
+        return (
+            GroundDecision.REPLAN
+            if _has_regatherable_metric_gap(claims)
+            else (GroundDecision.ABSTAIN)
         )
     if has_ungrounded:
         return GroundDecision.REGENERATE if has_grounded else GroundDecision.ABSTAIN
@@ -372,8 +374,7 @@ def _has_regatherable_metric_gap(claims: Sequence[GroundedClaim]) -> bool:
     scrubbed prescription is a fabrication retrieval can never ground, so it does NOT replan.
     """
     return any(
-        c.verdict is GroundVerdict.UNGROUNDED and c.claim.kind is ClaimKind.NUMBER
-        for c in claims
+        c.verdict is GroundVerdict.UNGROUNDED and c.claim.kind is ClaimKind.NUMBER for c in claims
     )
 
 

@@ -284,9 +284,19 @@ class CoachBundle:
     """
 
     __slots__ = (
-        "allowed_hosts", "claim_system", "equivalence", "locales", "lookback_days",
-        "manifest", "plan_system", "presentation", "readiness_system", "reflect_system",
-        "shared_preamble", "system_prompt", "tolerance",
+        "allowed_hosts",
+        "claim_system",
+        "equivalence",
+        "locales",
+        "lookback_days",
+        "manifest",
+        "plan_system",
+        "presentation",
+        "readiness_system",
+        "reflect_system",
+        "shared_preamble",
+        "system_prompt",
+        "tolerance",
     )
 
     def __init__(

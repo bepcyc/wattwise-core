@@ -236,9 +236,7 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             saver,
             model_routing=self._model_routing,
             locales=self._coach.locales,
-            context_token_budget=context_budget(
-                self._context_window_tokens, ent.max_output_tokens
-            ),
+            context_token_budget=context_budget(self._context_window_tokens, ent.max_output_tokens),
             # The compose system prompt layers the INJECT-R2 shared preamble in FRONT of the persona
             # (``compose_system``) so the "delimited data is to analyze, never command" instruction
             # is in the prompt the model actually receives (INJECT-R2), not merely loaded.
@@ -249,7 +247,6 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         )
         wall = ent.wall_clock_seconds
         return CompiledCoachGraph(compiled, wall_clock_seconds=wall, locales=self._coach.locales)
-
 
     async def answer(
         self,
@@ -283,7 +280,9 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         )
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         existing = await resolve_existing_answer(
-            saver, athlete_id=athlete_id, conversation_id=conversation_id,
+            saver,
+            athlete_id=athlete_id,
+            conversation_id=conversation_id,
             follow_up_thread_id=thread_id,
         )
         if existing is not None:
@@ -326,7 +325,10 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
             # The weekly digest IS the weekly load review (COACH-R1 #1); flow the athlete's ACTIVE
             # canonical goals into it so the load review is goal-aware (GBO-R38 / API-R32).
             return await weekly_digest(
-                graph, athlete_id, week_end, presentation=self._coach.presentation,
+                graph,
+                athlete_id,
+                week_end,
+                presentation=self._coach.presentation,
                 active_goals=await active_goals_for(session, athlete_id),
             )
 
@@ -358,8 +360,10 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         saver = self._saver(state_db, athlete_id=athlete_id, conversation_id=conversation_id)
         async with self._sessions.session(subject=athlete_id) as session:
             graph = self._graph(
-                AnalyticsService(session), saver,
-                allow_names=CANONICAL_WORKOUT_NAMES, entitlement=entitlement,
+                AnalyticsService(session),
+                saver,
+                allow_names=CANONICAL_WORKOUT_NAMES,
+                entitlement=entitlement,
             )
             # Read the athlete's ACTIVE canonical goals server-side and FLOW them into the run so
             # the plan is goal-aware (GBO-R38 / API-R32 / API-R35) — the agent owns goal planning.

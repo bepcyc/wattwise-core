@@ -77,9 +77,7 @@ async def _seed_athlete(
         await session.execute(select(Sport).where(Sport.sport_code == "cycling"))
     ).scalar_one_or_none()
     if existing_sport is None:
-        session.add(
-            Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True)
-        )
+        session.add(Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True))
     descriptor = SourceDescriptor(
         source_key=f"file_import_{uuid.uuid4().hex[:8]}",
         display_name="Activity files",
@@ -164,10 +162,14 @@ async def _erase_athlete(
     """
     # 1. delete the underlying original-file OBJECT bytes (PRIV-R11.3) before dropping the refs.
     refs = (
-        await session.execute(
-            select(ActivityFile.object_ref).where(ActivityFile.athlete_id == athlete_id)
+        (
+            await session.execute(
+                select(ActivityFile.object_ref).where(ActivityFile.athlete_id == athlete_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for ref in refs:
         store.delete(ref)
 

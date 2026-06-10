@@ -45,15 +45,11 @@ CI_SETTINGS = settings(
 )
 
 # A finite, non-degenerate cycling-power sample (watts). Bounded to keep R^4 finite.
-powers = st.floats(
-    min_value=0.0, max_value=2000.0, allow_nan=False, allow_infinity=False
-)
+powers = st.floats(min_value=0.0, max_value=2000.0, allow_nan=False, allow_infinity=False)
 
 
 @st.composite
-def power_value_lists(
-    draw: st.DrawFn, *, min_size: int, max_size: int
-) -> list[float | None]:
+def power_value_lists(draw: st.DrawFn, *, min_size: int, max_size: int) -> list[float | None]:
     """A 1 Hz power list of valid samples (no gaps), length in [min_size, max_size]."""
     n = draw(st.integers(min_value=min_size, max_value=max_size))
     return [draw(powers) for _ in range(n)]
@@ -121,9 +117,7 @@ def test_np_translation_invariant(values: list[float | None], offset: int) -> No
     resampling effect, not an NP-invariance violation, so it is not asserted here.)
     """
     base = Stream.from_values(values)
-    shifted = Stream(
-        t_seconds=base.t_seconds + float(offset), values=base.values.copy()
-    )
+    shifted = Stream(t_seconds=base.t_seconds + float(offset), values=base.values.copy())
     r_base = normalized_power(base)
     r_shift = normalized_power(shifted)
     assert is_computed(r_base) == is_computed(r_shift)

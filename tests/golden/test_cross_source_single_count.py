@@ -116,9 +116,7 @@ async def _seed(session: AsyncSession, *, n_sources: int) -> tuple[str, list[str
     athlete = Athlete(sex="male", reference_timezone="UTC")
     session.add(athlete)
     descriptors = [
-        SourceDescriptor(
-            source_key=f"src_{i}", display_name=f"Source {i}", kind="oauth_api"
-        )
+        SourceDescriptor(source_key=f"src_{i}", display_name=f"Source {i}", kind="oauth_api")
         for i in range(n_sources)
     ]
     session.add_all(descriptors)
@@ -225,13 +223,17 @@ async def _resolved_power(session: AsyncSession) -> dict[str, float]:
     act = (await session.execute(select(Activity))).scalars().one()
     ss = (await session.execute(select(ActivityStreamSet))).scalars().one()
     power = (
-        await session.execute(
-            select(StreamChannel).where(
-                StreamChannel.stream_set_id == ss.stream_set_id,
-                StreamChannel.channel == "power_w",
+        (
+            await session.execute(
+                select(StreamChannel).where(
+                    StreamChannel.stream_set_id == ss.stream_set_id,
+                    StreamChannel.channel == "power_w",
+                )
             )
         )
-    ).scalars().one()
+        .scalars()
+        .one()
+    )
     return {"avg_power_w": float(act.avg_power_w), "stream_sample": float(power.values[0])}
 
 
@@ -277,9 +279,7 @@ async def _rollups(session: AsyncSession, athlete_id: str) -> dict[str, object]:
     # Best-effort power curve — the peak mean power at each duration (MMP-R4).
     curve = await svc.power_curve(athlete_id, _RIDE_DAY, _RIDE_DAY)
     out["best_efforts"] = tuple(
-        sorted(
-            (d, res.value.mean_power_w) for d, res in curve.items() if is_computed(res)
-        )
+        sorted((d, res.value.mean_power_w) for d, res in curve.items() if is_computed(res))
     )
     return out
 

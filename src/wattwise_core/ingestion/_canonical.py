@@ -50,8 +50,13 @@ from wattwise_core.storage import ObjectStore, content_hash
 # Daily-wellness canonical scalar fields resolved across candidates (a subset of the
 # DailyWellness columns the OSS adapters actually map; absent fields stay NULL/typed-gap).
 WELLNESS_SCALARS = (
-    "resting_hr_bpm", "hrv_rmssd_ms", "hrv_sdnn_ms", "sleep_score",
-    "sleep_duration_s", "steps", "vo2max",
+    "resting_hr_bpm",
+    "hrv_rmssd_ms",
+    "hrv_sdnn_ms",
+    "sleep_score",
+    "sleep_duration_s",
+    "steps",
+    "vo2max",
 )
 
 # Per-field numeric dispute tolerance (fraction of the larger magnitude). Two sources
@@ -286,9 +291,10 @@ async def _upsert_channel(
     # D5: route channel coverage through Coverage(...).to_jsonable() so the
     # present/fidelity invariant is enforced uniformly (never a raw {present, fidelity}
     # dict that could persist a self-contradictory present=True + absent_* fidelity).
-    coverage = chan.get("_coverage") or coverage_for(
-        True, _coerce_fidelity(chan.get("_fidelity")), disputed=False
-    ).to_jsonable()
+    coverage = (
+        chan.get("_coverage")
+        or coverage_for(True, _coerce_fidelity(chan.get("_fidelity")), disputed=False).to_jsonable()
+    )
     # ING-UPS-R5: when an existing channel outranks the incoming one, do NOT regress it —
     # insert-or-keep (refresh no columns on a key collision); else refresh values + coverage.
     wins = existing_rank is None or _channel_rank(coverage) <= _channel_rank(existing_rank)

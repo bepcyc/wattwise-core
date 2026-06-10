@@ -225,8 +225,12 @@ class SyncOrchestrator:
             if result.outcome is not SyncOutcome.OK:
                 break  # resume point = last committed window; re-run continues here
             await advance_backfill_cursor(
-                factory, athlete, descriptor, range_oldest=window.oldest,
-                through=_dt.date.fromisoformat(win.newest), ingest_run_id=_uid(sync_run_id),
+                factory,
+                athlete,
+                descriptor,
+                range_oldest=window.oldest,
+                through=_dt.date.fromisoformat(win.newest),
+                ingest_run_id=_uid(sync_run_id),
             )
         return results
 
@@ -277,15 +281,29 @@ class SyncOrchestrator:
             return result
         except Exception as exc:  # isolate the failure; degrade + typed gap (ARCH-R9/ING-R3)
             result = await degrade_with_gap(
-                self._factory_for(athlete_id), athlete_id, target, window, exc,
-                seen_at=fetched_at, detail="source fetch or mapping failed",
+                self._factory_for(athlete_id),
+                athlete_id,
+                target,
+                window,
+                exc,
+                seen_at=fetched_at,
+                detail="source fetch or mapping failed",
             )
             emit_run_trace(target.source_key, result.outcome.value, stats, gaps_opened=1)
             return result
         originals = adapter.original_files() if isinstance(adapter, OriginalArtifactSource) else []
         return await land(
-            self._ctx, athlete_id, target, batch, window, sync_run_id, fetched_at, originals,
-            adapter=adapter, discover=out, stats=stats,
+            self._ctx,
+            athlete_id,
+            target,
+            batch,
+            window,
+            sync_run_id,
+            fetched_at,
+            originals,
+            adapter=adapter,
+            discover=out,
+            stats=stats,
         )
 
 

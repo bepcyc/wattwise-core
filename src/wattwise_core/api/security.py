@@ -129,9 +129,7 @@ def install_security_middleware(app: FastAPI, settings: Settings) -> None:
         allow_methods=list(settings.security__cors_allow_methods),
         allow_headers=list(settings.security__cors_allow_headers),
     )
-    app.add_middleware(
-        TrustedHostMiddleware, allowed_hosts=list(settings.security__allowed_hosts)
-    )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.security__allowed_hosts))
 
 
 # --------------------------------------------------------- entitlement resolve -> attach -> check

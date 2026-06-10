@@ -49,6 +49,7 @@ def _fake_request(path: str = "/v1/agent/ask") -> Request:
     scope = {"type": "http", "path": path, "headers": [], "query_string": b""}
     return Request(scope)
 
+
 pytestmark = pytest.mark.integration
 
 #: The forbidden billing/budget/model machinery fields (API-R11c) — none may appear
@@ -95,9 +96,7 @@ class _FakeEngine:
         self.seen_entitlement = entitlement
         return self._answer
 
-    async def readiness(
-        self, *, athlete_id: str, locale: str, response_length: str
-    ) -> Readiness:
+    async def readiness(self, *, athlete_id: str, locale: str, response_length: str) -> Readiness:
         self.seen_athlete_id = athlete_id
         assert self._readiness is not None, "test did not script a readiness deliverable"
         return self._readiness
@@ -180,7 +179,7 @@ def _auth(app: FastAPI) -> dict[str, str]:
 
 def test_answer_html_is_sanitized_inert() -> None:
     """An injection payload in the engine's HTML returns inert (SCHEMA-R7 / API-R13)."""
-    payload = '<p>Hi</p><script>alert(1)</script><img src=x onerror=alert(2)>'
+    payload = "<p>Hi</p><script>alert(1)</script><img src=x onerror=alert(2)>"
     app, _ = _build_app(_grounded_answer(answer_html=payload))
     with TestClient(app) as client:
         resp = client.post("/v1/agent/ask", json={"question": "How am I?"}, headers=_auth(app))
@@ -353,8 +352,11 @@ def test_degraded_reason_is_localized_by_accept_language() -> None:
 def test_body_language_overrides_accept_language() -> None:
     """The body ``language`` field takes precedence over Accept-Language (API-R37)."""
     answer = AgentAnswer(
-        status=RunStatus.DEGRADED, thread_id="01T", answer_html="<p>x</p>",
-        answer_text="x", coverage_caveat={"inputs": []},
+        status=RunStatus.DEGRADED,
+        thread_id="01T",
+        answer_html="<p>x</p>",
+        answer_text="x",
+        coverage_caveat={"inputs": []},
     )
     app, _ = _build_app(answer)
     with TestClient(app) as client:
@@ -417,8 +419,11 @@ def test_readiness_returns_typed_verdict_state_first_no_numeric_kpi() -> None:
     app, _ = _build_app(
         _grounded_answer(),
         readiness=_readiness(
-            citations=(Citation(record_id="form@2026-06-08", metric="form", value=-21.4,
-                                as_of="2026-06-08"),),
+            citations=(
+                Citation(
+                    record_id="form@2026-06-08", metric="form", value=-21.4, as_of="2026-06-08"
+                ),
+            ),
         ),
     )
     with TestClient(app) as client:
@@ -536,9 +541,7 @@ class _FakeDecisionEngine:
             suggested_followups=("Make it harder",),
         )
 
-    async def interrupt_status(
-        self, *, athlete_id: str, thread_id: str, interrupt_id: str
-    ) -> str:
+    async def interrupt_status(self, *, athlete_id: str, thread_id: str, interrupt_id: str) -> str:
         if interrupt_id in self._consumed:
             return "consumed"
         if interrupt_id in self._live:
@@ -700,8 +703,11 @@ def test_decision_html_is_sanitized_inert() -> None:
     with TestClient(app) as client:
         resp = client.post(
             "/v1/agent/threads/owner:01CONV/decision",
-            json={"interrupt_id": "01INT", "decision": "edit",
-                  "edited_plan": "ride<script>alert(1)</script>"},
+            json={
+                "interrupt_id": "01INT",
+                "decision": "edit",
+                "edited_plan": "ride<script>alert(1)</script>",
+            },
             headers=_auth(app),
         )
     assert resp.status_code == 200
@@ -737,9 +743,9 @@ def test_awaiting_approval_render_surfaces_interrupt_id_and_plan() -> None:
 def test_sanitize_strips_script_and_handlers_to_inert() -> None:
     """Script/handlers/iframe/js-uri are stripped; the result is inert (SCHEMA-R7)."""
     payload = (
-        '<p>ok</p><script>steal()</script>'
+        "<p>ok</p><script>steal()</script>"
         '<a href="javascript:evil()">x</a>'
-        '<img src=x onerror=alert(1)>'
+        "<img src=x onerror=alert(1)>"
         '<iframe src="e"></iframe>'
         '<p style="background:url(javascript:x)">styled</p>'
     )
@@ -797,14 +803,16 @@ def test_ratelimiter_isolates_per_athlete() -> None:
 def _sse_events(sse_body: str) -> list[str]:
     """Return the ordered ``event:`` names from an SSE body (API-R22 discriminators)."""
     prefix = "event:"
-    return [line[len(prefix):].strip() for line in sse_body.splitlines() if line.startswith(prefix)]
+    return [
+        line[len(prefix) :].strip() for line in sse_body.splitlines() if line.startswith(prefix)
+    ]
 
 
 def _last_data_block(sse_body: str) -> dict[str, Any]:
     """Return the JSON payload of the last ``data:`` line in an SSE body."""
     prefix = "data:"
     data_lines = [
-        line[len(prefix):].strip() for line in sse_body.splitlines() if line.startswith(prefix)
+        line[len(prefix) :].strip() for line in sse_body.splitlines() if line.startswith(prefix)
     ]
     assert data_lines, "SSE body carried no data lines"
     parsed: dict[str, Any] = json.loads(data_lines[-1])

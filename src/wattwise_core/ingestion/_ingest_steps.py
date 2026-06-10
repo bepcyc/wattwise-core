@@ -95,7 +95,12 @@ async def _land_batch(
         try:
             async with svc._session.begin_nested():
                 await persist_quarantined(
-                    svc._session, athlete, descriptor, cand, connection_id, run_id,
+                    svc._session,
+                    athlete,
+                    descriptor,
+                    cand,
+                    connection_id,
+                    run_id,
                     rule_id,
                 )
         except Exception:
@@ -103,7 +108,12 @@ async def _land_batch(
         else:
             result.candidates_quarantined += 1
     prepared, failed = await prepare_batch(
-        svc._session, athlete, descriptor, passing, connection_id, run_id,
+        svc._session,
+        athlete,
+        descriptor,
+        passing,
+        connection_id,
+        run_id,
         validate=_validate_payload,
     )
     result.candidates_failed += failed
@@ -112,8 +122,14 @@ async def _land_batch(
     rows = await persist_candidates_bulk(svc._session, athlete, descriptor, prepared)
     for prep in prepared:
         await _resolve_candidate(
-            svc, athlete, descriptor, prep.cand, rows[prep.cand.source_native_id],
-            files_by_native, wellness_dates, result,
+            svc,
+            athlete,
+            descriptor,
+            prep.cand,
+            rows[prep.cand.source_native_id],
+            files_by_native,
+            wellness_dates,
+            result,
         )
 
 
@@ -139,8 +155,12 @@ async def _resolve_candidate(
             if cand.gbo_type == GboType.ACTIVITY.value:
                 activity_id = await _resolve_and_write_activity(svc, athlete, row, cand)
                 await _capture_original(
-                    svc, athlete, descriptor, activity_id,
-                    files_by_native.get(cand.source_native_id), cand.fetched_at,
+                    svc,
+                    athlete,
+                    descriptor,
+                    activity_id,
+                    files_by_native.get(cand.source_native_id),
+                    cand.fetched_at,
                 )
                 result.activities_written.add(str(activity_id))
             elif cand.gbo_type == GboType.DAILY_WELLNESS.value:
@@ -202,8 +222,14 @@ async def _resolve_activity_id(
         # SQLite returns tz-naive datetimes; coerce to UTC for the matcher (GBO-R32).
         act_start = _parse_start_time(act.start_time)
         if svc._resolver.resolve_activity_identity(
-            start, duration, sport, None,
-            act_start, float(act.elapsed_time_s or 0), act.sport, None,
+            start,
+            duration,
+            sport,
+            None,
+            act_start,
+            float(act.elapsed_time_s or 0),
+            act.sport,
+            None,
         ):
             decision = {
                 "rule": "windowed_fuzzy",
@@ -244,8 +270,14 @@ async def _fingerprint_match(
         row_duration = float(cast("float", row.payload.get("elapsed_time_s") or 0))
         row_sport = str(row.payload.get("sport") or "other")
         if svc._resolver.resolve_activity_identity(
-            start, duration, sport, cand.strong_fingerprint,
-            row_start, row_duration, row_sport, row.strong_fingerprint,
+            start,
+            duration,
+            sport,
+            cand.strong_fingerprint,
+            row_start,
+            row_duration,
+            row_sport,
+            row.strong_fingerprint,
         ):
             decision = {
                 "rule": "strong_fingerprint",
@@ -299,7 +331,11 @@ async def _write_activity_canonical(
     )
     local_projection = await _project_local(svc._session, athlete, activity_id, scalars)
     values, update_columns = _activity_values(
-        activity_id, athlete, scalars, coverage, local_projection,
+        activity_id,
+        athlete,
+        scalars,
+        coverage,
+        local_projection,
         policy_version=policy.policy_version,  # CONF-R6: recorded with the values
         field_resolution=field_resolution,  # LIN-R3: per-field resolution record
     )
@@ -348,16 +384,17 @@ async def _project_local(
     return project_local_wall_clock(start, owner), local_date
 
 
-async def _write_wellness(
-    svc: IngestService, athlete: uuid.UUID, local_date: _dt.date
-) -> None:
+async def _write_wellness(svc: IngestService, athlete: uuid.UUID, local_date: _dt.date) -> None:
     """Resolve daily wellness across ALL candidates for the date (CONF-R2/ING-UPS-R5)."""
     candidates = await _wellness_candidates(svc._session, athlete, local_date)
     policy = await load_trust_policy(svc._session, athlete, candidates)
     # Wellness fields resolve under the whole-source effective tier; an empty policy
     # makes this the candidate's adapter tier (byte-identical to the prior behaviour).
     await _cw.write_wellness_canonical(
-        svc._session, athlete, local_date, candidates,
+        svc._session,
+        athlete,
+        local_date,
+        candidates,
         _whole_source_tier_of(policy),
         policy_version=policy.policy_version,  # CONF-R6
     )
@@ -376,8 +413,13 @@ async def _capture_original(
         return  # a direct-API source has no original recording file -> no ActivityFile
     store = svc._object_store or create_object_store()
     await _cw.create_activity_file(
-        svc._session, store, athlete=athlete, activity_id=activity_id,
-        source_descriptor_id=descriptor, original=original, fetched_at=fetched_at,
+        svc._session,
+        store,
+        athlete=athlete,
+        activity_id=activity_id,
+        source_descriptor_id=descriptor,
+        original=original,
+        fetched_at=fetched_at,
     )
 
 
@@ -390,17 +432,14 @@ def _contributing(stmt: Any) -> Any:
     descriptor (EVOL-R2: disabling a source is configuration; its retained rows stop
     contributing but stay durably stored for reversibility, DM-SUB-R5).
     """
-    return (
-        stmt.join(
-            SourceDescriptor,
-            SourceDescriptor.source_descriptor_id == SourceCandidate.source_descriptor_id,
-        )
-        .where(
-            SourceCandidate.is_superseded.is_(False),
-            SourceCandidate.is_tombstone.is_(False),
-            SourceCandidate.quarantine_rule_id.is_(None),
-            SourceDescriptor.is_active.is_(True),
-        )
+    return stmt.join(
+        SourceDescriptor,
+        SourceDescriptor.source_descriptor_id == SourceCandidate.source_descriptor_id,
+    ).where(
+        SourceCandidate.is_superseded.is_(False),
+        SourceCandidate.is_tombstone.is_(False),
+        SourceCandidate.quarantine_rule_id.is_(None),
+        SourceDescriptor.is_active.is_(True),
     )
 
 

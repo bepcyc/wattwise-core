@@ -60,9 +60,7 @@ async def session(tmp_path: Path) -> AsyncIterator[AsyncSession]:
     never a host/live database.
     """
     dsn = f"sqlite+aiosqlite:///{tmp_path}/canonical.sqlite"
-    engine = create_async_engine(
-        dsn, connect_args={"timeout": 30}
-    )
+    engine = create_async_engine(dsn, connect_args={"timeout": 30})
     # A real pool, never a StaticPool single connection (data-safety / race-honesty).
     assert not isinstance(engine.pool, StaticPool)
     async with engine.begin() as conn:
@@ -309,13 +307,9 @@ async def test_resolver_records_gap_when_no_current_sport(
     session: AsyncSession,
 ) -> None:
     """COACH-R6: with no current sport set, the resolver records a typed gap (fail-closed)."""
-    aid, _ = await _seed_hr_only_activity(
-        session, default_load_model=None, current_sport=None
-    )
+    aid, _ = await _seed_hr_only_activity(session, default_load_model=None, current_sport=None)
     svc = AnalyticsService(session)
-    req = RetrievalRequest(
-        "power_curve", {"from_date": "2026-06-01", "to_date": "2026-06-01"}
-    )
+    req = RetrievalRequest("power_curve", {"from_date": "2026-06-01", "to_date": "2026-06-01"})
     out = (await gather(svc, aid, [req])).records
     rec = out["power_curve"]
     assert isinstance(rec, dict)

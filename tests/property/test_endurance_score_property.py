@@ -138,9 +138,7 @@ def test_es_t3_allow_partial_false_fails_closed(monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.property
 def test_es_degenerate_weights_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A zero weight-sum over present components is OUT_OF_DOMAIN, never a 0/0 score."""
-    monkeypatch.setattr(
-        es_mod, "_WEIGHTS", {"ctl": 0.0, "durability": 0.0, "decoupling": 0.0}
-    )
+    monkeypatch.setattr(es_mod, "_WEIGHTS", {"ctl": 0.0, "durability": 0.0, "decoupling": 0.0})
     result = endurance_score(Computed(value=70.0), Computed(value=0.8), Computed(value=5.0))
     assert isinstance(result, Unavailable)
     assert result.reason is UnavailableReason.OUT_OF_DOMAIN

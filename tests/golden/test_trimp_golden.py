@@ -82,8 +82,7 @@ def test_banister_hr_load_golden_female_uses_distinct_constants() -> None:
     a, b = 0.86, 1.67
     reserve = _HR_MAX - _HR_REST
     expected = sum(
-        (1.0 / 60.0) * ((h - _HR_REST) / reserve) * a
-        * math.exp(b * ((h - _HR_REST) / reserve))
+        (1.0 / 60.0) * ((h - _HR_REST) / reserve) * a * math.exp(b * ((h - _HR_REST) / reserve))
         for h in _HR_SERIES
     )
     stream = Stream.from_values([float(x) for x in _HR_SERIES])

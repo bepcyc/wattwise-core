@@ -135,9 +135,7 @@ class FakeGrounder:
         survivor = GroundedClaim(
             claim=claim, verdict=GroundVerdict.GROUNDED, citation={"metric": "pmc"}
         )
-        return GroundingResult(
-            decision=self._decision, claims=(survivor,), scrubbed_text=draft
-        )
+        return GroundingResult(decision=self._decision, claims=(survivor,), scrubbed_text=draft)
 
 
 def _services(

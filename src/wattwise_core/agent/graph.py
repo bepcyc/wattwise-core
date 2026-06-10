@@ -421,7 +421,14 @@ def build_graph(
     policy = model_routing if model_routing is not None else tiering.SingleModelRoutingPolicy()
     packs = locales if locales is not None else EMPTY_LOCALE_POLICY
     nodes = _spine_nodes(
-        svc, model, coach_system, reflect_system, recorder, ceiling, policy, packs,
+        svc,
+        model,
+        coach_system,
+        reflect_system,
+        recorder,
+        ceiling,
+        policy,
+        packs,
         context_token_budget,
     )
     for node_name, node_fn in nodes.items():

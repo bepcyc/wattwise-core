@@ -63,12 +63,20 @@ def test_confidence_breaks_tie_within_tier() -> None:
 def test_recency_then_completeness_then_stable_tiebreak() -> None:
     """Recency, then completeness, then lowest source id as the final stable tiebreak."""
     older = _fc(
-        1.0, Fidelity.MODELED, "z", confidence=1.0,
-        observed_at=_dt.datetime(2026, 1, 1, tzinfo=UTC), completeness=1.0,
+        1.0,
+        Fidelity.MODELED,
+        "z",
+        confidence=1.0,
+        observed_at=_dt.datetime(2026, 1, 1, tzinfo=UTC),
+        completeness=1.0,
     )
     newer = _fc(
-        2.0, Fidelity.MODELED, "y", confidence=1.0,
-        observed_at=_dt.datetime(2026, 2, 1, tzinfo=UTC), completeness=1.0,
+        2.0,
+        Fidelity.MODELED,
+        "y",
+        confidence=1.0,
+        observed_at=_dt.datetime(2026, 2, 1, tzinfo=UTC),
+        completeness=1.0,
     )
     assert resolve_field([older, newer]).value == 2.0  # type: ignore[union-attr]
 
@@ -105,9 +113,7 @@ def test_identity_fingerprint_matches_regardless_of_window() -> None:
     """A shared strong fingerprint matches even outside the time window (MAP-R10)."""
     t1 = _dt.datetime(2026, 6, 1, 8, 0, tzinfo=UTC)
     t2 = _dt.datetime(2026, 6, 1, 9, 0, tzinfo=UTC)  # 1h apart
-    assert resolve_activity_identity(
-        t1, 3600, "cycling", "fit-abc", t2, 3600, "cycling", "fit-abc"
-    )
+    assert resolve_activity_identity(t1, 3600, "cycling", "fit-abc", t2, 3600, "cycling", "fit-abc")
 
 
 def test_identity_window_and_duration_tolerance() -> None:
@@ -162,9 +168,7 @@ def test_effective_tier_descriptor_profile_channel_then_star() -> None:
 
 def test_effective_tier_default_fidelity_is_the_whole_source_fallback() -> None:
     """default_fidelity stands in for a missing trust_profile["*"] (LIN-R1 layer 4)."""
-    policy = TrustPolicy(
-        profiles={"src-a": ({}, Fidelity.MODELED.value)}, overrides={}
-    )
+    policy = TrustPolicy(profiles={"src-a": ({}, Fidelity.MODELED.value)}, overrides={})
     cand = _cand("src-a", Fidelity.RAW_STREAM)
     assert policy.tier(cand, "avg_power_w") == Fidelity.MODELED
 
@@ -182,9 +186,7 @@ def test_effective_tier_athlete_override_beats_profile_and_adapter() -> None:
 
 def test_effective_tier_athlete_whole_source_override_applies_to_all_channels() -> None:
     """A per-athlete (source, "*") override is the whole-source default for that athlete."""
-    policy = TrustPolicy(
-        profiles={}, overrides={("src-a", "*"): Fidelity.SUMMARY_ONLY}
-    )
+    policy = TrustPolicy(profiles={}, overrides={("src-a", "*"): Fidelity.SUMMARY_ONLY})
     cand = _cand("src-a", Fidelity.RAW_STREAM)
     # No channel-specific override -> the "*" override applies to every channel.
     assert policy.tier(cand, "avg_power_w") == Fidelity.SUMMARY_ONLY
@@ -282,9 +284,7 @@ def test_effective_tier_non_tier_descriptor_profile_falls_through(
     non_tier: Fidelity,
 ) -> None:
     """A descriptor trust_profile[channel] set to a NON-TIER falls through (CONF-R2)."""
-    policy = TrustPolicy(
-        profiles={"src-a": ({"avg_power_w": non_tier.value}, None)}, overrides={}
-    )
+    policy = TrustPolicy(profiles={"src-a": ({"avg_power_w": non_tier.value}, None)}, overrides={})
     cand = _cand("src-a", Fidelity.PLATFORM_COMPUTED)
     resolved = policy.tier(cand, "avg_power_w")
     assert resolved == Fidelity.PLATFORM_COMPUTED

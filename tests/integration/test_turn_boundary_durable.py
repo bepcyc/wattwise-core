@@ -224,9 +224,7 @@ def _config() -> RunnableConfig:
 
 
 def _saver(factory: async_sessionmaker[AsyncSession]) -> SqlAlchemyCheckpointSaver:
-    return SqlAlchemyCheckpointSaver(
-        factory, athlete_id=ATHLETE, conversation_id=CONVERSATION
-    )
+    return SqlAlchemyCheckpointSaver(factory, athlete_id=ATHLETE, conversation_id=CONVERSATION)
 
 
 # --- F-8TURN -----------------------------------------------------------------------------

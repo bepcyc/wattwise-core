@@ -42,8 +42,7 @@ def decode_pwx(data: bytes) -> ActivityAsbo:
     summary = _find(workout, "summarydata")
     records = [_record_from_sample(s, start) for s in _findall(workout, "sample")]
     laps = [
-        _lap_from_segment(seg, idx, start)
-        for idx, seg in enumerate(_findall(workout, "segment"))
+        _lap_from_segment(seg, idx, start) for idx, seg in enumerate(_findall(workout, "segment"))
     ]
     if not records and not laps and summary is None:
         # A populated workout <summarydata> with no <sample>/<segment> is a legitimate

@@ -56,9 +56,7 @@ from wattwise_core.seams import SessionProvider
 # and the ``GET /v1/user-settings/response-length`` endpoint resolve verbosity identically.
 
 
-async def _read_stored_response_length(
-    state_db: AgentStateDatabase, *, athlete_id: str
-) -> str:
+async def _read_stored_response_length(state_db: AgentStateDatabase, *, athlete_id: str) -> str:
     """The persisted agent-state verbosity default, else ``standard`` (the ONE store read).
 
     The single agent-state read shared by the run-path default
@@ -174,9 +172,7 @@ class DeliverableEngineMixin:
         async with state_db.session() as session:
             return await get_memory(session, athlete_id=athlete_id, memory_item_id=memory_item_id)
 
-    async def delete_memory(
-        self: _EngineSeams, *, athlete_id: str, memory_item_id: str
-    ) -> bool:
+    async def delete_memory(self: _EngineSeams, *, athlete_id: str, memory_item_id: str) -> bool:
         """Delete ONE memory row by id, scoped to the owner; True iff erased (MEM-R3 erasure).
 
         Privacy MUST (PRIV-R8 / CKPT-R8): the guarded delete matches BOTH the id AND the
@@ -225,9 +221,7 @@ class DeliverableEngineMixin:
             if not item.content.startswith(RESPONSE_LENGTH_PREF_PREFIX)
         ]
 
-    async def record_run_episode(
-        self: _EngineSeams, *, athlete_id: str, content: str
-    ) -> None:
+    async def record_run_episode(self: _EngineSeams, *, athlete_id: str, content: str) -> None:
         """Record a completed coaching turn as a durable episode (MEM-R4 write-episode).
 
         The run-path WRITE half of the SAME seam: after a COMPLETED run the engine preserves the
@@ -272,9 +266,7 @@ class DeliverableEngineMixin:
         state_db = await self._agent_state_db()
         return await _read_stored_response_length(state_db, athlete_id=athlete_id)
 
-    async def get_response_length_preference(
-        self: _EngineSeams, *, athlete_id: str
-    ) -> str:
+    async def get_response_length_preference(self: _EngineSeams, *, athlete_id: str) -> str:
         """Read the athlete's PERSISTED verbosity default, else ``standard`` (VOICE-R8 / §8.10).
 
         The READ half of the ``GET /v1/user-settings/response-length`` contract (doc 60 §8.10):

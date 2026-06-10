@@ -101,9 +101,7 @@ def test_t3_deep_negative_form_is_rest_never_go(form: float) -> None:
 
 @_SETTINGS
 @given(form=_form, hrv=_hrv, baseline=_baseline)
-def test_t4_hrv_never_increases_aggressiveness(
-    form: float, hrv: float, baseline: float
-) -> None:
+def test_t4_hrv_never_increases_aggressiveness(form: float, hrv: float, baseline: float) -> None:
     """The HRV nudge never makes the verdict MORE aggressive than form alone."""
     no_hrv = assess_readiness(form=form).verdict
     with_hrv = assess_readiness(form=form, hrv_rmssd=hrv, hrv_baseline=baseline).verdict
@@ -116,12 +114,8 @@ def test_t4_hrv_never_increases_aggressiveness(
 
 @_SETTINGS
 @given(form=_form, hrv=st.none() | _hrv, baseline=st.none() | _baseline)
-def test_t5_consistent_roundtrip(
-    form: float, hrv: float | None, baseline: float | None
-) -> None:
+def test_t5_consistent_roundtrip(form: float, hrv: float | None, baseline: float | None) -> None:
     """A non-None deterministic verdict always certifies itself (round-trip)."""
     v = assess_readiness(form=form, hrv_rmssd=hrv, hrv_baseline=baseline).verdict
     assert v is not None  # finite form here => always assessable
-    assert (
-        readiness_consistent(v, form=form, hrv_rmssd=hrv, hrv_baseline=baseline) is True
-    )
+    assert readiness_consistent(v, form=form, hrv_rmssd=hrv, hrv_baseline=baseline) is True

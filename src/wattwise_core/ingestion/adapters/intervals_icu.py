@@ -225,9 +225,7 @@ class IntervalsIcuAdapter:
         """
         if not api_key:
             raise AuthError(FetchErrorKind.AUTH_REVOKED, "no usable credential")
-        ctx = AuthContext(
-            athlete_native_id=athlete_native_id or _SELF_ATHLETE_ID, api_key=api_key
-        )
+        ctx = AuthContext(athlete_native_id=athlete_native_id or _SELF_ATHLETE_ID, api_key=api_key)
         async with self._client(ctx) as client:
             await client.probe()  # AUT-R17: read-only; AuthError on 401/403
         return ctx

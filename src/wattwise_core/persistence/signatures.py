@@ -30,9 +30,7 @@ class SignatureIntervalError(ValueError):
     """A write violating the GBO-R27/R28 signature invariants (refused, fail-closed)."""
 
 
-def _refuse_unfit_modeled(
-    origin: SignatureOrigin, fit_quality: dict[str, object] | None
-) -> None:
+def _refuse_unfit_modeled(origin: SignatureOrigin, fit_quality: dict[str, object] | None) -> None:
     """Refuse a MODELED signature carrying no ``fit_quality`` (GBO-R28, fail-closed)."""
     if origin == SignatureOrigin.MODELED and not fit_quality:
         raise SignatureIntervalError(
@@ -75,14 +73,18 @@ async def _close_open_intervals(
 ) -> None:
     """CLOSE the prior open interval at the new effective date, never overwrite (GBO-R27)."""
     open_rows = (
-        await session.execute(
-            select(FitnessSignature).where(
-                FitnessSignature.athlete_id == athlete_id,
-                FitnessSignature.signature_type == signature_type,
-                FitnessSignature.effective_to.is_(None),
+        (
+            await session.execute(
+                select(FitnessSignature).where(
+                    FitnessSignature.athlete_id == athlete_id,
+                    FitnessSignature.signature_type == signature_type,
+                    FitnessSignature.effective_to.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     closure = _dt.datetime.combine(effective_date, _dt.time.min, tzinfo=_dt.UTC)
     for row in open_rows:
         row.effective_to = closure  # close, never overwrite (GBO-R27)

@@ -126,7 +126,12 @@ def test_openapi_has_problem_and_pageenvelope_components() -> None:
     schemas = spec["components"]["schemas"]
     assert "Problem" in schemas and "PageEnvelope" in schemas
     assert set(schemas["Problem"]["required"]) >= {
-        "type", "title", "status", "detail", "instance", "trace_id"
+        "type",
+        "title",
+        "status",
+        "detail",
+        "instance",
+        "trace_id",
     }
 
 
@@ -202,9 +207,7 @@ def test_oversized_json_body_is_413() -> None:
 # --- LIMIT-R1/R2/R3: read/mutating rate limits on the feature surface ------------
 
 
-def test_read_endpoints_are_rate_limited_per_athlete(
-    db_client: tuple[TestClient, str]
-) -> None:
+def test_read_endpoints_are_rate_limited_per_athlete(db_client: tuple[TestClient, str]) -> None:
     """Read endpoints debit the 120/min read bucket and 429 past it (LIMIT-R1/R2/R3)."""
     client, athlete_id = db_client
     headers = _owner_token(athlete_id, scopes=["read"])
@@ -224,7 +227,7 @@ def test_read_endpoints_are_rate_limited_per_athlete(
 
 
 def test_read_endpoint_emits_ratelimit_headers_on_success(
-    db_client: tuple[TestClient, str]
+    db_client: tuple[TestClient, str],
 ) -> None:
     """A served read carries the RateLimit-* headers for the post-debit state (LIMIT-R3)."""
     client, athlete_id = db_client
@@ -235,9 +238,7 @@ def test_read_endpoint_emits_ratelimit_headers_on_success(
     assert int(resp.headers["RateLimit-Remaining"]) <= 120
 
 
-def test_activities_list_is_rate_limited_per_athlete(
-    db_client: tuple[TestClient, str]
-) -> None:
+def test_activities_list_is_rate_limited_per_athlete(db_client: tuple[TestClient, str]) -> None:
     """GET /v1/activities debits the per-athlete read bucket and 429s past it (LIMIT-R1/R2).
 
     The activities/athlete/performance/user-settings feature surfaces attached only scope

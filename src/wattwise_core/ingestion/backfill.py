@@ -87,12 +87,13 @@ async def advance_backfill_cursor(
     — the cursor never points past un-committed data. The high-water instant is the
     window's end-of-day so the monotonic forward-only guard holds oldest-first.
     """
-    end_of_day = _dt.datetime.combine(
-        through, _dt.time(23, 59, 59), tzinfo=_dt.UTC
-    )
+    end_of_day = _dt.datetime.combine(through, _dt.time(23, 59, 59), tzinfo=_dt.UTC)
     async with session_factory() as session:
         await advance_watermark(
-            session, athlete_id, source_descriptor_id, GboType.ACTIVITY,
+            session,
+            athlete_id,
+            source_descriptor_id,
+            GboType.ACTIVITY,
             high_water_at=end_of_day,
             content_hint=None,
             cursor=f"{range_oldest}/{through.isoformat()}",

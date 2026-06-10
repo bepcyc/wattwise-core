@@ -128,9 +128,7 @@ def write_baseline(cards: Sequence[Scorecard], *, path: Path | None = None) -> P
     target = path if path is not None else BASELINE_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     document = build_baseline(cards)
-    target.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return target
 
 
@@ -156,8 +154,7 @@ class Regression:
     def reason(self) -> str:
         tag = "SAFETY-SUITE regression" if self.is_safety else "regression"
         return (
-            f"{self.suite}/{self.metric}: {tag} "
-            f"{self.current:.6g} < baseline {self.baseline:.6g}"
+            f"{self.suite}/{self.metric}: {tag} {self.current:.6g} < baseline {self.baseline:.6g}"
         )
 
 

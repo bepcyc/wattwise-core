@@ -51,6 +51,7 @@ class CoachGraph(Protocol):
 
     async def run(self, state: AgentState) -> AgentState: ...
 
+
 # Separator between the athlete scope and the conversation id INSIDE a durable thread_id.
 # A thread_id is ``{athlete_id}:{conversation_id}`` (CKPT-R3) and MUST be REVERSIBLE so a
 # follow-up turn (or a HITL decision) resumes the SAME durable thread: the engine derives the
@@ -222,9 +223,7 @@ def project_observations(raw: Sequence[Mapping[str, Any]]) -> tuple[Observation,
     return tuple(observations)
 
 
-def generate_followups(
-    status: RunStatus, observations: Sequence[Observation]
-) -> tuple[str, ...]:
+def generate_followups(status: RunStatus, observations: Sequence[Observation]) -> tuple[str, ...]:
     """Generate small jargon-free follow-up prompts the engine owns (COACH-R8, VOICE-R9).
 
     The engine GENERATES this copy (OSS); a thin client only renders it. Prompts are

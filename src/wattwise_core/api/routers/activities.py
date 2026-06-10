@@ -135,7 +135,6 @@ def _now() -> _dt.datetime:
 
 
 class ActivityFilters(BaseModel):
-
     frm: Annotated[_dt.date | None, Field(alias="from")] = None
     to: _dt.date | None = None
     sport: str | None = None
@@ -240,11 +239,15 @@ async def get_activity(
     b = result.value if is_computed(result) else None
     return ActivityDetail(
         **_ah.summary(act, _ah.local_date_of(act, owner)).model_dump(),
-        max_power_w=_ah.f(act.max_power_w), avg_hr_bpm=_ah.f(act.avg_hr_bpm),
-        max_hr_bpm=_ah.f(act.max_hr_bpm), avg_cadence_rpm=_ah.f(act.avg_cadence_rpm),
-        avg_speed_mps=_ah.f(act.avg_speed_mps), elevation_gain_m=_ah.f(act.elevation_gain_m),
+        max_power_w=_ah.f(act.max_power_w),
+        avg_hr_bpm=_ah.f(act.avg_hr_bpm),
+        max_hr_bpm=_ah.f(act.max_hr_bpm),
+        avg_cadence_rpm=_ah.f(act.avg_cadence_rpm),
+        avg_speed_mps=_ah.f(act.avg_speed_mps),
+        elevation_gain_m=_ah.f(act.elevation_gain_m),
         total_work_j=_ah.f(act.total_work_j),
-        tss=_metric(b.tss) if b else None, intensity_factor=_metric(b.if_) if b else None,
+        tss=_metric(b.tss) if b else None,
+        intensity_factor=_metric(b.if_) if b else None,
         variability_index=_metric(b.variability_index) if b else None,
         efficiency_factor=_metric(b.efficiency_factor) if b else None,
         tss_per_hour=_metric(b.tss_per_hour) if b else None,
@@ -271,8 +274,10 @@ async def _load_owned_activity(
 
 
 @router.get(
-    "/{activity_id}/streams", response_model=ActivityStreams,
-    operation_id="getActivityStreams", dependencies=[_Read],
+    "/{activity_id}/streams",
+    response_model=ActivityStreams,
+    operation_id="getActivityStreams",
+    dependencies=[_Read],
 )
 async def get_streams(
     activity_id: str,
@@ -312,15 +317,25 @@ def _resolve_channels(channels: str | None) -> list[StreamChannelName] | None:
 async def _stream_rows(
     session: AsyncSession, activity_id: str
 ) -> dict[StreamChannelName, StreamChannel]:
-    sset = (await session.execute(
-        select(ActivityStreamSet).where(ActivityStreamSet.activity_id == _uid(activity_id))
-    )).scalar_one_or_none()
+    sset = (
+        await session.execute(
+            select(ActivityStreamSet).where(ActivityStreamSet.activity_id == _uid(activity_id))
+        )
+    ).scalar_one_or_none()
     if sset is None:
         return {}
-    rows = (await session.execute(select(StreamChannel).where(
-        StreamChannel.stream_set_id == sset.stream_set_id,
-        StreamChannel.set_kind == StreamSetKind.ACTIVITY,
-    ))).scalars().all()
+    rows = (
+        (
+            await session.execute(
+                select(StreamChannel).where(
+                    StreamChannel.stream_set_id == sset.stream_set_id,
+                    StreamChannel.set_kind == StreamSetKind.ACTIVITY,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     return {r.channel: r for r in rows}
 
 
@@ -333,7 +348,8 @@ def _build_streams(
     max_points: int,
 ) -> ActivityStreams:
     selected = (
-        requested if requested is not None
+        requested
+        if requested is not None
         else [c for c in _STREAM_CHANNELS if c in rows and c is not StreamChannelName.LATLNG]
     )
     sample_channels = [
@@ -345,11 +361,15 @@ def _build_streams(
     decimated = len(idx) < length
     algorithm = "minmax_lttb" if decimated else "none"
     return ActivityStreams(
-        activity_id=str(act.activity_id), base=base,
+        activity_id=str(act.activity_id),
+        base=base,
         base_values=_base_values(base, rows, idx),
-        original_size=length, returned_size=len(idx), decimated=decimated,
+        original_size=length,
+        returned_size=len(idx),
+        decimated=decimated,
         decimation={"algorithm": algorithm, "max_points": max_points},
-        channels=out_channels, computed_at=_now(),
+        channels=out_channels,
+        computed_at=_now(),
     )
 
 
@@ -393,12 +413,18 @@ def _sample(value: object) -> float | None:
 
 
 _UNITS: dict[StreamChannelName, str] = {
-    StreamChannelName.POWER_W: "watt", StreamChannelName.HR_BPM: "bpm",
-    StreamChannelName.CADENCE_RPM: "rpm", StreamChannelName.SPEED_MPS: "m/s",
-    StreamChannelName.ALTITUDE_M: "m", StreamChannelName.DISTANCE_M: "m",
-    StreamChannelName.TEMP_C: "C", StreamChannelName.LEFT_RIGHT_BALANCE: "%",
-    StreamChannelName.SMO2: "%", StreamChannelName.CORE_TEMP_C: "C",
-    StreamChannelName.RESPIRATION_RPM: "rpm", StreamChannelName.LATLNG: "deg",
+    StreamChannelName.POWER_W: "watt",
+    StreamChannelName.HR_BPM: "bpm",
+    StreamChannelName.CADENCE_RPM: "rpm",
+    StreamChannelName.SPEED_MPS: "m/s",
+    StreamChannelName.ALTITUDE_M: "m",
+    StreamChannelName.DISTANCE_M: "m",
+    StreamChannelName.TEMP_C: "C",
+    StreamChannelName.LEFT_RIGHT_BALANCE: "%",
+    StreamChannelName.SMO2: "%",
+    StreamChannelName.CORE_TEMP_C: "C",
+    StreamChannelName.RESPIRATION_RPM: "rpm",
+    StreamChannelName.LATLNG: "deg",
 }
 
 
@@ -411,8 +437,10 @@ def _check_max_points(max_points: int) -> None:
 
 
 @router.get(
-    "/{activity_id}/map", response_model=ActivityTrack,
-    operation_id="getActivityMap", dependencies=[_Read],
+    "/{activity_id}/map",
+    response_model=ActivityTrack,
+    operation_id="getActivityMap",
+    dependencies=[_Read],
 )
 async def get_map(
     activity_id: str, session: Session, athlete_id: AthleteId, *, max_points: MaxPoints = 1000
@@ -424,9 +452,15 @@ async def get_map(
     coords = [p for p in (_coord(v) for v in latlng.values) if p is not None] if latlng else []
     if not act.has_gps or not coords:
         return ActivityTrack(
-            activity_id=activity_id, points=[], original_size=0, returned_size=0,
-            decimated=False, decimation={"algorithm": "none", "max_points": max_points},
-            bounds=None, coverage=_absent_cov(), computed_at=_now(),
+            activity_id=activity_id,
+            points=[],
+            original_size=0,
+            returned_size=0,
+            decimated=False,
+            decimation={"algorithm": "none", "max_points": max_points},
+            bounds=None,
+            coverage=_absent_cov(),
+            computed_at=_now(),
         )
     simplified = rdp_simplify(coords, max_points)
     points = [[lat, lng] for lat, lng in simplified]
@@ -435,10 +469,15 @@ async def get_map(
     algo = "rdp" if decimated else "none"
     bbox = {"min_lat": min(lats), "min_lng": min(lngs), "max_lat": max(lats), "max_lng": max(lngs)}
     return ActivityTrack(
-        activity_id=activity_id, points=points, original_size=len(coords),
-        returned_size=len(points), decimated=decimated,
+        activity_id=activity_id,
+        points=points,
+        original_size=len(coords),
+        returned_size=len(points),
+        decimated=decimated,
         decimation={"algorithm": algo, "max_points": max_points},
-        bounds=bbox, coverage=_full_cov(), computed_at=_now(),
+        bounds=bbox,
+        coverage=_full_cov(),
+        computed_at=_now(),
     )
 
 
@@ -454,34 +493,58 @@ def _coord(value: object) -> tuple[float, float] | None:
 
 
 @router.get(
-    "/{activity_id}/laps", response_model=ActivityLaps,
-    operation_id="getActivityLaps", dependencies=[_Read],
+    "/{activity_id}/laps",
+    response_model=ActivityLaps,
+    operation_id="getActivityLaps",
+    dependencies=[_Read],
 )
 async def get_laps(activity_id: str, session: Session, athlete_id: AthleteId) -> ActivityLaps:
     """The activity's full, ordered lap table (API-R50); no laps → ``laps: []``."""
     await _load_owned_activity(session, athlete_id, activity_id)
-    rows = (await session.execute(
-        select(ActivityLap).where(ActivityLap.activity_id == _uid(activity_id))
-        .order_by(ActivityLap.lap_index.asc())
-    )).scalars().all()
+    rows = (
+        (
+            await session.execute(
+                select(ActivityLap)
+                .where(ActivityLap.activity_id == _uid(activity_id))
+                .order_by(ActivityLap.lap_index.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
     return ActivityLaps(activity_id=activity_id, laps=[_lap(r) for r in rows])
 
 
 def _lap(row: ActivityLap) -> Lap:
     return Lap(
-        lap_index=row.lap_index, start_offset_s=row.start_offset_s, duration_s=row.duration_s,
-        distance_m=_ah.f(row.distance_m), avg_power_w=_ah.f(row.avg_power_w),
-        max_power_w=_ah.f(row.max_power_w), avg_hr_bpm=_ah.f(row.avg_hr_bpm),
-        max_hr_bpm=_ah.f(row.max_hr_bpm), avg_cadence_rpm=_ah.f(row.avg_cadence_rpm),
-        avg_speed_mps=_ah.f(row.avg_speed_mps), elevation_gain_m=_ah.f(row.elevation_gain_m),
-        total_work_j=None, coverage=_full_cov(),  # no canonical lap total_work_j (doc 20 §3.3)
+        lap_index=row.lap_index,
+        start_offset_s=row.start_offset_s,
+        duration_s=row.duration_s,
+        distance_m=_ah.f(row.distance_m),
+        avg_power_w=_ah.f(row.avg_power_w),
+        max_power_w=_ah.f(row.max_power_w),
+        avg_hr_bpm=_ah.f(row.avg_hr_bpm),
+        max_hr_bpm=_ah.f(row.max_hr_bpm),
+        avg_cadence_rpm=_ah.f(row.avg_cadence_rpm),
+        avg_speed_mps=_ah.f(row.avg_speed_mps),
+        elevation_gain_m=_ah.f(row.elevation_gain_m),
+        total_work_j=None,
+        coverage=_full_cov(),  # no canonical lap total_work_j (doc 20 §3.3)
     )
 
 
 # Re-export the shared dependency seams so the app factory can override identity/scope/
 # service the SAME way for both routers (one override wires both, FastAPI by identity).
 __all__ = [
-    "ActivityDetail", "ActivityLaps", "ActivityList", "ActivityStreams", "ActivityTrack",
-    "analytics_service", "current_athlete_id", "current_session", "cursor_signing_key",
-    "require_read_scope", "router",
+    "ActivityDetail",
+    "ActivityLaps",
+    "ActivityList",
+    "ActivityStreams",
+    "ActivityTrack",
+    "analytics_service",
+    "current_athlete_id",
+    "current_session",
+    "cursor_signing_key",
+    "require_read_scope",
+    "router",
 ]

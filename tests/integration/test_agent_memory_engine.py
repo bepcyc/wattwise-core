@@ -138,9 +138,7 @@ def _engine(canonical: _DatabaseStub, state_db: AgentStateDatabase) -> GraphAgen
     return GraphAgentEngine(canonical, FakeModel(), state_db=state_db)  # type: ignore[arg-type]
 
 
-async def _write(
-    state_db: AgentStateDatabase, *, athlete_id: str, content: str
-) -> str:
+async def _write(state_db: AgentStateDatabase, *, athlete_id: str, content: str) -> str:
     """Write one trusted PREFERENCE episode for an athlete; returns its memory item id."""
     async with state_db.session() as session:
         store = OssMemoryStore(session)
