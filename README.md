@@ -36,6 +36,13 @@ That refusal is the point. The agent runs behind a **fail-closed grounding gate*
 number it wants to say is verified against your canonical training record by deterministic
 code, and anything unverifiable is scrubbed before you see it. Refusing beats inventing.
 
+It also checks whether your data is **fresh enough** to answer, not just whether a number is
+correct. If a connector quietly stops syncing, your recent training simply stops arriving — and
+a naive coach reads that gap as rest and tells you you're fresh. wattwise won't: when your latest
+data is stale and a source looks disconnected, it says so and holds back the call instead of
+cheering you into a hard day on tired legs. A real taper (your sync is fine, you just rested) is
+trusted as usual.
+
 ## Why wattwise?
 
 - **Your data lives in someone else's silo.** Years of FIT files behind a login you don't
@@ -60,6 +67,9 @@ code, and anything unverifiable is scrubbed before you see it. Refusing beats in
 - **Trustworthy coaching agent** — LangGraph-based, with **fail-closed grounding**: claims
   are verified against canonical data in deterministic code; no fabrication, explicit
   abstention.
+- **Data-freshness aware** — the readiness call checks whether your record is recent enough to
+  trust: a stale record behind a broken/stalled sync never earns a "go hard" verdict; it abstains
+  and tells you to check your connection. A genuine taper still reads as fresh.
 - **Multi-format upload** — FIT, FIT.GZ, GPX, TCX, PWX (including Strava bulk exports).
 - **intervals.icu connector** — direct sync over HTTP Basic auth (API key).
 - **REST API** — a single versioned `/v1` surface, OpenAPI 3.1, SSE streaming for agent
