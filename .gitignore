@@ -73,3 +73,6 @@ local.db
 
 # OS
 .DS_Store
+
+# T-MUT mutation-runner workdir (mutmut 3, TIER-R6) — generated, never committed
+/mutants/
