@@ -91,6 +91,14 @@ class NameLibrary(Protocol):
         """
         ...
 
+    # A library MAY ALSO implement ``canonical_workout_type(workout_type: str) -> str | None`` —
+    # the LANGUAGE-INDEPENDENT structural resolver (issue #18): it grounds a prescribed-workout
+    # NAME claim by its typed canonical prescription (COACH-R2) rather than its translated surface
+    # name. It is detected structurally (``getattr``) so the base protocol stays minimal; a library
+    # that does not implement it falls back to the surface-name ``canonical_name`` match. When it IS
+    # implemented and the claim carries a type, it is AUTHORITATIVE: an out-of-vocabulary type fails
+    # closed (no surface-name second chance), per ``CanonicalWorkoutType``'s fail-closed contract.
+
 
 def ground(
     draft_text: str,
@@ -252,15 +260,45 @@ def _verify_name(claim: Claim, name_library: NameLibrary | None) -> _Outcome:
     A name resolves only if the evidence object can look it up AND returns a canonical
     id; otherwise it fails closed and is removed (GROUND-R3). A resolved name carries a
     citation to its canonical id (GROUND-R5).
+
+    Resolution is STRUCTURAL FIRST (issue #18): when the claim carries a typed
+    ``workout_type`` (the model's structured canonical prescription, COACH-R2) and the library
+    can resolve a type, that LANGUAGE-INDEPENDENT path is AUTHORITATIVE — a plan in any language
+    grounds by its structure, never by re-matching its translated surface name, and an
+    out-of-vocabulary type fails closed (GROUND-R3) with no surface-name second chance. Only a claim
+    with NO structured type falls back to the legacy surface-name match (the English canonical-name
+    set), preserving the prior behaviour for any extractor/test that emits a bare name.
     """
-    candidate = claim.ref if claim.ref is not None else claim.text
     if name_library is None:
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
-    canonical_id = name_library.canonical_name(candidate)
+    canonical_id = _resolve_name_id(claim, name_library)
     if canonical_id is None:
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
     citation = {"kind": "name", "record": "workout", "canonical_id": canonical_id}
     return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), None)
+
+
+def _resolve_name_id(claim: Claim, name_library: NameLibrary) -> str | None:
+    """The canonical id for a NAME claim — STRUCTURED type when present, else surface name.
+
+    The structured ``workout_type`` (issue #18) is the language-free path: a plan in any language
+    carries the same enum, so it grounds without translating prose. ``canonical_workout_type`` is
+    OPTIONAL on the library protocol (older/free-form evidence does not implement it).
+
+    The two paths are MUTUALLY EXCLUSIVE and the structured one is AUTHORITATIVE: when the claim
+    carries a ``workout_type`` AND the library can resolve types, that path DECIDES — an
+    out-of-vocabulary type (resolver returns ``None``) fails closed (GROUND-R3); it is NOT given a
+    second chance via the translated surface name, which this PR deems unreliable for non-English
+    (and which would contradict ``CanonicalWorkoutType``'s "OOV is a validation failure, never a
+    new type"). The legacy ``canonical_name`` surface match applies STRICTLY when the claim carries
+    no structured type (or the library has no type resolver), preserving prior behaviour for any
+    extractor/test that emits a bare name.
+    """
+    resolve_type = getattr(name_library, "canonical_workout_type", None)
+    if claim.workout_type is not None and callable(resolve_type):
+        return resolve_type(claim.workout_type)  # type: ignore[no-any-return]
+    candidate = claim.ref if claim.ref is not None else claim.text
+    return name_library.canonical_name(candidate)
 
 
 def _verify_url(claim: Claim, evidence: GroundingEvidence, allow_list: frozenset[str]) -> _Outcome:

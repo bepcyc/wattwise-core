@@ -350,6 +350,36 @@ def test_degraded_reason_is_localized_by_accept_language() -> None:
     assert "vorhandenen Daten" in reason  # the German localization, not the English constant
 
 
+def test_region_tag_localizes_catalog_by_primary_subtag_and_directive_keeps_full_tag() -> None:
+    """A region/full BCP-47 header drives BOTH roles from one resolved tag (API-R37 / LANG-R1).
+
+    The model-free degraded catalog resolves by the PRIMARY language subtag (``de-DE`` -> ``de``
+    German copy, never the English floor), while the directive the engine receives keeps the FULL
+    tag (``de-de``) so the coach answers in the exact variant. Both halves pinned; mutation-prove
+    by removing :func:`catalog_locale`'s primary-subtag reduction (a bare ``.get`` on the full tag)
+    and the German half falls back to English here.
+    """
+    answer = AgentAnswer(
+        status=RunStatus.DEGRADED,
+        thread_id="01T",
+        answer_html="<p>x</p>",
+        answer_text="x",
+        coverage_caveat={"inputs": []},
+    )
+    app, engine = _build_app(answer)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/agent/ask",
+            json={"question": "Wie geht's?"},
+            headers={**_auth(app), "Accept-Language": "de-DE"},
+        )
+    # model-free catalog half: German copy via the primary subtag, not the English floor
+    assert "vorhandenen Daten" in resp.json()["degraded"]["reason_text"]
+    # directive half: the engine received the FULL region tag (header-normalized to lowercase),
+    # NOT a primary-subtag-truncated "de" — the region subtag survives to the directive
+    assert engine.seen_locale == "de-de"
+
+
 def test_body_language_overrides_accept_language() -> None:
     """The body ``language`` field takes precedence over Accept-Language (API-R37)."""
     answer = AgentAnswer(

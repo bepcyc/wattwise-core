@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -57,6 +58,40 @@ CANONICAL_WORKOUT_NAMES: frozenset[str] = frozenset(
         "sprint intervals",
     }
 )
+
+
+class CanonicalWorkoutType(StrEnum):
+    """The closed, LANGUAGE-INDEPENDENT canonical workout-type vocabulary (COACH-R2, STRUCT-R1/R3).
+
+    The typed prescription the model emits as STRUCTURED output for a prescribed-workout NAME
+    claim: a plan in ANY language carries the SAME enum member, so grounding resolves the workout
+    by its STRUCTURE — never by re-matching a translated surface name (the language-enumeration the
+    owner rejected). Each member maps 1:1 to a canonical training-prescription name in
+    :data:`CANONICAL_WORKOUT_NAMES`, so a structured-type ground yields the SAME stable
+    ``workout:{name}`` canonical id as the legacy surface-name path (GROUND-R5 citation stability).
+    The enum is exhaustive for the prescription decision space (STRUCT-R3): an out-of-vocabulary
+    value is a structured-output validation failure, never a new type.
+    """
+
+    REST_DAY = "rest_day"
+    RECOVERY_RIDE = "recovery_ride"
+    RECOVERY_SPIN = "recovery_spin"
+    ENDURANCE_RIDE = "endurance_ride"
+    LONG_RIDE = "long_ride"
+    TEMPO_INTERVALS = "tempo_intervals"
+    SWEET_SPOT_INTERVALS = "sweet_spot_intervals"
+    THRESHOLD_INTERVALS = "threshold_intervals"
+    VO2MAX_INTERVALS = "vo2max_intervals"
+    ANAEROBIC_INTERVALS = "anaerobic_intervals"
+    SPRINT_INTERVALS = "sprint_intervals"
+
+
+#: The structured canonical workout TYPE -> the normalized canonical NAME its ``workout:{name}``
+#: citation id is keyed on. The type's identifier IS the canonical name with spaces (so the
+#: structured-type ground and the legacy surface-name ground produce a byte-identical canonical id).
+_WORKOUT_TYPE_TO_NAME: Mapping[CanonicalWorkoutType, str] = {
+    member: member.value.replace("_", " ") for member in CanonicalWorkoutType
+}
 
 
 def _normalize_workout_name(name: str) -> str:
@@ -111,10 +146,39 @@ class _SnapshotEvidence:
         claim (fail-closed, GROUND-R3). With an EMPTY ``allow_names`` (the free-form default) every
         name resolves to ``None`` — preserving the Phase-1 "no canonical workout library" behaviour
         for non-plan deliverables.
+
+        This is the LEGACY surface-name path (English canonical names): it is the fallback the
+        grounder uses ONLY when a NAME claim carries no structured ``workout_type`` (issue #18) — a
+        non-English plan resolves through :meth:`canonical_workout_type` instead, language-free.
         """
         if not self._allow_names:
             return None
         normalized = _normalize_workout_name(name)
+        if normalized in self._allow_names:
+            return f"workout:{normalized}"
+        return None
+
+    def canonical_workout_type(self, workout_type: str) -> str | None:
+        """Resolve a STRUCTURED canonical workout TYPE to its stable citation id (COACH-R2, #18).
+
+        The LANGUAGE-INDEPENDENT grounding path: a prescribed-workout NAME claim that carries a
+        typed ``workout_type`` (the model's structured prescription, STRUCT-R1) grounds by that
+        enum value, NOT by re-matching its translated surface name — so a plan in ANY language
+        resolves identically. The returned id is byte-identical to the legacy surface-name path's
+        ``workout:{normalized}`` (the enum maps 1:1 to :data:`CANONICAL_WORKOUT_NAMES`), so the
+        GROUND-R5 citation is stable across languages. With an EMPTY ``allow_names`` (the free-form
+        default) every type resolves to ``None`` (fail-closed, GROUND-R3); an out-of-vocabulary
+        value resolves to ``None`` too (the enum is the only accepted set, STRUCT-R3).
+        """
+        if not self._allow_names:
+            return None
+        try:
+            member = CanonicalWorkoutType(workout_type)
+        except ValueError:
+            return None
+        normalized = _WORKOUT_TYPE_TO_NAME[member]
+        # Defensive: the type's canonical name must be in the allowed library (they are kept in
+        # lockstep); if a deployment narrows the library, an absent name still fails closed.
         if normalized in self._allow_names:
             return f"workout:{normalized}"
         return None
@@ -141,7 +205,14 @@ async def _resolve_snapshots(
 
 
 class _ExtractedClaim(BaseModel):
-    """One candidate claim the model points at (STRUCT-R5); code verifies it, not the model."""
+    """One candidate claim the model points at (STRUCT-R5); code verifies it, not the model.
+
+    ``workout_type`` is the typed canonical prescription the model emits for a prescribed-workout
+    NAME claim (COACH-R2, language-independent, issue #18): a closed :class:`CanonicalWorkoutType`
+    enum so the plan-structure verdict is provider-enforced over the canonical vocabulary (STRUCT-R1
+    /R3), not the translated surface name. It is optional (``None``) — a NUMBER/URL/STATEMENT claim
+    carries none, and a NAME claim without it falls back to the legacy surface-name match.
+    """
 
     model_config = {"extra": "forbid"}
     kind: ClaimKind = ClaimKind.NUMBER
@@ -149,6 +220,7 @@ class _ExtractedClaim(BaseModel):
     metric: str | None = None
     value: float | None = None
     as_of: str | None = None
+    workout_type: CanonicalWorkoutType | None = None
 
 
 class _ClaimSchema(BaseModel):
@@ -224,7 +296,16 @@ class ClaimGrounder:
                 self._model, system=self._claim_system, data=draft, schema=_ClaimSchema
             )
             claims = [
-                Claim(kind=c.kind, text=c.text, metric=c.metric, value=c.value, ref=c.as_of)
+                Claim(
+                    kind=c.kind,
+                    text=c.text,
+                    metric=c.metric,
+                    value=c.value,
+                    ref=c.as_of,
+                    # The typed canonical prescription (language-independent, issue #18): carried
+                    # onto the claim so the NAME verifier grounds by STRUCTURE, not surface name.
+                    workout_type=c.workout_type.value if c.workout_type is not None else None,
+                )
                 for c in extracted.claims
             ]
         except (StructuredOutputError, NotImplementedError):
@@ -335,6 +416,7 @@ class ClaimGrounder:
 
 __all__ = [
     "CANONICAL_WORKOUT_NAMES",
+    "CanonicalWorkoutType",
     "ClaimGrounder",
     "_SnapshotEvidence",
     "_normalize_workout_name",

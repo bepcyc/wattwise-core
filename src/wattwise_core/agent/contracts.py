@@ -386,7 +386,15 @@ class ClaimKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Claim:
-    """One extracted candidate claim to be verified by deterministic code (STRUCT-R5)."""
+    """One extracted candidate claim to be verified by deterministic code (STRUCT-R5).
+
+    ``workout_type`` is the LANGUAGE-INDEPENDENT canonical workout type the model emits as a
+    typed enum on a prescribed-workout NAME claim (COACH-R2: "a typed prescription the canonical
+    model can represent"; STRUCT-R1 plan-structure verdict). A plan written in ANY language carries
+    the SAME structured type — so grounding checks the type, never the translated surface name. It
+    is ``None`` for non-prescription claims and for an older extractor that emits no type (the
+    grounder then falls back to the surface-name match, preserving prior behaviour).
+    """
 
     kind: ClaimKind
     text: str
@@ -394,6 +402,7 @@ class Claim:
     value: float | None = None
     ref: str | None = None
     prescriptive: bool = False
+    workout_type: str | None = None
 
 
 class GroundVerdict(StrEnum):

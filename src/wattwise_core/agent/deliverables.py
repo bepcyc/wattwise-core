@@ -259,6 +259,11 @@ async def answer_question(
         html, text = enforce_presentation(
             html, text, response_length=response_length, presentation=policy
         )
+    # Issue #18: a DETAILED grounded answer must surface >=1 citation when grounded evidence
+    # exists — backfill from the run's grounded observations (verbatim, fabricating nothing).
+    citations = _detailed_citation_floor(
+        citations, observations, status=status, response_length=response_length
+    )
     return AgentAnswer(
         status=status,
         thread_id=out_thread_id,
@@ -308,6 +313,36 @@ def _merge_revealed_citations(
         c for obs in revealed for c in obs.citations if c.record_id and c.record_id not in seen
     ]
     return (*citations, *extra)
+
+
+def _detailed_citation_floor(
+    citations: tuple[Citation, ...],
+    observations: Sequence[Observation],
+    *,
+    status: RunStatus,
+    response_length: ResponseLength,
+) -> tuple[Citation, ...]:
+    """Surface >=1 grounded citation on a DETAILED grounded answer (VOICE-R7, issue #18).
+
+    A ``detailed`` deep-dive that actually grounded canonical evidence MUST show at least one
+    citation (a detailed answer claiming numbers with zero surfaced citations is under-informative
+    and reads as ungrounded). When the projected citation list came back empty but the run produced
+    grounded observations carrying canonical ``{metric, value, as_of}`` citations, this backfills
+    them from those observations VERBATIM (read off the prior grounding, recomputing nothing,
+    GROUND-R7) — de-duplicated by record id. It NEVER fabricates: with no grounded observation it
+    leaves the list empty (an honestly citation-free answer stays so). It applies ONLY to a
+    successful ``detailed`` turn; a degraded/abstained run or a shorter length is untouched.
+
+    SCOPE (issue #18, intentional): this is a FULLY-EMPTY backfill, not a per-citation top-up. The
+    ``or citations`` guard means a projection that already surfaced >=1 citation is left exactly as
+    projected — even a detailed answer with a single (e.g. stale) citation alongside many grounded
+    observations is NOT augmented. The floor's job is only to prevent the zero-citation detailed
+    answer that reads as ungrounded; enriching a non-empty list is out of #18 scope by design.
+    """
+    if response_length != "detailed" or status is not RunStatus.COMPLETED or citations:
+        return citations
+    grounded = tuple(o for o in observations if o.citations)
+    return _merge_revealed_citations(citations, grounded)
 
 
 async def weekly_digest(
