@@ -49,6 +49,10 @@ async def reground_plan(
         tolerance=coach.tolerance,
         allowed_hosts=coach.allowed_hosts,
         lookback_days=coach.lookback_days,
+        # Issue #10: the HITL edit path runs the SAME binding/entailment layers as every
+        # other grounder path — an edit must not be the one door around the binding guard.
+        binding=coach.binding,
+        entailment=coach.entailment,
     )
     # The ORIGINAL run's request text rides along so a user-supplied constraint the edit
     # preserves (e.g. "7 hours a week") stays sayable as a request echo — without it the

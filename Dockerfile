@@ -46,15 +46,19 @@ WORKDIR /build
 # `--frozen` (RUN-R1 / SEC-R13.4 / RUN-R3.2): fail if uv.lock is missing or out of date; never
 # silently re-resolve a floating range. `--no-dev` drops the dev/test toolchain (RUN-R2).
 # `--no-install-project` installs ONLY third-party deps in this layer.
+# The PostgreSQL/MariaDB async drivers are OPTIONAL extras (the bare pip install stays
+# lean, SQLite-only) — but the IMAGE is the deployment artifact and must serve any of the
+# three supported DSNs (deploy/compose.yaml runs PostgreSQL), so both driver extras are
+# installed here (issue #19: without them the documented compose boot cannot connect at all).
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --no-install-project --extra postgresql --extra mariadb
 
 # Layer 2: install the project itself (its own wheel into the same venv).
 COPY README.md NOTICE LICENSE ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+    uv sync --frozen --no-dev --no-editable --extra postgresql --extra mariadb
 
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime: minimal, non-root, no build tools, no dev deps, no tests.
@@ -101,9 +105,24 @@ COPY --from=builder --chown=root:root /opt/venv /opt/venv
 # A scratch dir the app may need for ephemeral, NON-PII working files (the engine never writes PII
 # to disk — PRIV-R6; persistent athlete data lives only in the external store). Owned by the runtime
 # user so the rest of the root fs can be mounted read-only (`read_only: true` in compose).
-RUN install -d -o 10001 -g 10001 -m 0750 /var/run/wattwise
+# /var/lib/wattwise is the default data root (object store; SQLite DB when so configured) — created
+# OWNED BY the runtime UID so a NAMED VOLUME mounted there inherits correct ownership on first use
+# (named volumes copy the image's ownership; bind mounts do not — see the README).
+RUN install -d -o 10001 -g 10001 -m 0750 /var/run/wattwise \
+    && install -d -o 10001 -g 10001 -m 0750 /var/lib/wattwise
 
 WORKDIR /app
+
+# Ship the versioned migrations + a runtime alembic config IN the image so a fresh container can
+# bring its own database to head with NO source checkout on the host (issue #19; RUN-R6 stays the
+# readiness gate, this makes first boot self-sufficient). Root-owned, read-only to the runtime user,
+# like the venv. The entrypoint runs `alembic upgrade head` before serving unless
+# WATTWISE_MIGRATE_ON_START is falsy (alembic is already a runtime dependency of the wheel — the
+# entrypoint adds NO packages).
+COPY --chown=root:root migrations /app/migrations
+COPY --chown=root:root docker/alembic.ini /app/alembic.ini
+COPY --chown=root:root --chmod=0755 docker/entrypoint.sh /usr/local/bin/wattwise-entrypoint
+
 USER 10001:10001
 
 EXPOSE 8000
@@ -115,8 +134,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import os,sys,urllib.request; p=os.environ.get('WATTWISE_API__PORT','8000'); req=urllib.request.Request(f'http://127.0.0.1:{p}/healthz', method='GET'); sys.exit(0 if urllib.request.urlopen(req, timeout=4).status==200 else 1)"]
 
-# Boot the ASGI app via uvicorn (exec form, no shell → clean signal handling / fast SIGTERM).
-# The app is exposed as a factory `create_app()` on the package's API module; `--factory` calls it.
+# Boot via the migrate-then-serve entrypoint (exec form, non-root): apply schema migrations against
+# WATTWISE_DATABASE_DSN (WATTWISE_MIGRATE_ON_START, default on; a migration failure aborts the boot,
+# fail-closed), then `exec` uvicorn as PID 1 (clean signal handling / fast SIGTERM) with the CMD args
+# passed through. The app is exposed as a factory `create_app()`; `--factory` calls it.
 # Host/port come from config (WATTWISE_API__*, RUN-R4) with the env defaults set above.
-ENTRYPOINT ["python", "-m", "uvicorn", "--factory", "wattwise_core.api.app:create_app"]
+ENTRYPOINT ["wattwise-entrypoint"]
 CMD ["--host", "0.0.0.0", "--port", "8000", "--no-server-header"]

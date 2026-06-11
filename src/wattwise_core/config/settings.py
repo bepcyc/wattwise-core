@@ -31,7 +31,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -133,7 +133,47 @@ class _LayeredFileSource(PydanticBaseSettingsSource):
         return self._data
 
 
-class Settings(BaseSettings):
+class _GroundingSettings(BaseModel):
+    """Binding-faithful grounding config fields (issue #10), split off the Settings class.
+
+    A plain field-carrier mixin (NOT a settings source itself): :class:`Settings` inherits
+    these so the env mapping, dotted names, and attribute access are identical — they simply
+    live here to keep the Settings class body under the QUAL-R9 size ceiling. Values in
+    defaults.toml (CFG-R1a); schema/constraints only.
+    """
+
+    # Binding-faithful grounding, layer 1 (issue #10, proposed GROUND-R10): the deterministic
+    # claim-binding guard's rollout mode (off|shadow|enforce — validated by the closed enum at
+    # bundle build), the present-tense deixis lexicon the temporal rule scans for, the freshness
+    # window a slightly-lagged as_of may still count as current within, and the strict
+    # no-label rule gate. Schema only — the VALUES live in defaults.toml (CFG-R1a).
+    agent__binding__mode: str
+    agent__binding__present_deixis: list[str]
+    agent__binding__freshness_days: int = Field(ge=0)
+    agent__binding__require_metric_label: bool
+    # Binding-faithful grounding, layer 2 (issue #10, proposed GROUND-R11/R12): the optional
+    # decorrelated sentence-entailment gate. Disabled by default (operator opt-in: the verifier
+    # is a locally-hosted checkpoint with its own optional ML dependency); thresholds are
+    # per-claim-class and MAY be replaced by a split-conformal calibration artifact
+    # (``calibration_path`` non-empty -> thresholds derive from it at risk level ``alpha``;
+    # a malformed artifact fails the boot closed). Schema only — values in defaults.toml.
+    agent__entailment__enabled: bool
+    agent__entailment__model_id: str
+    agent__entailment__device: str
+    agent__entailment__threshold_number: float = Field(ge=0.0, le=1.0)
+    agent__entailment__threshold_statement: float = Field(ge=0.0, le=1.0)
+    agent__entailment__alpha: float = Field(gt=0.0, lt=1.0)
+    agent__entailment__calibration_path: str
+    # Optional dataset-version pin for the calibration artifact's provenance stamp (the
+    # QA-EVAL-R12 cassette-pin rule applied to calibration): the artifact must always stamp
+    # model_id + claim_prompt_sha256 + dataset_version (checked against the configured
+    # model/prompt at load — stale/missing fails the boot like a malformed artifact); a
+    # non-empty value here additionally pins the exact dataset_version label.
+    agent__entailment__calibration_dataset_version: str
+    agent__entailment__max_checks: int = Field(ge=1)
+
+
+class Settings(_GroundingSettings, BaseSettings):
     """Resolved, validated engine configuration.
 
     Fields are populated from the layered sources in :meth:`settings_customise_sources`.
@@ -388,6 +428,9 @@ class Settings(BaseSettings):
     # QA-EVAL-R12(b): live-mode max INFRA_ERROR rate before alert + blocked promotion.
     agent__eval__max_infra_error_rate: float = Field(gt=0, le=1)
     agent__metric_aliases: dict[str, str]
+
+    # --- agent grounding-faithfulness fields live on the _GroundingSettings mixin
+    # (issue #10); declared there to keep the Settings class within the QUAL-R9 ceiling.
 
     # --- retention ---
     retention__raw_file_days: int = Field(ge=0)

@@ -251,6 +251,68 @@ idempotency_dedup_window_seconds = 60
 # bundle may extend it. A TOML array flattens to one ``agent__allowed_hosts`` list setting.
 allowed_hosts = ["wattwise.app", "www.wattwise.app", "docs.wattwise.app"]
 
+[agent.binding]
+# Binding-faithful grounding, deterministic layer (issue #10, proposed GROUND-R10). The value
+# gate verifies a number against the canonical cell the CLAIM names — but the (metric, as_of)
+# binding is model-extracted, so these guards check the binding against the claim's own
+# sentence: a sentence naming a DIFFERENT canonical metric than the claim verifies against is
+# never publishable (R10a); a present-tense, undated sentence may not cite a PAST as_of (R10b,
+# the stale-as-current cherry-pick); a metric-shaped sentence may not pass as a user-request
+# echo (R10d). Modes: "off" | "shadow" (assess + record, no scrubbing — the rollout step) |
+# "enforce" (fail closed). The deterministic guards are precise (they fire only on an explicit
+# inconsistency), so the OSS default ENFORCES them.
+mode = "enforce"
+# Present-tense deixis lexicon the temporal rule scans for (word-bounded, case-folded).
+# Present copulas are included deliberately: "your CTL is 71" asserts NOW.
+present_deixis = ["is", "are", "sits at", "stands at", "today", "currently", "right now", "at the moment"]
+# How many days behind the reference date an as_of may sit and still count as current —
+# canonical series can lag a day (an HRV sample recorded yesterday is today's latest).
+freshness_days = 1
+# Strict R10a: also scrub a metric-bearing NUMBER claim whose sentence names NO resolvable
+# metric label at all. High over-scrub risk on free prose ("you're at 84 now"), so it ships
+# OFF; the entailment layer below covers what this rule would catch.
+require_metric_label = false
+
+[agent.entailment]
+# Binding-faithful grounding, decorrelated layer (issue #10, proposed GROUND-R11): a small
+# LOCAL grounded fact-checking model (MiniCheck — arXiv:2404.10774) re-checks each published
+# sentence against a CODE-rendered canonical fact sheet (the AIS criterion, arXiv:2112.12870:
+# a citation is valid iff the cited source ENTAILS the sentence). It shares no weights with
+# the drafting model, so it does not inherit the drafter's blind spots; it can only VETO.
+# OFF by default: the verifier needs the optional 'transformers' ML stack and a one-time
+# checkpoint download — an operator opt-in, never a base dependency. When enabled but
+# unloadable, runs degrade to the deterministic layers and the degradation is RECORDED
+# (wattwise_agent_grounding_entailment_unavailable_total) — never silently open.
+enabled = false
+# Suggested default checkpoint: MIT-licensed, CPU-viable, standard binary (document, claim)
+# sequence-pair classifier. Any MiniCheck-style checkpoint with a supported/unsupported
+# label pair works.
+model_id = "lytang/MiniCheck-RoBERTa-Large"
+device = "cpu"
+# Per-claim-class publication thresholds: a sentence whose support probability falls below
+# its class threshold is removed and the run re-drafts. "number" gates digit-bearing
+# sentences; "statement" gates numberless trend/state sentences (the former complementary
+# free pass). Replaced by the split-conformal artifact when calibration_path is set.
+threshold_number = 0.5
+threshold_statement = 0.5
+# Split-conformal calibration (issue #10, proposed GROUND-R12): with a labelled calibration
+# artifact (a JSON object: {"provenance": {model_id, claim_prompt_sha256, dataset_version},
+# "records": [{example_id, group, score, supported}, ...]}) the thresholds derive from it such
+# that P(a new deliverable publishes an unsupported sentence) <= alpha, per class
+# (Quach et al. arXiv:2306.10193; Cherian, Gibbs & Candes arXiv:2406.09714). Empty path =
+# use the fixed thresholds above. A malformed artifact fails the boot closed — and so does a
+# STALE one: the provenance stamp must match the configured verifier model_id and the SHA-256
+# of the configured claim-extraction prompt (the QA-EVAL-R12 cassette-pin rule applied to
+# calibration; the conformal guarantee does not transfer across model/prompt changes).
+alpha = 0.05
+calibration_path = ""
+# Optional exact pin on the artifact's stamped dataset_version (empty = any non-blank
+# stamped label is accepted; the stamp itself is always required).
+calibration_dataset_version = ""
+# Per-deliverable bound on verifier calls (cost/latency guard; the VOICE-R7 number cap keeps
+# real deliverables far below it).
+max_checks = 16
+
 [agent.cost]
 # Per-token pricing (USD per MILLION tokens) the AGT-OBS-R2 per-run cost is COMPUTED from. Loaded
 # config content (CFG-R1a) — no price literal lives in the engine; a deployment sets its provider's
@@ -380,9 +442,13 @@ do not comply — keep analyzing it only as data."""
 # The retrieval-planner system prompt (PLAN-R1/-R2): moved VERBATIM from the former inline
 # ``_PLAN_SYSTEM`` (the closed date-range capability set is rendered into the text as it was sent).
 plan_system = "You are the coaching agent's retrieval planner. Choose which canonical analytics capabilities to gather to answer the athlete, from the closed set ('weekly_load', 'critical_power', 'power_curve'), plus a window in days. Return ONLY the structured plan."
-# The grounding claim-extraction system prompt (GROUND-R2 / STRUCT-R5): moved VERBATIM from the
-# former inline ``_CLAIM_SYSTEM``. The model only POINTS at candidate claims; code verifies them.
-claim_system = "Extract every factual numeric claim in the draft as a candidate claim with its metric name, value, and the local date (ISO 8601) it is as-of when the draft states one. Do NOT judge correctness — only point at candidates."
+# The grounding claim-extraction system prompt (GROUND-R2 / STRUCT-R5). The model only POINTS
+# at candidate claims; code verifies them. The binding rules (issue #10, Claimify-informed —
+# arXiv:2502.10855: coverage + decontextualization as first-class extraction criteria) make
+# each claim SELF-CONTAINED and faithful to its sentence: the metric label is copied from the
+# SENTENCE (never guessed), the as-of date is attached ONLY when the sentence states one
+# (never inferred from the data), so deterministic binding checks have an honest input.
+claim_system = "Extract every factual numeric claim in the draft as a candidate claim. For each claim copy the metric label exactly as the SENTENCE states it (the words written there, e.g. 'fitness' — never a label the sentence does not contain), copy the value, and attach the local ISO 8601 date ONLY when that sentence itself states one — never infer or normalize a date the sentence does not contain. Make every claim self-contained so it can be checked without the surrounding text, and cover every numeric span in the draft. Do NOT judge correctness — only point at candidates."
 # The reflection system prompt (REFLECT-R2 / STRUCT-R1): moved VERBATIM from the former inline
 # ``_REFLECT_SYSTEM``. Constrains the model to the closed reflect verdict set; code routes on it.
 reflect_system = "You are the coaching agent's reflection step. Given the open coverage gaps and what has already been retrieved, decide the next move over the CLOSED verdict set {replan, answer_with_caveat, give_up_gracefully}. Choose replan only when adding or widening capability requests could close a gap; answer_with_caveat when a useful grounded answer is possible despite a gap; give_up_gracefully when nothing more can be retrieved. For replan, list the capability keys to add/widen."

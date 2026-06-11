@@ -96,6 +96,8 @@ def _verify_number(
     evidence: GroundingEvidence,
     tolerance: NumericTolerance,
     request_values: frozenset[float] = frozenset(),
+    *,
+    echo_blocked: bool = False,
 ) -> _Outcome:
     """Match a claimed number against the canonical analytic within tolerance (GROUND-R7).
 
@@ -123,8 +125,12 @@ def _verify_number(
     )
     if canonical is None:
         # Sign-insensitive: a range's second member ("5-7") extracts with the dash attached,
-        # so a claimed 7 (or -7) matches the user's sign-stripped echo token.
-        if claim.value in request_values or abs(claim.value) in request_values:
+        # so a claimed 7 (or -7) matches the user's sign-stripped echo token. ``echo_blocked``
+        # is the binding guard's R10d veto (issue #10): a METRIC-SHAPED sentence may never
+        # ground as a request echo — it verifies canonically or scrubs (fail-closed).
+        if not echo_blocked and (
+            claim.value in request_values or abs(claim.value) in request_values
+        ):
             return _request_echo(claim)
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
     # The PUBLISHED figure is ALWAYS the canonical value rounded to display precision — never the
