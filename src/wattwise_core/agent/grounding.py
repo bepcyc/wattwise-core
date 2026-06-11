@@ -40,6 +40,7 @@ from wattwise_core.agent.contracts import (
     GroundingResult,
     GroundVerdict,
 )
+from wattwise_core.agent.grounding_binding import BindingGuard, BindingViolation
 
 # The numeric-match primitives (the tolerance band, the fail-closed canonical-value read, the
 # GROUND-R5 citation, the POSITIONAL GROUND-R7 canonical-display rewrite) live in the focused
@@ -99,6 +100,7 @@ def ground(
     *,
     tolerance: NumericTolerance = _DEFAULT_TOLERANCE,
     request_numbers: frozenset[str] = frozenset(),
+    binding: BindingGuard | None = None,
 ) -> GroundingResult:
     """Verify every claim against canonical evidence and scrub the draft (GROUND-R1/R3/R9).
 
@@ -124,6 +126,13 @@ def ground(
     analytics, and the numeric sweep treats it as covered. Canonical verification still wins
     whenever the claim's metric resolves to an available canonical value (a real metric claim is
     never excused by a coincidental request echo).
+
+    ``binding`` is the optional deterministic claim-BINDING guard (issue #10, proposed
+    GROUND-R10): when present, a NUMBER claim is checked for label/temporal binding against its
+    own sentence in the ORIGINAL draft BEFORE value verification — a mis-bound claim (sentence
+    names a different metric; present-tense sentence with a past ``as_of``) is scrubbed without
+    ever consulting the model-chosen canonical cell, and a metric-shaped sentence loses the
+    user-request echo pass (R10d). ``None`` preserves the value-only behaviour.
     """
     allow_list = normalize_urls(allow_urls)
     name_library = evidence if isinstance(evidence, NameLibrary) else None
@@ -133,7 +142,14 @@ def ground(
     covered: list[tuple[int, int]] = []
     for claim in claims:
         outcome = _verify_claim(
-            claim, evidence, name_library, allow_list, tolerance, request_values
+            claim,
+            evidence,
+            name_library,
+            allow_list,
+            tolerance,
+            request_values,
+            binding=binding,
+            draft=draft_text,
         )
         grounded.append(outcome.grounded)
         if outcome.scrub_text is None:
@@ -191,15 +207,43 @@ def _verify_claim(
     allow_list: frozenset[str],
     tolerance: NumericTolerance,
     request_values: frozenset[float] = frozenset(),
+    *,
+    binding: BindingGuard | None = None,
+    draft: str = "",
 ) -> _Outcome:
-    """Dispatch one claim to its kind-specific verifier (GROUND-R2)."""
+    """Dispatch one claim to its kind-specific verifier (GROUND-R2).
+
+    A NUMBER claim passes the deterministic BINDING guard first (issue #10, GROUND-R10):
+    the binding checks read the claim's sentence in the ORIGINAL ``draft`` (extraction
+    happened over it), never the partially scrubbed working text.
+    """
     if claim.kind is ClaimKind.NUMBER:
-        return _verify_number(claim, evidence, tolerance, request_values)
+        echo_blocked = False
+        if binding is not None:
+            violation = binding.check_number(draft, claim)
+            if violation is not None:
+                return _scrubbed(claim, _binding_verdict(violation))
+            echo_blocked = binding.echo_blocked(draft, claim)
+        return _verify_number(claim, evidence, tolerance, request_values, echo_blocked=echo_blocked)
     if claim.kind is ClaimKind.NAME:
         return _verify_name(claim, name_library)
     if claim.kind is ClaimKind.URL:
         return _verify_url(claim, evidence, allow_list)
     return _verify_statement(claim)
+
+
+def _binding_verdict(violation: BindingViolation) -> GroundVerdict:
+    """Map a binding violation to its fail-closed verdict (issue #10, GROUND-R10).
+
+    A METRIC MISMATCH is ``contradicted``-class: the sentence asserts a DIFFERENT canonical
+    fact than the claim verifies, so it is never publishable and the run re-drafts
+    (GROUND-R9: contradicted never proceeds). A temporal/label violation is ``ungrounded``
+    — the span is scrubbed and the normal recovery ladder applies. No binding verdict ever
+    substitutes a value: the guard cannot know the RIGHT cell, only that this one is wrong.
+    """
+    if violation is BindingViolation.METRIC_MISMATCH:
+        return GroundVerdict.CONTRADICTED
+    return GroundVerdict.UNGROUNDED
 
 
 def _verify_name(claim: Claim, name_library: NameLibrary | None) -> _Outcome:
