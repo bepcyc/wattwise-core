@@ -92,7 +92,70 @@ just lint type test     # fast dev loop (full CI-parity gate: just gate)
 ```
 
 Then point your LLM provider (any OpenAI-compatible endpoint) via configuration and start
-the API. See [Configuration](#configuration).
+the API. See [Configuration](#configuration). Prefer containers? The image is fully
+self-sufficient — see [Run in a container](#run-in-a-container).
+
+## Run in a container
+
+Everything the engine needs ships in the image — including its database migrations. On
+**first boot the container migrates its own database** to the latest schema before
+serving, so you don't need a source checkout, `just`, or a manual `alembic` step. (Set
+`WATTWISE_MIGRATE_ON_START=0` to manage migrations yourself; the readiness probe at
+`/readyz` will then refuse to serve until the schema is up to date.)
+
+```sh
+docker build -t wattwise-core:local .    # or use a released image
+
+docker run -d --name wattwise \
+  -p 127.0.0.1:8000:8000 \
+  -v wattwise_data:/var/lib/wattwise \
+  -e WATTWISE_DATABASE_DSN='sqlite+aiosqlite:////var/lib/wattwise/wattwise.sqlite' \
+  -e WATTWISE_ENCRYPTION_ROOT_KEY="$(python3 -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())')" \
+  -e WATTWISE_TOKEN_SIGNING_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
+  -e WATTWISE_LLM_API_KEY='sk-...' \
+  wattwise-core:local
+```
+
+That's a complete single-container setup: SQLite database and uploaded originals live on
+the `wattwise_data` named volume. For PostgreSQL, point `WATTWISE_DATABASE_DSN` at your
+database instead (see [`deploy/compose.yaml`](deploy/compose.yaml) for a hardened
+two-service composition with an isolated Postgres on a dedicated named volume) — first
+boot migrates it the same way.
+
+**Volume ownership.** The container runs as an unprivileged fixed user (UID 10001) and
+never as root, so it cannot fix file permissions for you. Prefer a **named volume** (as
+above): Docker initializes named volumes with the ownership baked into the image, so
+they are writable out of the box. If you bind-mount a host directory instead, you own
+the permissions yourself: `sudo chown 10001:10001 <dir>` on rootful Docker, or — under
+rootless Docker/Podman, where host ownership must map into the container's user
+namespace — `podman unshare chown 10001:10001 <dir>` (or the subuid that maps to 10001).
+
+First requests, end to end — the owner secret for minting a token is the value you set
+as `WATTWISE_TOKEN_SIGNING_KEY`:
+
+```sh
+BASE=http://127.0.0.1:8000
+
+# 1. Mint an access token
+TOKEN=$(curl -fsS -X POST "$BASE/v1/auth/token" \
+  -H 'Content-Type: application/json' \
+  -d "{\"owner_secret\":\"$WATTWISE_TOKEN_SIGNING_KEY\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+AUTH="Authorization: Bearer $TOKEN"
+
+# 2. Upload a workout file (FIT / GPX / TCX / PWX) and sync it in
+curl -fsS -X POST "$BASE/v1/imports" -H "$AUTH" -F file=@ride.fit
+curl -fsS -X POST "$BASE/v1/sync/run" -H "$AUTH"
+
+# 3. Read your activities and the performance-management chart
+curl -fsS "$BASE/v1/activities" -H "$AUTH"
+curl -fsS "$BASE/v1/performance/load-fitness?from=2024-01-01&to=2024-01-08" -H "$AUTH"
+
+# 4. Ask the coach (Server-Sent Events stream; needs WATTWISE_LLM_API_KEY)
+curl -N -X POST "$BASE/v1/agent/ask" \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"question":"How much training load have I done recently?","stream":true}'
+```
 
 ## Configuration
 

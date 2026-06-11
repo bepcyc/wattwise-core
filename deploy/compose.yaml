@@ -96,6 +96,11 @@ services:
       WATTWISE_APP__ENVIRONMENT: ${WATTWISE_APP__ENVIRONMENT:-production}
       WATTWISE_API__HOST: "0.0.0.0"
       WATTWISE_API__PORT: "8000"
+      # Migrate-on-start (default ON): the image ships its own migrations and the entrypoint
+      # runs `alembic upgrade head` before serving, so the FIRST boot on a fresh volume is
+      # self-sufficient — no source checkout, no manual alembic step. Set to "0" to manage
+      # migrations yourself; readiness then refuses to serve until the schema is at head (RUN-R6).
+      WATTWISE_MIGRATE_ON_START: ${WATTWISE_MIGRATE_ON_START:-1}
     ports:
       # API published on a non-default host port; bound to loopback by default (front it with the
       # operator's own TLS-terminating reverse proxy per SEC-R10.1 / the deployment edge).
