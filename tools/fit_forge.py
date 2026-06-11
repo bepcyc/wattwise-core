@@ -162,7 +162,7 @@ _RECORD = _MesgType(
         (3, _UINT8),  # heart_rate (bpm)
         (4, _UINT8),  # cadence (rpm)
         (5, _UINT32),  # distance (cm)
-        (6, _UINT16),  # speed (mm/s)
+        (6, _UINT16),  # speed (m/s, FIT scale=1000 — raw is numerically mm/s)
         (7, _UINT16),  # power (W)
         (13, _SINT8),  # temperature (degC)
     ),

@@ -50,7 +50,10 @@ def test_forged_ride_decodes_via_primary_sdk_decoder() -> None:
     assert first.power_w and first.power_w > 0
     assert first.hr_bpm and first.hr_bpm > 0
     assert first.cadence_rpm and first.cadence_rpm > 0
-    assert first.speed_mps and first.speed_mps > 0
+    # Exact unit pins: sample 0 encodes raw 8200 (FIT speed scale=1000 -> 8.2 m/s) and
+    # raw 3000 altitude ((m + 500) * 5 -> 100 m) — a scaling drift fails loudly here.
+    assert first.speed_mps == pytest.approx(8.2)
+    assert first.altitude_m == pytest.approx(100.0)
     assert first.latlng is not None
 
 

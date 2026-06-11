@@ -199,6 +199,32 @@ def _agent_grounded_step(client: httpx.Client, base: str, auth: dict[str, str]) 
     return _step(label, grounded, _ask_detail(answer))
 
 
+def _poll_activities(
+    client: httpx.Client,
+    base: str,
+    auth: dict[str, str],
+    *,
+    minimum: int,
+    deadline_s: float = 15.0,
+) -> tuple[int, int]:
+    """Poll ``GET /v1/activities`` until ``minimum`` items appear or the deadline passes.
+
+    ``POST /v1/sync/run`` answers 202 Accepted, so completion is observed (not assumed)
+    by polling the canonical surface: the count check is the explicit completion probe.
+    Returns the last (status_code, item_count) seen for the step's PASS/FAIL detail.
+    """
+    start = time.monotonic()
+    status_code, n_items = 0, 0
+    while time.monotonic() - start < deadline_s:
+        resp = client.get(f"{base}/v1/activities", headers=auth)
+        status_code = resp.status_code
+        n_items = len(resp.json().get("data", [])) if status_code == 200 else 0
+        if status_code == 200 and n_items >= minimum:
+            break
+        time.sleep(0.5)
+    return status_code, n_items
+
+
 def _signature_step(client: httpx.Client, base: str, auth: dict[str, str]) -> bool:
     """Set the owner FTP signature (GBO-R26) — the write the power analytics ground on.
 
@@ -226,13 +252,12 @@ def _static_fixture_steps(client: httpx.Client, base: str, auth: dict[str, str])
     results.append(_step("FIT import", up.status_code == 202, str(up.status_code)))
     run = client.post(f"{base}/v1/sync/run", headers=auth)
     results.append(_step("sync run", run.status_code == 202, str(run.status_code)))
-    acts = client.get(f"{base}/v1/activities", headers=auth)
-    n_items = len(acts.json().get("data", [])) if acts.status_code == 200 else 0
+    status_code, n_items = _poll_activities(client, base, auth, minimum=1)
     results.append(
         _step(
             "activities list",
-            acts.status_code == 200 and n_items >= 1,
-            f"{acts.status_code}, items={n_items}",
+            status_code == 200 and n_items >= 1,
+            f"{status_code}, items={n_items}",
         )
     )
     pmc = client.get(
@@ -266,13 +291,12 @@ def _fresh_batch_steps(client: httpx.Client, base: str, auth: dict[str, str]) ->
     results.append(_step("forged recent FIT batch import", batch_ok, f"{len(batch)} files"))
     run = client.post(f"{base}/v1/sync/run", headers=auth)
     results.append(_step("sync run (fresh batch)", run.status_code == 202, str(run.status_code)))
-    acts = client.get(f"{base}/v1/activities", headers=auth)
-    n_total = len(acts.json().get("data", [])) if acts.status_code == 200 else 0
+    status_code, n_total = _poll_activities(client, base, auth, minimum=1 + len(batch))
     results.append(
         _step(
             "activities list (fresh batch)",
-            acts.status_code == 200 and n_total >= 1 + len(batch),
-            f"{acts.status_code}, items={n_total}",
+            status_code == 200 and n_total >= 1 + len(batch),
+            f"{status_code}, items={n_total}",
         )
     )
     today = _dt.datetime.now(_dt.UTC).date()
@@ -315,8 +339,22 @@ def main() -> int:
                 results.append(_agent_refusal_step(client, base, auth))
                 results.append(_signature_step(client, base, auth))
                 results.extend(_static_fixture_steps(client, base, auth))
-                results.extend(_fresh_batch_steps(client, base, auth))
-                results.append(_agent_grounded_step(client, base, auth))
+                batch_results = _fresh_batch_steps(client, base, auth)
+                results.extend(batch_results)
+                # A grounded-answer PASS is only meaningful over a fully-landed batch:
+                # when any fresh-batch step failed, skip the (slow) ask outright so the
+                # smoke's root cause stays visible and a partial record can never be
+                # what a "completed" answer was graded against.
+                if all(batch_results):
+                    results.append(_agent_grounded_step(client, base, auth))
+                else:
+                    results.append(
+                        _step(
+                            "agent grounded answer (fresh batch)",
+                            False,
+                            "SKIPPED — fresh-batch steps failed; nothing to ground",
+                        )
+                    )
         finally:
             if proc is not None:
                 proc.terminate()
