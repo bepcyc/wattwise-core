@@ -613,6 +613,7 @@ _EVAL_BUDGET_KEYS: tuple[str, ...] = (
     "agent__eval__median_cost_usd",
     "agent__eval__p95_latency_ms",
     "agent__eval__cost_per_1k_tokens_usd",
+    "agent__eval__max_infra_error_rate",
 )
 
 
