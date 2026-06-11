@@ -100,12 +100,16 @@ async def re_resolve_source_records(
     Returns the number of canonical records re-resolved.
     """
     rows = (
-        await session.execute(
-            select(SourceCandidate).where(
-                SourceCandidate.source_descriptor_id == source_descriptor_id
+        (
+            await session.execute(
+                select(SourceCandidate).where(
+                    SourceCandidate.source_descriptor_id == source_descriptor_id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     count = 0
     seen_acts: set[uuid.UUID] = set()
     seen_days: set[tuple[uuid.UUID, _dt.date]] = set()
@@ -121,9 +125,7 @@ async def re_resolve_source_records(
             day = (row.athlete_id, local_date)
             if day not in seen_days:
                 seen_days.add(day)
-                await re_resolve_wellness(
-                    session, row.athlete_id, local_date, resolver=resolver
-                )
+                await re_resolve_wellness(session, row.athlete_id, local_date, resolver=resolver)
                 count += 1
     return count
 
@@ -143,9 +145,7 @@ async def deactivate_source(
     (DM-SUB-R4) and an emptied channel as a typed gap — never a fabricated value.
     """
     await _set_active(session, source_descriptor_id, active=False)
-    return await re_resolve_source_records(
-        session, source_descriptor_id, resolver=resolver
-    )
+    return await re_resolve_source_records(session, source_descriptor_id, resolver=resolver)
 
 
 async def reactivate_source(
@@ -160,9 +160,7 @@ async def reactivate_source(
     member that wins again clears the ``substitution`` marker automatically.
     """
     await _set_active(session, source_descriptor_id, active=True)
-    return await re_resolve_source_records(
-        session, source_descriptor_id, resolver=resolver
-    )
+    return await re_resolve_source_records(session, source_descriptor_id, resolver=resolver)
 
 
 async def _set_active(
@@ -278,23 +276,23 @@ async def _resolve_after_wellness_deletion(
 async def _delete_activity_record(session: AsyncSession, activity_id: uuid.UUID) -> None:
     """Remove ONE canonical activity + its dependents (last contributor deleted, UPS-R5)."""
     set_ids = (
-        await session.execute(
-            select(ActivityStreamSet.stream_set_id).where(
-                ActivityStreamSet.activity_id == activity_id
+        (
+            await session.execute(
+                select(ActivityStreamSet.stream_set_id).where(
+                    ActivityStreamSet.activity_id == activity_id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if set_ids:
-        await session.execute(
-            delete(StreamChannel).where(StreamChannel.stream_set_id.in_(set_ids))
-        )
+        await session.execute(delete(StreamChannel).where(StreamChannel.stream_set_id.in_(set_ids)))
         await session.execute(
             delete(ActivityStreamSet).where(ActivityStreamSet.activity_id == activity_id)
         )
     await session.execute(delete(ActivityLap).where(ActivityLap.activity_id == activity_id))
-    await session.execute(
-        delete(ActivityFile).where(ActivityFile.activity_id == activity_id)
-    )
+    await session.execute(delete(ActivityFile).where(ActivityFile.activity_id == activity_id))
     await session.execute(delete(Activity).where(Activity.activity_id == activity_id))
     await session.flush()
 

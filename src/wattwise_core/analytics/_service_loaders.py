@@ -252,6 +252,27 @@ async def _load_earliest_activity_date(session: AsyncSession, athlete_id: str) -
     return _activity_local_date(first, await _load_athlete_or_fail(session, athlete_id))
 
 
+async def _load_latest_activity_date(session: AsyncSession, athlete_id: str) -> _dt.date | None:
+    """The athlete-LOCAL date of the most recent activity, or ``None`` if none (freshness anchor).
+
+    The mirror of :func:`_load_earliest_activity_date`: the latest activity by UTC ``start_time``
+    is the latest local instant, projected to its athlete-LOCAL calendar day (GBO-R35). This is the
+    record-freshness anchor the readiness sufficiency check measures staleness against — the most
+    recent day real data was OBSERVED, distinct from the latest PMC grid day (which is filled to
+    today even across an unobserved gap, PMC-R6).
+    """
+    stmt = (
+        select(Activity)
+        .where(Activity.athlete_id == _uid(athlete_id))
+        .order_by(Activity.start_time.desc())
+        .limit(1)
+    )
+    last = (await session.execute(stmt)).scalar_one_or_none()
+    if last is None:
+        return None
+    return _activity_local_date(last, await _load_athlete_or_fail(session, athlete_id))
+
+
 def _fold_curve_point(
     best: dict[int, MetricResult[_mmp.MMPWindow]],
     power: Stream,
@@ -397,6 +418,7 @@ __all__ = [
     "_load_athlete_sex",
     "_load_earliest_activity_date",
     "_load_effective_signature",
+    "_load_latest_activity_date",
     "_load_threshold_history",
     "_load_wellness_hrv_baseline",
     "_load_wellness_hrv_summary",

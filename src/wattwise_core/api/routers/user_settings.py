@@ -218,9 +218,7 @@ async def get_zones(session: Session, athlete_id: AthleteId) -> ZonesSettings:
 @router.put(
     "/zones", response_model=ZonesSettings, operation_id="putUserZones", dependencies=[_Write]
 )
-async def put_zones(
-    body: ZonesSettings, session: Session, athlete_id: AthleteId
-) -> ZonesSettings:
+async def put_zones(body: ZonesSettings, session: Session, athlete_id: AthleteId) -> ZonesSettings:
     """Write the owner's zone definitions as a today-effective :class:`TrainingZoneSet`.
 
     Backs a real canonical entity (API-R32): a new effective interval for ``(athlete_id,
@@ -240,8 +238,11 @@ async def put_zones(
         await _close_open_zone_intervals(session, athlete_id, body.kind, today)
         session.add(
             TrainingZoneSet(
-                athlete_id=_uid(athlete_id), zone_kind=body.kind, effective_date=today,
-                basis=body.basis, boundaries=boundaries,
+                athlete_id=_uid(athlete_id),
+                zone_kind=body.kind,
+                effective_date=today,
+                basis=body.basis,
+                boundaries=boundaries,
             )
         )
     else:
@@ -273,9 +274,7 @@ async def _close_open_zone_intervals(
         row.effective_to = boundary
 
 
-async def _latest_zone_set(
-    session: AsyncSession, athlete_id: str
-) -> TrainingZoneSet | None:
+async def _latest_zone_set(session: AsyncSession, athlete_id: str) -> TrainingZoneSet | None:
     """The most-recent effective zone set for the owner (any kind), or ``None``."""
     stmt = (
         select(TrainingZoneSet)
@@ -312,9 +311,15 @@ def _boundaries_out(raw: list[dict[str, object]]) -> list[ZoneBoundary]:
     dependencies=[_Read],
 )
 async def get_language(session: Session, athlete_id: AthleteId) -> LanguageSettings:
-    """Read the owner's persisted language; defaults to ``en`` when unset (API-R37)."""
+    """Read the owner's persisted language SUBTAG; defaults to ``en`` when unset (API-R37).
+
+    The preference is the language subtag of the canonical ``athlete.primary_locale``
+    (its single home): a stored ``de-DE`` reads as ``de``. An unset (NULL) or
+    out-of-supported-set locale reads as the engine baseline ``en``.
+    """
     owner = await _load_owner(session, athlete_id)
-    lang = owner.primary_locale if owner.primary_locale in ("en", "de", "ru") else "en"
+    subtag = (owner.primary_locale or "").split("-", 1)[0].lower()
+    lang = subtag if subtag in ("en", "de", "ru") else "en"
     return LanguageSettings(language=lang)
 
 
@@ -327,9 +332,16 @@ async def get_language(session: Session, athlete_id: AthleteId) -> LanguageSetti
 async def put_language(
     body: LanguageSettings, session: Session, athlete_id: AthleteId
 ) -> LanguageSettings:
-    """Persist the owner's language preference on the profile (API-R37/API-R32)."""
+    """Persist the owner's language preference on the profile (API-R37/API-R32).
+
+    Writing the ``language`` setting sets the LANGUAGE SUBTAG of the canonical
+    ``athlete.primary_locale`` while PRESERVING any region the athlete set (API-R37:
+    ``de`` over a stored ``en-US`` yields ``de-US``, never a destructive overwrite).
+    """
     owner = await _load_owner(session, athlete_id)
-    owner.primary_locale = body.language
+    current = owner.primary_locale or ""
+    region = current.split("-", 1)[1] if "-" in current else None
+    owner.primary_locale = f"{body.language}-{region}" if region else body.language
     await session.flush()
     return LanguageSettings(language=body.language)
 
@@ -343,9 +355,7 @@ async def put_language(
     operation_id="getUserResponseLength",
     dependencies=[_Read],
 )
-async def get_response_length(
-    store: LengthStore, athlete_id: AthleteId
-) -> ResponseLengthSettings:
+async def get_response_length(store: LengthStore, athlete_id: AthleteId) -> ResponseLengthSettings:
     """Read the owner's persisted answer-length; defaults to ``standard`` (API-R11f).
 
     Reads the AGENT-STATE preference (doc 50 VOICE-R8 §382 — an agent-interaction preference, NOT a
@@ -377,9 +387,7 @@ async def put_response_length(
     PUT is not an orphan write (API-R32). An unsupported value is rejected ``422`` by the typed
     ``ResponseLength`` enum (ERR-R6). The HTTP contract is unchanged — only the backing store moved.
     """
-    await store.set_response_length_preference(
-        athlete_id=athlete_id, value=body.response_length
-    )
+    await store.set_response_length_preference(athlete_id=athlete_id, value=body.response_length)
     return ResponseLengthSettings(response_length=body.response_length)
 
 
@@ -438,3 +446,9 @@ __all__ = [
     "response_length_store",
     "router",
 ]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_read_scope.required_scopes = ("read",)  # type: ignore[attr-defined]
+
+#: OpenAPI security metadata (DOC-R3): the scopes this seam gate requires.
+require_write_scope.required_scopes = ("write",)  # type: ignore[attr-defined]

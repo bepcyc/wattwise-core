@@ -38,6 +38,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import AgentAnswer, Citation, Plan, Readiness
+from wattwise_core.api.routers.agent_caveat_schemas import (
+    CoverageCaveatOut,
+    PlanBodyOut,
+)
 from wattwise_core.api.sanitize import sanitize_html
 
 #: The athlete's HITL verdict on a paused approval-gated PLAN (API-R12a / CKPT-R9).
@@ -120,10 +124,10 @@ class SuggestedFollowupOut(BaseModel):
 
 
 class DegradedOut(BaseModel):
-    """The ``degraded`` member payload: human caveat + typed coverage caveat (API-R11a)."""
+    """The ``degraded`` member payload: human caveat + TYPED coverage caveat (API-R11a)."""
 
     reason_text: str
-    coverage_caveat: dict[str, Any] | None = None
+    coverage_caveat: CoverageCaveatOut | None = None
 
 
 class AgentAskResponse(BaseModel):
@@ -151,6 +155,7 @@ class AgentAskResponse(BaseModel):
     suggested_followups: list[SuggestedFollowupOut] = Field(default_factory=list)
     degraded: DegradedOut | None = None
     interrupt_id: str | None = None
+    plan: PlanBodyOut | None = None
     plan_html: str | None = None
     plan_text: str | None = None
 
@@ -297,7 +302,11 @@ def _degraded_out(answer: AgentAnswer, locale: str) -> DegradedOut | None:
     """
     if answer.status is not RunStatus.DEGRADED:
         return None
-    caveat = dict(answer.coverage_caveat) if answer.coverage_caveat is not None else None
+    caveat = (
+        CoverageCaveatOut.model_validate(dict(answer.coverage_caveat))
+        if answer.coverage_caveat is not None
+        else None
+    )
     reason = DEGRADED_REASON_BY_LOCALE.get(locale, DEGRADED_REASON_BY_LOCALE["en"])
     return DegradedOut(reason_text=reason, coverage_caveat=caveat)
 
@@ -345,14 +354,13 @@ def render_plan_awaiting(plan: Plan, trace_id: str) -> AgentAskResponse:
         grounding=GroundingOut(grounded=True, citations=citations_out(plan.citations)),
         suggested_followups=_expand_chips(plan.suggested_followups),
         interrupt_id=plan.interrupt_id,
+        plan=PlanBodyOut(plan_html=safe_html, plan_text=plan.plan_text),
         plan_html=safe_html,
         plan_text=plan.plan_text,
     )
 
 
-def render_decision(
-    plan: Plan, decision: DecisionKind, trace_id: str
-) -> AgentDecisionResponse:
+def render_decision(plan: Plan, decision: DecisionKind, trace_id: str) -> AgentDecisionResponse:
     """Render the resumed, now-terminal PLAN into the decision response (API-R12a / CKPT-R9).
 
     ``plan_html`` is sanitized HERE (API-R13). A resumed plan is grounded (degraded only when a
@@ -413,14 +421,15 @@ def render_readiness(readiness: Readiness, trace_id: str) -> ReadinessResponse:
 from wattwise_core.api.routers.agent_breadth_schemas import (  # noqa: E402
     AgentDiagnosisResponse,
     DeliveryChannelOut,
+    DiagnosisCheckOut,
     DigestBody,
     DigestCadenceOut,
+    DigestList,
+    DigestPage,
     DigestStatusOut,
     DigestSubscribeRequest,
     DigestSubscriptionList,
     DigestSubscriptionOut,
-    InputCoverageOut,
-    MemoryEraseAck,
     MemoryItemList,
     MemoryItemOut,
     WeekdayOut,
@@ -437,11 +446,15 @@ __all__ = [
     "AgentDecisionResponse",
     "AgentDiagnosisResponse",
     "CitationOut",
+    "CoverageCaveatOut",
     "DecisionKind",
     "DegradedOut",
     "DeliveryChannelOut",
+    "DiagnosisCheckOut",
     "DigestBody",
     "DigestCadenceOut",
+    "DigestList",
+    "DigestPage",
     "DigestStatusOut",
     "DigestSubscribeRequest",
     "DigestSubscriptionList",
@@ -449,11 +462,10 @@ __all__ = [
     "FollowUp",
     "FollowUpKind",
     "GroundingOut",
-    "InputCoverageOut",
-    "MemoryEraseAck",
     "MemoryItemList",
     "MemoryItemOut",
     "ObservationOut",
+    "PlanBodyOut",
     "ReadinessResponse",
     "ReadinessVerdictOut",
     "ResponseLength",

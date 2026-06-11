@@ -69,9 +69,7 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
         await engine.dispose()
 
 
-async def _seed_thread(
-    session: AsyncSession, thread_id: str, *, created_at: _dt.datetime
-) -> None:
+async def _seed_thread(session: AsyncSession, thread_id: str, *, created_at: _dt.datetime) -> None:
     """Seed a thread + checkpoint + write + interrupt + memory item, all at ``created_at``."""
     session.add(
         AgentThread(

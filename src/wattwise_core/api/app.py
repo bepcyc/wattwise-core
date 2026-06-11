@@ -26,29 +26,27 @@ Requirements realized here (doc 60 / doc 70):
 
 from __future__ import annotations
 
-import hmac
+import uuid
 from collections.abc import Callable
 from importlib import import_module
 from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.agent.engine import UnconfiguredAgentEngine, build_agent_engine
 from wattwise_core.agent.state_db import build_agent_state_database
 from wattwise_core.analytics.service import AnalyticsService
-from wattwise_core.api.auth import (
-    Principal,
-    Scope,
-    authenticate,
-    issue_access_token,
-    require_scopes,
-)
+from wattwise_core.api.auth import Principal, Scope, authenticate, require_scopes
 from wattwise_core.api.deps import AppSettings, get_db, get_master_data_db, get_rate_limiter
 from wattwise_core.api.errors import ProblemError, install_error_handlers
-from wattwise_core.api.middleware import EndpointMetricsMiddleware, JSONBodySizeLimitMiddleware
+from wattwise_core.api.lifecycle import build_lifespan
+from wattwise_core.api.middleware import (
+    EndpointMetricsMiddleware,
+    JSONBodySizeLimitMiddleware,
+    RequestContextMiddleware,
+)
 from wattwise_core.api.openapi import install_openapi
 from wattwise_core.api.ratelimit import LimitClass, RateLimiter
 from wattwise_core.api.routers import activities as activities_router
@@ -77,9 +75,7 @@ from wattwise_core.identity import OWNER_SUBJECT
 from wattwise_core.observability.logging import configure_logging
 from wattwise_core.observability.metrics import get_registry
 from wattwise_core.persistence import Database
-
-#: The WWW-Authenticate challenge returned with an invalid sign-in (AUTH-R1/API-R23).
-_BEARER_CHALLENGE: Final = {"WWW-Authenticate": "Bearer"}
+from wattwise_core.persistence.models import Athlete
 
 #: The single major-version prefix every resource path is mounted under (API-R4).
 API_PREFIX: Final = "/v1"
@@ -87,16 +83,6 @@ API_PREFIX: Final = "/v1"
 #: Public OpenAPI + human-docs locations (DOC-R1); both are unauthenticated.
 _OPENAPI_PATH: Final = f"{API_PREFIX}/openapi.json"
 _DOCS_PATH: Final = f"{API_PREFIX}/docs"
-
-#: Scopes the OSS first-party token grants the single owner (every in-OSS capability).
-_OWNER_SCOPES: Final = (
-    Scope.READ,
-    Scope.WRITE,
-    Scope.AGENT,
-    Scope.SYNC,
-    Scope.EXPORT,
-    Scope.ADMIN,
-)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -117,6 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=_OPENAPI_PATH,
         docs_url=_DOCS_PATH,
         redoc_url=None,
+        lifespan=build_lifespan(),  # RUN-R11: drain-marked shutdown + clean pool close
     )
     app.state.settings = resolved
     app.state.database = Database(resolved)
@@ -132,6 +119,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.master_data_database = app.state.database
     app.state.rate_limiter = _build_rate_limiter(resolved)
+    # The dedicated agent-state store for OPERATIONAL API state (amended ARCH-R13):
+    # refresh-token families + link challenges (API-R23), export jobs + signed-URL
+    # nonces (API-R34), and import-job rows (API-R33) — its OWN engine/pool, never the
+    # canonical Database. Schema is ensured lazily on first use (a no-op when migrated).
+    app.state.agent_state_db = build_agent_state_database(resolved)
+    app.state.agent_state_schema_ready = False
     # Resolve + VALIDATE the OSS default entitlement plan at boot (ENT-4 / AGT-ENT-R4): an
     # invalid/missing plan fails the boot CLOSED here (RUN-R4.1) — the engine never starts
     # under a silently-permissive or unvalidated plan. The resolver + the validated plan are
@@ -144,6 +137,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     install_security_middleware(app, resolved)
     app.add_middleware(JSONBodySizeLimitMiddleware)
+    # LOG-R3: bind/clear the per-request correlation context (request_id) around every
+    # request so each log line emitted while serving it carries the correlation ids.
+    app.add_middleware(RequestContextMiddleware)
     # Added LAST so it is the OUTERMOST middleware: it times the WHOLE request (including a
     # body-size rejection or a security-middleware short-circuit) and reads the matched route the
     # router binds into the shared scope, recording the OBS-R5 per-endpoint request/latency/error
@@ -154,7 +150,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _mount_metrics(app)
     mount_readiness(app)
     app.include_router(_public_router())
-    app.include_router(_auth_router())
     register_routers(app)
     _wire_router_seams(app)
     install_openapi(app)
@@ -227,6 +222,11 @@ def _wire_router_seams(app: FastAPI) -> None:
     # (AGT-ENT-R3). Under the OSS all-permissive plan it permits; a commercial plan that ungrants
     # the feature is enforced here without touching the agent router (resolve -> attach -> check).
     overrides[agent_router.require_agent_scope] = agent_feature_gate
+    # The persisted language default (API-R37): the agent + planning surfaces resolve the
+    # response language body -> Accept-Language -> the stored ``athlete.primary_locale``
+    # subtag -> ``en``; this binds the seam to the canonical store reader (one override —
+    # planning re-uses the same seam object).
+    overrides[agent_router.persisted_locale] = _persisted_locale_seam
     overrides[agent_router.current_athlete_id] = _athlete_id_seam
     overrides[agent_router.rate_limiter] = get_rate_limiter
     engine = _build_engine(app)
@@ -242,6 +242,9 @@ def _wire_router_seams(app: FastAPI) -> None:
     # the shared transactional session so digest persistence + the email-verified gate are live
     # (H1: an unwired ``current_session`` fails closed and 500s the digest CRUD).
     overrides[agent_breadth_router.current_session] = get_db
+    # The weekly-review history list pages behind the SAME engine-keyed signed cursor every
+    # other collection uses (PAGE-R5); bind the breadth router's cursor-key seam to it.
+    overrides[agent_breadth_router.cursor_signing_key] = _cursor_signing_key_seam
     # The owner account-deletion endpoint invokes the REAL whole-athlete erasure EXECUTOR via the
     # recorder bound here (PRIV-1 / PRIV-R8): DELETE /v1/users/me erases every athlete-scoped row
     # across BOTH stores (canonical + agent-state) + the retained original-file object bytes, mints
@@ -257,9 +260,7 @@ def _wire_router_seams(app: FastAPI) -> None:
         overrides[connections_router.credential_sink] = lambda: sink
 
 
-def _wire_planning(
-    overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object
-) -> None:
+def _wire_planning(overrides: dict[Callable[..., Any], Callable[..., Any]], engine: object) -> None:
     """Bind the planning router's seams to the real gates + the shared agent engine (API-R32).
 
     The planning surface mirrors the agent/performance routers: GENERATION (``POST
@@ -316,6 +317,28 @@ def _build_rate_limiter(settings: Settings) -> RateLimiter:
         LimitClass.AGENT: settings.entitlement__request_rate_per_minute,
     }
     return RateLimiter(limits)
+
+
+async def _persisted_locale_seam(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    principal: Annotated[Principal, Depends(authenticate)],
+) -> str | None:
+    """The owner's persisted language SUBTAG from ``athlete.primary_locale`` (API-R37).
+
+    ``primary_locale`` is the single canonical home of the language preference; reading
+    returns its language subtag (``de-DE`` -> ``de``) so the agent/planning resolvers can
+    apply the stored default when no per-request override is given. ``None`` (unset)
+    falls through to the engine ``en`` baseline — NULL means the athlete has made no
+    explicit choice yet.
+    """
+    try:
+        owner_id = uuid.UUID(principal.athlete_id)
+    except (ValueError, AttributeError):
+        return None  # a non-UUID subject has no canonical profile row to read
+    owner = await session.get(Athlete, owner_id)
+    if owner is None or not owner.primary_locale:
+        return None
+    return owner.primary_locale.split("-", 1)[0].lower()
 
 
 def _athlete_id_seam(principal: Annotated[Principal, Depends(authenticate)]) -> str:
@@ -388,56 +411,6 @@ def _public_router() -> APIRouter:
     async def system_status() -> dict[str, str]:
         """Public service-status summary — no per-user data, no internal detail."""
         return {"status": "ok", "service": "wattwise"}
-
-    return router
-
-
-class _TokenRequest(BaseModel):
-    """The first-party sign-in exchange body for ``POST /v1/auth/token`` (API-R23).
-
-    Carries ONLY the owner sign-in secret — the platform's first-party credential —
-    and no caller-identity field (the subject is fixed server-side, AUTH-R3).
-    ``additionalProperties:false`` (SCHEMA-R4) rejects any forged extra property.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    owner_secret: str = Field(min_length=1, max_length=512)
-
-
-def _verify_owner_secret(settings: Settings, presented: str) -> None:
-    """Constant-time-verify the first-party owner secret, else ``401`` (API-R23).
-
-    OSS is single-owner: the first-party credential is the configured
-    ``token_signing_key`` secret (the operator's boot secret). A mismatch — or an
-    absent configured secret — yields ``401 unauthenticated`` with NO unknown-user /
-    wrong-secret distinction and no credential echo (API-R23 / AUTH-R9). Only a verified
-    secret proceeds to mint a token (no fail-open issuance).
-    """
-    configured = settings.token_signing_key
-    if configured is None or not hmac.compare_digest(
-        presented.encode(), configured.get_secret_value().encode()
-    ):
-        raise ProblemError("unauthenticated", headers=_BEARER_CHALLENGE)
-
-
-def _auth_router() -> APIRouter:
-    """Build the public token-issuance router (``POST /v1/auth/token``, API-R23).
-
-    OSS is single-owner: a successful sign-in exchange (a valid first-party credential)
-    mints an access token scoped to the one owner with every in-OSS capability (the
-    commercial layer narrows scopes per plan). The endpoint is public (pre-token,
-    AUTH-R10) but NOT fail-open: an invalid/absent credential is rejected ``401``;
-    refresh/revoke and the bot-link flow are mounted by the auth feature router.
-    """
-    router = APIRouter(prefix=f"{API_PREFIX}/auth", tags=["auth"])
-
-    @router.post("/token", operation_id="issueToken")
-    async def issue_token(body: _TokenRequest, settings: AppSettings) -> dict[str, object]:
-        """Exchange the first-party owner credential for an access token (API-R23/R24)."""
-        _verify_owner_secret(settings, body.owner_secret)
-        tokens = issue_access_token(settings, subject=OWNER_SUBJECT, scopes=_OWNER_SCOPES)
-        return tokens.to_dict()
 
     return router
 

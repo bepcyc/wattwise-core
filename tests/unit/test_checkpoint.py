@@ -23,7 +23,10 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata, empty_checkpoint
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-import wattwise_core.agent.memory  # noqa: F401  (registers agent_memory_item on AgentStateBase)
+import wattwise_core.agent.auth_state
+import wattwise_core.agent.digest_history
+import wattwise_core.agent.memory
+import wattwise_core.agent.ops_jobs  # noqa: F401  (registers the import/export job tables)
 from wattwise_core.agent.checkpoint import (
     CheckpointIdentityError,
     CheckpointSchemaVersionError,
@@ -254,6 +257,11 @@ def test_agent_state_tables_not_in_canonical_metadata() -> None:
         "agent_write",
         "agent_memory_item",
         "agent_interrupt",
+        "agent_digest_record",
+        "agent_auth_refresh_token",
+        "agent_auth_link_challenge",
+        "agent_import_job",
+        "agent_export_job",
     }
     assert canonical.isdisjoint(agent_state)
     assert not any(name.startswith("agent_") for name in canonical)

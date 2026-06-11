@@ -32,7 +32,6 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from sqlalchemy import Table, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from wattwise_core.agent import checkpoint_interrupts as ledger
@@ -47,7 +46,7 @@ from wattwise_core.agent.state_store import (
     AgentWrite,
 )
 from wattwise_core.persistence.types import uuid7
-from wattwise_core.persistence.upsert import upsert
+from wattwise_core.persistence.upsert import ensure_row, upsert
 
 # Engine-side checkpoint schema version (CKPT-R7). Bump ONLY on a breaking change to the
 # persisted state shape; a stored checkpoint with a different version fails closed on
@@ -141,34 +140,43 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
 
         Concurrency-safe (CKPT-R1): a single graph run makes the langgraph runtime call
         ``aput``/``aput_writes`` on SEPARATE sessions/connections that race to create the
-        thread — both ``SELECT`` miss, both ``INSERT``, the loser hits the
-        ``(athlete_id, conversation_id)`` unique constraint. The loser must NOT re-resolve in
-        its own rolled-back transaction (the winner's row is not yet visible, so the re-select
-        still misses and the run dies on the benign race). Instead, on ``IntegrityError`` we
-        roll the poisoned transaction back and re-resolve through a FRESH session (a new
-        connection that can SEE the committed row), still via ``_resolve_thread`` so a
-        cross-identity row is REFUSED, never returned (CKPT-R3). The caller only needs the row
-        to EXIST (it discards the return value), so returning a detached probe object is fine.
+        thread. The create therefore goes through the sanctioned atomic upsert seam's
+        :func:`~wattwise_core.persistence.upsert.ensure_row` (UPS-R2) keyed on
+        ``thread_id``: ONE atomic insert-or-ignore in its own short transaction, so both
+        racers succeed — never a plain ``INSERT`` whose loser raises (PostgreSQL/SQLite
+        unique violation; MariaDB under ``innodb_snapshot_isolation`` surfaces the race
+        as error 1020, which is NOT an ``IntegrityError``, so a catch-and-retry seam
+        cannot be the mechanism — the seam removes the failure at the root instead).
+        After the ensure the row is resolved via ``_resolve_thread`` so a
+        cross-identity row is REFUSED, never adopted (CKPT-R3); the caller only needs
+        the row to EXIST (it discards the return value).
+
+        Ordering matters: the ensure runs FIRST, before this method touches ``session``
+        (every caller invokes it as the session's first statement). Resolving first and
+        ensuring on a miss would hold the caller's pooled connection while waiting for
+        the ensure's second one — under N concurrent first-touches that exhausts a
+        bounded pool (every holder waits on an empty pool: deadlock-by-timeout). With
+        ensure-first each task holds at most one connection at a time, and the caller's
+        snapshot is created after the ensure commit, so the re-resolve sees the row.
         """
-        thread = await self._resolve_thread(session, thread_id)
-        if thread is not None:
-            return thread
-        thread = AgentThread(
-            thread_id=thread_id,
-            athlete_id=self._athlete_id,
-            conversation_id=self._conversation_id,
+        # Atomic insert-or-ignore on the thread natural key (UPS-R2): concurrent
+        # ensures are resolved by the DATABASE in one statement, not by exceptions.
+        await ensure_row(
+            self._sessions,
+            cast(Table, AgentThread.__table__),
+            {
+                "thread_id": thread_id,
+                "athlete_id": self._athlete_id,
+                "conversation_id": self._conversation_id,
+            },
+            conflict_keys=["thread_id"],
         )
-        session.add(thread)
-        try:
-            await session.flush()
-        except IntegrityError:
-            await session.rollback()
-            async with self._sessions() as probe:
-                existing = await self._resolve_thread(probe, thread_id)
-            if existing is None:  # the conflict was not the benign concurrent-create race
-                raise
-            return existing
-        return thread
+        existing = await self._resolve_thread(session, thread_id)
+        if existing is None:  # fail closed: the row must exist after an atomic upsert
+            raise CheckpointError(
+                "agent_thread row absent after atomic ensure-thread upsert; refusing to proceed"
+            )
+        return existing
 
     def _check_schema_version(self, row: AgentCheckpoint) -> None:
         """Fail closed if a stored checkpoint is from an incompatible schema (CKPT-R7)."""

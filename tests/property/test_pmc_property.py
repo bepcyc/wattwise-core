@@ -182,14 +182,8 @@ def test_t5_dict_materializes_every_calendar_day(span: int, present: set[int]) -
     out = pmc(loads)
     # Span is from the min present key to the max present key (inclusive).
     assert len(out) == (hi - lo) + 1
-    dates = [
-        r.provenance.reference_params["local_date"]
-        for r in out
-        if isinstance(r, Computed)
-    ]
-    expected = [
-        (origin + _dt.timedelta(days=lo + i)).isoformat() for i in range((hi - lo) + 1)
-    ]
+    dates = [r.provenance.reference_params["local_date"] for r in out if isinstance(r, Computed)]
+    expected = [(origin + _dt.timedelta(days=lo + i)).isoformat() for i in range((hi - lo) + 1)]
     assert dates == expected
 
 
@@ -229,9 +223,7 @@ def test_t6_rest_and_provisional_decay_identically_but_flagged(
 
 
 @given(loads=_loads, tau_ctl=_tau_ctl, tau_atl=_tau_atl)
-def test_determinism_bit_stable(
-    loads: list[float | None], tau_ctl: float, tau_atl: float
-) -> None:
+def test_determinism_bit_stable(loads: list[float | None], tau_ctl: float, tau_atl: float) -> None:
     a = pmc(loads, tau_ctl=tau_ctl, tau_atl=tau_atl)
     b = pmc(loads, tau_ctl=tau_ctl, tau_atl=tau_atl)
     for ra, rb in zip(a, b, strict=True):

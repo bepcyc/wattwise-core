@@ -35,33 +35,46 @@ def validate_request(body: AgentAskRequest) -> None:
 SUPPORTED_LOCALES: Final[frozenset[str]] = frozenset({"en", "de", "ru"})
 
 
-def header_locale(accept_language: str | None) -> str:
-    """The first supported ``Accept-Language`` tag (en/de/ru), else the default ``en``.
+def scan_header_locale(accept_language: str | None) -> str | None:
+    """The first SUPPORTED ``Accept-Language`` tag (en/de/ru), else ``None`` (API-R37).
 
-    The single header-scan both locale resolvers share (API-R37): it reads the first
-    supported two-letter language tag from the comma-separated header, ignoring quality
-    weights, and falls back to ``en`` (the commercial layer inserts the persisted
-    per-athlete language between the header and this default).
+    The single header-scan the locale resolvers share: it reads the first supported
+    two-letter language tag from the comma-separated header, ignoring quality weights.
+    Returning ``None`` (not ``en``) lets the caller fall through to the PERSISTED
+    setting before the engine ``en`` baseline (the API-R37 precedence chain).
     """
     if accept_language:
         for part in accept_language.split(","):
             tag = part.split(";", 1)[0].strip().lower()[:2]
             if tag in SUPPORTED_LOCALES:
                 return tag
-    return "en"
+    return None
 
 
-def resolve_locale(body: AgentAskRequest, accept_language: str | None) -> str:
-    """Resolve the response language: body ``language`` -> Accept-Language -> ``en`` (API-R37).
+def header_locale(accept_language: str | None) -> str:
+    """The first supported ``Accept-Language`` tag (en/de/ru), else the default ``en``."""
+    return scan_header_locale(accept_language) or "en"
 
-    The body ``language`` field takes precedence over the ``Accept-Language`` header when
-    both are present; otherwise the first supported language tag in the header is used,
-    falling back to the default ``en``. (OSS has no persisted per-athlete language
-    setting; the commercial layer inserts it between the header and the default.)
+
+def resolve_locale(
+    body: AgentAskRequest, accept_language: str | None, persisted: str | None = None
+) -> str:
+    """Resolve the response language per the API-R37 precedence chain.
+
+    ``body.language`` (the per-call override) -> ``Accept-Language`` -> the PERSISTED
+    setting (the language subtag of ``athlete.primary_locale``, loaded server-side and
+    passed as ``persisted``) -> the engine ``en`` baseline. The persisted default is the
+    one applied to every athlete-facing agent answer when no per-request value is given
+    (API-R37); a per-request value never mutates it.
     """
     if body.language is not None:
         return body.language
-    return header_locale(accept_language)
+    header = scan_header_locale(accept_language)
+    if header is not None:
+        return header
+    if persisted in SUPPORTED_LOCALES:
+        return persisted
+    return "en"
 
 
 def resolve_response_length(body: AgentAskRequest) -> ResponseLength | None:
@@ -81,5 +94,6 @@ __all__ = [
     "header_locale",
     "resolve_locale",
     "resolve_response_length",
+    "scan_header_locale",
     "validate_request",
 ]

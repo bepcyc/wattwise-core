@@ -115,9 +115,9 @@ def test_tz_change_over_time_uses_as_of_effective_from() -> None:
     # Instant BEFORE effective_from → NOT re-bucketed under the new tz. The persisted prior
     # projection is authoritative; the projector returns it rather than the new-tz date.
     before = _dt.datetime(2026, 6, 2, 3, 0, tzinfo=UTC)
-    assert project_local_date(
-        before, athlete, prior_local_date=_dt.date(2026, 6, 1)
-    ) == _dt.date(2026, 6, 1)
+    assert project_local_date(before, athlete, prior_local_date=_dt.date(2026, 6, 1)) == _dt.date(
+        2026, 6, 1
+    )
 
 
 def test_missing_reference_timezone_fails_closed() -> None:

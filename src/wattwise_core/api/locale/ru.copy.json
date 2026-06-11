@@ -28,5 +28,10 @@
     "kind": "error",
     "code": "unknown_source",
     "text": "Это ещё не подключено."
+  },
+  "validation.default_tier_not_allowed": {
+    "kind": "validation",
+    "code": "default_tier_not_allowed",
+    "text": "Выбери стандартный уровень из списка разрешённых уровней."
   }
 }

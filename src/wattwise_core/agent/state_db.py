@@ -38,6 +38,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
+import wattwise_core.agent.auth_state
+import wattwise_core.agent.digest_history
+
 # Importing ``memory`` here (not only ``state_store``) registers ``agent_memory_item`` on
 # ``AgentStateBase.metadata`` as an import side effect, so ``create_all`` below emits the
 # FULL agent-state schema — mirroring the checkpoint tests, which import it for the same
@@ -230,9 +233,7 @@ def build_agent_state_database(
     on a separate engine/pool. ``pool_size`` / ``max_overflow`` optionally cap the
     non-memory pool (see :func:`create_agent_state_engine`).
     """
-    return AgentStateDatabase(
-        settings, dsn=dsn, pool_size=pool_size, max_overflow=max_overflow
-    )
+    return AgentStateDatabase(settings, dsn=dsn, pool_size=pool_size, max_overflow=max_overflow)
 
 
 __all__ = [

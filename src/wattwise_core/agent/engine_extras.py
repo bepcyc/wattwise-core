@@ -22,8 +22,9 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from wattwise_core.agent.contracts import ChatModel
-from wattwise_core.agent.deliverables import Readiness, readiness_assessment
+from wattwise_core.agent.deliverables import Digest, Readiness, readiness_assessment
 from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, diagnose_coverage
+from wattwise_core.agent.digest_history import digest_history as read_digest_history
 from wattwise_core.agent.engine_memory import (
     delete_memory,
     erase_memory,
@@ -31,6 +32,7 @@ from wattwise_core.agent.engine_memory import (
     list_memory,
 )
 from wattwise_core.agent.engine_readiness import (
+    connection_sync_suspect,
     gather_readiness_inputs,
     readiness_narrator,
 )
@@ -45,7 +47,9 @@ from wattwise_core.agent.memory import (
     response_length_from_items,
 )
 from wattwise_core.agent.state_db import AgentStateDatabase
+from wattwise_core.analytics.constants import READINESS_SYNC_STALE_AFTER_DAYS
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.persistence.types import utcnow
 from wattwise_core.seams import SessionProvider
 
 # The persisted-default verbosity preference (MEM-R1, VOICE-R8 §382) lives in the AGENT-STATE store
@@ -56,9 +60,7 @@ from wattwise_core.seams import SessionProvider
 # and the ``GET /v1/user-settings/response-length`` endpoint resolve verbosity identically.
 
 
-async def _read_stored_response_length(
-    state_db: AgentStateDatabase, *, athlete_id: str
-) -> str:
+async def _read_stored_response_length(state_db: AgentStateDatabase, *, athlete_id: str) -> str:
     """The persisted agent-state verbosity default, else ``standard`` (the ONE store read).
 
     The single agent-state read shared by the run-path default
@@ -136,13 +138,22 @@ class DeliverableEngineMixin:
         """
         async with self._sessions.session(subject=athlete_id) as session:
             svc = AnalyticsService(session)
-            form, as_of, rmssd, baseline = await gather_readiness_inputs(svc, athlete_id)
+            # The MNAR disambiguator (issue #12): read whether a connector that should be
+            # delivering is broken/stalled, so the freshness gate fires on missing data, not rest.
+            sync_suspect = await connection_sync_suspect(
+                session,
+                athlete_id,
+                reference_date=utcnow().date(),
+                sync_stale_after_days=READINESS_SYNC_STALE_AFTER_DAYS,
+            )
+            inputs = await gather_readiness_inputs(svc, athlete_id, sync_suspect=sync_suspect)
             return await readiness_assessment(
                 athlete_id,
-                form=form,
-                as_of=as_of,
-                hrv_rmssd=rmssd,
-                hrv_baseline=baseline,
+                form=inputs.form,
+                as_of=inputs.as_of,
+                hrv_rmssd=inputs.hrv_rmssd,
+                hrv_baseline=inputs.hrv_baseline,
+                sufficiency=inputs.sufficiency,
                 narrate=readiness_narrator(self._model, system=self._coach.readiness_system),
                 grounder=self._coach.grounder(self._model, svc),
                 response_length=response_length,  # type: ignore[arg-type]
@@ -174,9 +185,7 @@ class DeliverableEngineMixin:
         async with state_db.session() as session:
             return await get_memory(session, athlete_id=athlete_id, memory_item_id=memory_item_id)
 
-    async def delete_memory(
-        self: _EngineSeams, *, athlete_id: str, memory_item_id: str
-    ) -> bool:
+    async def delete_memory(self: _EngineSeams, *, athlete_id: str, memory_item_id: str) -> bool:
         """Delete ONE memory row by id, scoped to the owner; True iff erased (MEM-R3 erasure).
 
         Privacy MUST (PRIV-R8 / CKPT-R8): the guarded delete matches BOTH the id AND the
@@ -225,9 +234,7 @@ class DeliverableEngineMixin:
             if not item.content.startswith(RESPONSE_LENGTH_PREF_PREFIX)
         ]
 
-    async def record_run_episode(
-        self: _EngineSeams, *, athlete_id: str, content: str
-    ) -> None:
+    async def record_run_episode(self: _EngineSeams, *, athlete_id: str, content: str) -> None:
         """Record a completed coaching turn as a durable episode (MEM-R4 write-episode).
 
         The run-path WRITE half of the SAME seam: after a COMPLETED run the engine preserves the
@@ -272,9 +279,7 @@ class DeliverableEngineMixin:
         state_db = await self._agent_state_db()
         return await _read_stored_response_length(state_db, athlete_id=athlete_id)
 
-    async def get_response_length_preference(
-        self: _EngineSeams, *, athlete_id: str
-    ) -> str:
+    async def get_response_length_preference(self: _EngineSeams, *, athlete_id: str) -> str:
         """Read the athlete's PERSISTED verbosity default, else ``standard`` (VOICE-R8 / §8.10).
 
         The READ half of the ``GET /v1/user-settings/response-length`` contract (doc 60 §8.10):
@@ -305,6 +310,20 @@ class DeliverableEngineMixin:
                 marker=RESPONSE_LENGTH_PREF_PREFIX,
                 content=f"{RESPONSE_LENGTH_PREF_PREFIX}{value}",
             )
+
+    async def digest_history(
+        self: _EngineSeams, *, athlete_id: str, limit: int = 50, before_week_end: str | None = None
+    ) -> list[Digest]:
+        """The stored weekly-review history, newest first, keyset-paged (API-R14).
+
+        Reads the agent-state store's recorded grounded reviews VERBATIM (GROUND-R7 — no
+        recomputation); ``before_week_end`` is the exclusive keyset bound the router's
+        signed cursor carries (PAGE-R5). Owner-scoped (AGT-SEC-R1).
+        """
+        state_db = await self._agent_state_db()
+        return await read_digest_history(
+            state_db, athlete_id=athlete_id, limit=limit, before_week_end=before_week_end
+        )
 
 
 __all__ = ["DeliverableEngineMixin"]

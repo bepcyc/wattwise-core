@@ -26,24 +26,38 @@ Requirement IDs: API-R33, AUTH-R3, AUTH-R11, ERR-R6, ERR-R8, LIMIT-R5, LIN-R1.1.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Final, Literal
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from pydantic import BaseModel
+from sqlalchemy import select, tuple_
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from wattwise_core.agent.ops_jobs import ImportJobRecord
 from wattwise_core.api.auth import Scope, require_scopes
-from wattwise_core.api.deps import AppSettings, CurrentPrincipal, RateLimit
+from wattwise_core.api.deps import (
+    AppSettings,
+    CurrentPrincipal,
+    RateLimit,
+    get_agent_state_session,
+)
 from wattwise_core.api.errors import FieldError, ProblemError
+from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
+from wattwise_core.api.problems import not_found
 
 router = APIRouter(prefix="/v1/imports", tags=["imports"], dependencies=[RateLimit])
+
+#: A session on the agent-state store where the job bookkeeping rows live (ARCH-R13).
+StateSession = Annotated[AsyncSession, Depends(get_agent_state_session)]
 
 
 #: The activity-file extensions the OSS importer accepts (API-R33). A double
 #: extension (``.fit.gz``) is matched as a whole suffix, not just the last segment.
-ACCEPTED_EXTENSIONS: Final[tuple[str, ...]] = (".fit", ".fit.gz", ".gpx", ".tcx", ".pwx")
+ACCEPTED_EXTENSIONS: Final[tuple[str, ...]] = (".fit", ".fit.gz", ".gpx", ".tcx")
 
 #: Read chunk size while streaming the upload to enforce the cap (LIMIT-R5).
 _CHUNK_BYTES: Final = 1 << 20  # 1 MiB
@@ -106,6 +120,21 @@ class ImportJob(BaseModel):
     status_text: str
 
 
+class ImportPage(BaseModel):
+    """The PAGE-R4 page block of the import-job list."""
+
+    limit: int
+    next_cursor: str | None = None
+    has_more: bool
+
+
+class ImportJobList(BaseModel):
+    """``GET /v1/imports``: the cursor-paginated upload-job list (API-R33, PAGE-R4)."""
+
+    data: list[ImportJob]
+    page: ImportPage
+
+
 @dataclass(frozen=True, slots=True)
 class _Upload:
     """A validated, fully-read upload: its bytes + (sanitized) original filename."""
@@ -129,6 +158,7 @@ async def create_import(
     principal: CurrentPrincipal,
     settings: AppSettings,
     processor: ProcessorDep,
+    session: StateSession,
 ) -> ImportJob:
     """Accept one activity-file upload and queue it for ingest (API-R33).
 
@@ -140,7 +170,85 @@ async def create_import(
     """
     _require_accepted_extension(file.filename)
     upload = await _read_capped(file, _max_bytes(settings))
-    return await _process(processor, principal.athlete_id, upload)
+    job = await _process(processor, principal.athlete_id, upload)
+    await _record_job(session, principal.athlete_id, job)
+    return job
+
+
+@router.get(
+    "",
+    response_model=ImportJobList,
+    operation_id="listImports",
+    dependencies=[Depends(require_scopes(Scope.READ))],
+)
+async def list_imports(
+    principal: CurrentPrincipal,
+    session: StateSession,
+    settings: AppSettings,
+    limit: Annotated[int, Query(ge=1, json_schema_extra={"maximum": 200})] = 50,
+    cursor: Annotated[str | None, Query()] = None,
+) -> ImportJobList:
+    """List the owner's upload jobs, newest first, cursor-paginated (API-R33, PAGE-R1).
+
+    Reads the operational job rows (agent-state store, ARCH-R13) scoped to the
+    server-derived athlete (AUTH-R3); ``limit`` is clamped/rejected per PAGE-R3.
+    """
+    bounded = clamp_limit(int(limit))
+    stmt = (
+        select(ImportJobRecord)
+        .where(ImportJobRecord.athlete_id == uuid.UUID(principal.athlete_id))
+        .order_by(ImportJobRecord.received_at.desc(), ImportJobRecord.import_job_id.desc())
+        .limit(bounded + 1)
+    )
+    if cursor is not None:
+        anchor, item = decode_cursor(cursor, params={}, key=_cursor_key(settings))
+        # Tuple keyset matching the (received_at DESC, import_job_id DESC) order: the
+        # id tiebreaker keeps equal-timestamp rows from being skipped (PAGE-R1/R5).
+        stmt = stmt.where(
+            tuple_(ImportJobRecord.received_at, ImportJobRecord.import_job_id) < (anchor, item)
+        )
+    rows = (await session.execute(stmt)).scalars().all()
+    has_more = len(rows) > bounded
+    page_rows = rows[:bounded]
+    nxt = None
+    if has_more and page_rows:
+        last = page_rows[-1]
+        nxt = encode_cursor(
+            last.received_at, str(last.import_job_id), params={}, key=_cursor_key(settings)
+        )
+    return ImportJobList(
+        data=[_job_of(row) for row in page_rows],
+        page=ImportPage(limit=bounded, next_cursor=nxt, has_more=has_more),
+    )
+
+
+@router.get(
+    "/{import_job_id}",
+    response_model=ImportJob,
+    operation_id="getImport",
+    dependencies=[Depends(require_scopes(Scope.READ))],
+)
+async def get_import(
+    import_job_id: str,
+    principal: CurrentPrincipal,
+    session: StateSession,
+) -> ImportJob:
+    """One upload job: typed ``status`` + athlete-native ``status_text`` (API-R33).
+
+    Objects belong to the one athlete — an unknown, foreign, or malformed id reads as
+    absent and returns ``404 not-found`` (API-R51), never another athlete's job.
+    """
+    row = (
+        await session.execute(
+            select(ImportJobRecord).where(
+                ImportJobRecord.import_job_id == import_job_id,
+                ImportJobRecord.athlete_id == uuid.UUID(principal.athlete_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise not_found()
+    return _job_of(row)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -210,6 +318,40 @@ def _rejected(*, code: str, reason: str) -> ProblemError:
     )
 
 
+def _cursor_key(settings: AppSettings) -> str:
+    """The engine signing key the list cursor is signed with (PAGE-R5, fail-closed)."""
+    key = settings.token_signing_key
+    if key is None:
+        raise ProblemError("internal-error")
+    return str(key.get_secret_value())
+
+
+def _job_of(row: ImportJobRecord) -> ImportJob:
+    """Project one operational job row onto the wire ``ImportJob`` shape (API-R33)."""
+    return ImportJob(
+        import_job_id=str(row.import_job_id),
+        status=row.status,
+        filename=row.filename,
+        received_at=row.received_at,
+        status_text=row.status_text,
+    )
+
+
+async def _record_job(session: AsyncSession, athlete_id: str, job: ImportJob) -> None:
+    """Persist the accepted job's bookkeeping row on the agent-state store (ARCH-R13)."""
+    session.add(
+        ImportJobRecord(
+            import_job_id=job.import_job_id,
+            athlete_id=uuid.UUID(athlete_id),
+            status=job.status,
+            filename=job.filename,
+            status_text=job.status_text,
+            received_at=job.received_at,
+        )
+    )
+    await session.flush()
+
+
 def queued_job(import_job_id: str, filename: str | None) -> ImportJob:
     """Build a freshly-queued :class:`ImportJob` (the processor's accept return).
 
@@ -228,6 +370,7 @@ def queued_job(import_job_id: str, filename: str | None) -> ImportJob:
 __all__ = [
     "ACCEPTED_EXTENSIONS",
     "ImportJob",
+    "ImportJobList",
     "ImportProcessor",
     "ImportRejected",
     "import_processor",

@@ -28,5 +28,10 @@
     "kind": "error",
     "code": "unknown_source",
     "text": "Das hast du noch nicht verbunden."
+  },
+  "validation.default_tier_not_allowed": {
+    "kind": "validation",
+    "code": "default_tier_not_allowed",
+    "text": "Wähl eine Standard-Stufe, die auch zu den erlaubten Stufen gehört."
   }
 }

@@ -12,7 +12,6 @@ any direct download is an authenticated, signed-URL artifact owned by the API la
 
 from __future__ import annotations
 
-import datetime as _dt
 import hashlib
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -75,22 +74,6 @@ class LocalObjectStore:
     def delete(self, object_ref: str) -> None:
         self._path(object_ref).unlink(missing_ok=True)
 
-    def purge_older_than(self, cutoff: _dt.datetime) -> tuple[str, ...]:
-        """Delete every stored object last written before ``cutoff``; return its refs.
-
-        The retention primitive behind :func:`sweep_expired_originals` (RAW-T-R2(d)):
-        age is the file's last-write time, so a byte-identical re-upload (a write skip)
-        does not refresh the clock dishonestly — the original landed once and ages.
-        """
-        purged: list[str] = []
-        cutoff_ts = cutoff.timestamp()
-        for shard in sorted(p for p in self._root.iterdir() if p.is_dir()):
-            for obj in sorted(p for p in shard.iterdir() if p.is_file()):
-                if obj.stat().st_mtime < cutoff_ts:
-                    obj.unlink(missing_ok=True)
-                    purged.append(obj.name)
-        return tuple(purged)
-
 
 class EncryptedLocalObjectStore(LocalObjectStore):
     """Local object store with envelope encryption at rest (RAW-T-R2(d) / RAW-R4).
@@ -119,28 +102,6 @@ class EncryptedLocalObjectStore(LocalObjectStore):
         return self._cipher.decrypt(EnvelopeToken.from_wire(wire.decode("ascii")))
 
 
-def sweep_expired_originals(
-    store: ObjectStore,
-    *,
-    retention_days: int,
-    now: _dt.datetime | None = None,
-) -> tuple[str, ...]:
-    """Enforce the original-file retention window (RAW-T-R2(d), ``retention.raw_file_days``).
-
-    ``retention_days == 0`` retains indefinitely (no sweep) — mirroring the agent-state
-    sweeper contract. A positive window deletes every retained original last written
-    before ``now - retention_days`` and returns the purged refs (auditable). The window
-    is LOADED config (CFG-R1a), never a code literal; the caller passes the resolved
-    ``settings.retention__raw_file_days``.
-    """
-    if retention_days <= 0:
-        return ()
-    if not isinstance(store, LocalObjectStore):  # pragma: no cover - S3 is a commercial seam
-        raise NotImplementedError("retention sweep for non-local stores is a commercial seam")
-    moment = now if now is not None else _dt.datetime.now(_dt.UTC)
-    return store.purge_older_than(moment - _dt.timedelta(days=retention_days))
-
-
 def create_object_store(settings: Settings | None = None) -> ObjectStore:
     """Construct the configured object store (local in OSS; S3 is a commercial seam).
 
@@ -167,5 +128,4 @@ __all__ = [
     "ObjectStore",
     "content_hash",
     "create_object_store",
-    "sweep_expired_originals",
 ]

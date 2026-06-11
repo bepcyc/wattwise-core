@@ -78,9 +78,17 @@ class IngestService:
         object_store: ObjectStore | None = None,
         batch_size: int | None = None,
         resolver: ConflictResolver | None = None,
+        store_raw_gps: bool = True,
     ) -> None:
         self._session = session
         self._object_store = object_store
+        # PRIV-R2: when the athlete opts out of storing raw GPS coordinates
+        # (``privacy__store_raw_gps = false``), the raw ``latlng`` channel is dropped
+        # before canonical landing while every derived non-locating metric still lands,
+        # AND the verbatim original file is WITHHELD for GPS-bearing formats (the raw
+        # ``.fit``/``.gpx``/``.tcx`` bytes embed the track) — disclosed via the
+        # ``raw_file_withheld`` audit event; see ``_ingest_steps._capture_original``.
+        self._store_raw_gps = store_raw_gps
         # PERF-R1 / ING-UPS-R1/R3: candidates are landed in bounded batches. The size is
         # configuration (CFG-R1a), supplied by the caller; ``None`` lands the whole list as
         # one batch (the fault-isolation savepoint per row is what bounds blast radius).
@@ -134,8 +142,15 @@ class IngestService:
         wellness_dates: set[_dt.date] = set()
         for batch in _batched(candidates, self._batch_size):
             await _land_batch(
-                self, athlete, descriptor, batch, connection_id, run_id,
-                files_by_native, wellness_dates, result,
+                self,
+                athlete,
+                descriptor,
+                batch,
+                connection_id,
+                run_id,
+                files_by_native,
+                wellness_dates,
+                result,
             )
             # ING-UPS-R3 / ACC-4: commit each batch as its own durable unit so a later
             # batch's failure cannot lose an already-completed batch.
@@ -148,7 +163,11 @@ class IngestService:
             # ING-GAP-R4) AFTER all batch data is committed above, so cursor/gap state never
             # diverge from durable data and a crash never advances past un-committed data (ING-R6).
             advanced = await advance_and_heal(
-                self._session, athlete, descriptor, candidates, synced_range,
+                self._session,
+                athlete,
+                descriptor,
+                candidates,
+                synced_range,
                 ingest_run_id=run_id,
             )
             result.watermarks_advanced = advanced.watermarks_advanced
@@ -166,9 +185,7 @@ class IngestService:
         """
         return await _resolve_activity_id(self, athlete, cand)
 
-    async def _write_activity_canonical(
-        self, athlete: uuid.UUID, activity_id: uuid.UUID
-    ) -> None:
+    async def _write_activity_canonical(self, athlete: uuid.UUID, activity_id: uuid.UUID) -> None:
         """Resolve every field across candidates and write the canonical activity (UPS-R2).
 
         Delegates to :func:`._ingest_steps._write_activity_canonical`; kept as a

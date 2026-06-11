@@ -35,9 +35,11 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import create_engine as _create_sync_engine
 from sqlalchemy import func, select
 from starlette.testclient import TestClient
 
+from tests.integration._schema import provision_app_schema
 from wattwise_core.agent.deliverables import AgentAnswer, Citation, Observation
 from wattwise_core.agent.graph import DEFAULT_NODE_VISIT_CEILING
 from wattwise_core.agent.memory import MemoryItem, MemoryItemKind
@@ -105,6 +107,20 @@ class _FakeAnswerEngine:
         )
 
 
+def _create_canonical_schema(db_file: Path) -> None:
+    """Create the canonical schema on the harness FILE DB (what migrations do in prod).
+
+    ``POST /v1/agent/ask`` now legitimately reads the canonical ``athlete`` row for the
+    persisted language default (API-R37), so the harness database must carry the
+    canonical schema even when the test seeds no rows.
+    """
+    sync_engine = _create_sync_engine(f"sqlite:///{db_file}")
+    try:
+        Base.metadata.create_all(sync_engine)
+    finally:
+        sync_engine.dispose()
+
+
 def _app_with_fake_engine(tmp_path: Path, **overrides: Any) -> tuple[TestClient, FastAPI]:
     """The REAL ``create_app`` (real entitlement gate wiring) with ONLY the engine faked.
 
@@ -113,7 +129,9 @@ def _app_with_fake_engine(tmp_path: Path, **overrides: Any) -> tuple[TestClient,
     the engine is swapped (so no LLM/network), so a 200 vs 403 is decided by the REAL gate.
     """
     settings = _settings(tmp_path, **overrides)
+    _create_canonical_schema(tmp_path / "cluster_a.db")
     app = create_app(settings)
+    provision_app_schema(app)  # real schema + stamped head (the readiness gate, RUN-R6)
     engine = _FakeAnswerEngine()
     # Replace ONLY the engine seam; the entitlement gate stays the real wired one.
     app.dependency_overrides[agent_routes.agent_engine] = lambda: engine

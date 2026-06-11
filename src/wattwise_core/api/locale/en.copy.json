@@ -28,5 +28,10 @@
     "kind": "error",
     "code": "unknown_source",
     "text": "You haven't connected that yet."
+  },
+  "validation.default_tier_not_allowed": {
+    "kind": "validation",
+    "code": "default_tier_not_allowed",
+    "text": "Pick a default tier that is also one of the allowed tiers."
   }
 }

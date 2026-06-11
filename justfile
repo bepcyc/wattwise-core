@@ -115,6 +115,20 @@ test-golden:
 test-contract:
     {{uv}} pytest -m contract
 
+# Regenerate the committed OpenAPI reference artifact (DOC-R2).
+openapi:
+    {{uv}} python -m tools.openapi_artifact
+
+# Fail when the emitted OpenAPI schema drifts from the committed artifact (DOC-R2).
+# Also enforced by the contract suite (`just test-contract`) so CI gates on it.
+openapi-check:
+    {{uv}} python -m tools.openapi_artifact --check
+
+# Generate TypeScript interfaces + type guards from the OpenAPI document (DOC-R5/R6).
+# Fails on any unresolved $ref / unknown type / unguardable required field.
+client-gen out="generated/client.ts":
+    {{uv}} python -m tools.client_gen {{out}}
+
 # Parser/decoder fuzzing — bounded, deterministic PR-gate mode (TIER-R5 (a)).
 # CI-R1 item 16. Hypothesis-driven, ≤ 3 min, reproducible (no coverage engine).
 # TODO(tests): requires the `fuzz` pytest marker (registered by Dev B in
@@ -357,6 +371,19 @@ install-boot-check: build
 # e2e, image scan) run in the slow CI stage and via their own recipes — they are
 # intentionally NOT in `gate` so it stays fast and offline (CI-R3).
 gate: lint fmt-check type lint-commits test-unit test-property test-golden test-contract test-fuzz test-logging eval test-inject cov
+
+# FULL-FIDELITY local mirror of the GitHub/Forgejo CI pipeline: the same recipes, the same
+# serial order, the same service shape (throwaway PG16+MariaDB11, generated boot secrets,
+# /healthz bootstrap probe, package build, image scan+SBOM). The MANDATORY pre-PR gate —
+# a hand-rolled subset is not a gate. WW_SKIP_IMAGE=1 skips the image leg;
+# WW_REPEAT_DB=N repeats the db-portable leg N times (flake/race hunting).
+ci-local:
+    bash scripts/ci_local.sh
+
+# Race/flake hunting preset: the db-portable leg 5x.
+ci-flake-hunt:
+    WW_REPEAT_DB=5 bash scripts/ci_local.sh
+
     @echo "gate: all deterministic offline required checks passed."
 
 # =====================================================================

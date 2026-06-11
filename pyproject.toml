@@ -29,7 +29,7 @@ dependencies = [
   # --- persistence (portable ORM, async; SQLite/PostgreSQL/MariaDB via DSN) ---
   "sqlalchemy[asyncio]>=2.0.36",
   "alembic>=1.14",
-  "aiosqlite>=0.20",
+  "aiosqlite>=0.22",
   # --- analytics / DSP ---
   "numpy>=2.1",
   "scipy>=1.14",
@@ -55,6 +55,7 @@ dependencies = [
   # --- security / ops ---
   "cryptography>=44.0",
   "structlog>=24.4",
+  "httpx2>=2.3.0",
 ]
 
 [project.optional-dependencies]
@@ -109,6 +110,15 @@ minversion = "8.0"
 addopts = "-q --strict-markers --strict-config"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+  # aiosqlite 0.22.1 internals on Python 3.13 (upstream, not ours; re-check on every bump):
+  # (a) sync-context future creation via the deprecated argless get_event_loop — fires when
+  #     the ASGI TestClient portal drives an async engine from its worker thread;
+  # (b) a connection worker thread delivering its final result after the test's event loop
+  #     closed — a teardown race inside the library, after our engines are disposed.
+  "ignore:There is no current event loop:DeprecationWarning:aiosqlite.core",
+  "ignore:Exception in thread .*_connection_worker_thread[\\s\\S]*Event loop is closed:pytest.PytestUnhandledThreadExceptionWarning",
+]
 markers = [
   "unit: fast isolated unit tests",
   "property: hypothesis property-based tests",

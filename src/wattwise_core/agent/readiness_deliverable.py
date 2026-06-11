@@ -39,6 +39,14 @@ from pydantic import BaseModel
 from wattwise_core.agent.contracts import GroundingResult, RunStatus
 from wattwise_core.agent.observations import build_observations
 from wattwise_core.agent.projection import project_observations
+from wattwise_core.agent.readiness_sufficiency import (
+    STALE_ABSTAIN_SENTENCE as _STALE_ABSTAIN_SENTENCE,
+)
+from wattwise_core.agent.readiness_sufficiency import (
+    STALE_DATA_CLAUSE,
+    freshness_blocks_verdict,
+    sufficiency_coverage_fields,
+)
 from wattwise_core.agent.voice import (
     Citation,
     Observation,
@@ -56,7 +64,10 @@ from wattwise_core.analytics.readiness import (
     assess_readiness,
     readiness_consistent,
 )
+from wattwise_core.analytics.sufficiency import RecordSufficiency
 from wattwise_core.domain.enums import ReadinessVerdict
+
+_STALE_DATA_CLAUSE = STALE_DATA_CLAUSE
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +164,7 @@ _VERDICT_STATE_SENTENCE: Mapping[ReadinessVerdict, str] = {
 #: number, an honest state sentence rather than a guessed readiness call.
 _ABSTAIN_SENTENCE = "There isn't enough recent data to read your readiness yet."
 
+
 #: The honest HRV-unavailable clause appended to the state sentence when the verdict came
 #: from form alone (GROUND-R7: say HRV is missing rather than emit a placeholder). PUBLIC so
 #: the eval voice grader (a sibling pack in :mod:`wattwise_core.eval.suites`) can import the
@@ -178,29 +190,36 @@ async def readiness_assessment(
     narrate: StructuredNarrator | None,
     grounder: ReadinessGrounder | None,
     response_length: ResponseLength = "standard",
+    sufficiency: RecordSufficiency | None = None,
 ) -> Readiness:
     """Assemble the readiness/form deliverable from canonical inputs (QA-EVAL-R2.4).
 
     Inputs are gathered DETERMINISTICALLY by the caller (the readiness JTBD is fixed — it
     does NOT route through the retrieval planner): ``form`` is the latest canonical TSB,
     ``as_of`` its date, ``hrv_rmssd``/``hrv_baseline`` the latest HRV; any unavailable
-    input is ``None`` (fail-closed).
+    input is ``None`` (fail-closed). ``sufficiency`` is the typed record-freshness/fidelity
+    envelope (GROUND-R6); ``None`` disables the freshness gate (the inputs-only contract).
 
     Flow: (1) run the deterministic oracle (:func:`assess_readiness`). (2) If it abstains
     (form unavailable) return a truthful ABSTAIN :class:`Readiness` — no verdict, no
-    number, an honest state sentence (GROUND-R6) — with NO model call. (3) Otherwise ask
-    the model for a structured narration, run the CODE consistency gate
-    (:func:`readiness_consistent`) — the DELIVERED verdict is ALWAYS the oracle's, and a
-    mismatch records an override caveat (COACH-R3 / EVAL-R5, fail-closed) — ground the
-    narration so numbers are verbatim canonical (GROUND-R7), enforce the state-first /
-    number-cap / no-"readiness score" voice gates (COACH-R7 / VOICE-R7), and project.
+    number, an honest state sentence (GROUND-R6) — with NO model call. (3) Apply the
+    record-SUFFICIENCY gate: a form number is only as trustworthy as how recently real data was
+    OBSERVED, and the gate is ASYMMETRIC — insufficiency may only LOWER aggressiveness or abstain,
+    never raise it. A record past the hard staleness floor, or a most-aggressive ``go`` on a record
+    that cannot see the last several days, fails closed to a truthful STALE ABSTAIN (no verdict, no
+    number) with NO model call. (4) Otherwise ask the model for a structured narration, run the CODE
+    consistency gate (:func:`readiness_consistent`) — the DELIVERED verdict is ALWAYS the oracle's,
+    and a mismatch records an override caveat (COACH-R3 / EVAL-R5, fail-closed) — ground the
+    narration so numbers are verbatim canonical (GROUND-R7), disclose any residual staleness
+    (DEGRADED + caveat), enforce the state-first / number-cap / no-"readiness score" voice gates
+    (COACH-R7 / VOICE-R7), and project.
     """
-    assessment = assess_readiness(
-        form=form, hrv_rmssd=hrv_rmssd, hrv_baseline=hrv_baseline
-    )
+    assessment = assess_readiness(form=form, hrv_rmssd=hrv_rmssd, hrv_baseline=hrv_baseline)
     verdict = assessment.verdict
     if verdict is None:
         return _abstain_readiness(assessment, as_of)
+    if sufficiency is not None and freshness_blocks_verdict(sufficiency, verdict):
+        return _stale_abstain_readiness(assessment, as_of, sufficiency)
     return await _narrate_readiness(
         athlete_id,
         verdict=verdict,
@@ -211,6 +230,7 @@ async def readiness_assessment(
         narrate=narrate,
         grounder=grounder,
         response_length=response_length,
+        sufficiency=sufficiency,
     )
 
 
@@ -233,6 +253,30 @@ def _abstain_readiness(assessment: ReadinessAssessment, as_of: str | None) -> Re
     )
 
 
+def _stale_abstain_readiness(
+    assessment: ReadinessAssessment, as_of: str | None, sufficiency: RecordSufficiency
+) -> Readiness:
+    """Build the truthful STALE abstain when the record is too stale to read a verdict (GROUND-R6).
+
+    The form number EXISTS, but the most recent OBSERVED data is old enough (or the call was an
+    aggressive ``go`` on a stale record) that emitting a verdict would assert freshness the record
+    cannot support. No verdict, no number, an honest sentence that names the possibility of a broken
+    sync without asserting it (MNAR), and a typed coverage caveat marking ``stale`` so the API can
+    render the degradation in coach voice (OUTCOME-R4). No model call — there is nothing to narrate.
+    """
+    return Readiness(
+        verdict=None,
+        status=RunStatus.DEGRADED,
+        as_of=as_of,
+        summary_html=f"<p>{_STALE_ABSTAIN_SENTENCE}</p>",
+        summary_text=_STALE_ABSTAIN_SENTENCE,
+        observations=(),
+        citations=(),
+        coverage=_coverage_map(assessment, override=None, sufficiency=sufficiency),
+        suggested_followups=(),
+    )
+
+
 async def _narrate_readiness(
     athlete_id: str,
     *,
@@ -244,12 +288,16 @@ async def _narrate_readiness(
     narrate: StructuredNarrator | None,
     grounder: ReadinessGrounder | None,
     response_length: ResponseLength,
+    sufficiency: RecordSufficiency | None = None,
 ) -> Readiness:
     """Narrate, gate the verdict, ground the numbers, and project (the assessed path).
 
-    ``verdict`` is the oracle's non-None verdict (the caller handled the abstain case). The
-    DELIVERED verdict is ALWAYS this canonical one; a model proposal that disagrees only
-    records an override caveat (COACH-R3 / EVAL-R5, fail-closed).
+    ``verdict`` is the oracle's non-None verdict (the caller handled the abstain + stale-abstain
+    cases). The DELIVERED verdict is ALWAYS this canonical one; a model proposal that disagrees only
+    records an override caveat (COACH-R3 / EVAL-R5, fail-closed). A merely STALE record (within the
+    hard floor, and never an aggressive ``go`` — that was blocked upstream) still ships its
+    safe-side verdict, but the run is DEGRADED and the staleness is disclosed in the lead clause +
+    the typed coverage caveat (OUTCOME-R4), never silently presented as a current read.
     """
     narration = await _run_narration(narrate, assessment, as_of)
     override = narration is not None and not readiness_consistent(
@@ -259,20 +307,22 @@ async def _narrate_readiness(
     # under a canonical "rest"); fail closed to the deterministic state sentence so the
     # delivered narration is coherent with the canonical verdict (COACH-R3, mirrors GROUND-R3).
     lead_narration = None if override else narration
-    draft = _state_first_draft(lead_narration, verdict, assessment.inputs_unavailable)
+    stale = sufficiency is not None and sufficiency.stale
+    draft = _state_first_draft(lead_narration, verdict, assessment.inputs_unavailable, stale=stale)
     text, html, citations, observations = await _ground_readiness(
         athlete_id, draft, grounder, response_length
     )
     hrv_missing = "hrv" in assessment.inputs_unavailable
+    degraded = hrv_missing or stale
     return Readiness(
         verdict=verdict,
-        status=RunStatus.DEGRADED if hrv_missing else RunStatus.COMPLETED,
+        status=RunStatus.DEGRADED if degraded else RunStatus.COMPLETED,
         as_of=as_of,
         summary_html=html,
         summary_text=text,
         observations=observations,
         citations=citations,
-        coverage=_coverage_map(assessment, override=override),
+        coverage=_coverage_map(assessment, override=override, sufficiency=sufficiency),
         suggested_followups=_readiness_followups(citations),
     )
 
@@ -331,6 +381,8 @@ def _state_first_draft(
     narration: _ReadinessNarration | None,
     verdict: ReadinessVerdict,
     inputs_unavailable: Sequence[str],
+    *,
+    stale: bool = False,
 ) -> str:
     """The draft to ground: the model lead if it passes the voice gates, else the fallback.
 
@@ -339,7 +391,9 @@ def _state_first_draft(
     a digit anywhere in sentence 1 — not just a leading one — fails the gate), AND it carries
     no "readiness score" substring; otherwise the deterministic, digit-free per-verdict state
     sentence is used. When the verdict came from form alone (HRV unavailable) the honest
-    HRV-missing clause is appended (GROUND-R7).
+    HRV-missing clause is appended (GROUND-R7); when the record is merely STALE the honest
+    staleness clause is appended so the delivered verdict's currency is disclosed (OUTCOME-R4).
+    Both clauses are digit-free, so they never enter the first sentence's number-light budget.
     """
     lead = narration.summary_text.strip() if narration is not None else ""
     if (
@@ -350,7 +404,9 @@ def _state_first_draft(
     ):
         lead = _VERDICT_STATE_SENTENCE[verdict]
     if "hrv" in inputs_unavailable:
-        return f"{lead} {_HRV_UNAVAILABLE_CLAUSE}"
+        lead = f"{lead} {_HRV_UNAVAILABLE_CLAUSE}"
+    if stale:
+        lead = f"{lead} {_STALE_DATA_CLAUSE}"
     return lead
 
 
@@ -399,14 +455,19 @@ def _readiness_citations(result: GroundingResult) -> tuple[Citation, ...]:
 
 
 def _coverage_map(
-    assessment: ReadinessAssessment, *, override: bool | None
+    assessment: ReadinessAssessment,
+    *,
+    override: bool | None,
+    sufficiency: RecordSufficiency | None = None,
 ) -> Mapping[str, Any]:
-    """The typed coverage map from the oracle's inputs + any consistency override caveat.
+    """The typed coverage map from the oracle's inputs + any consistency/sufficiency caveat.
 
     ``inputs_used``/``inputs_unavailable`` come straight from the deterministic oracle
     (truthful, never guessed). ``override`` records that the model proposed a verdict the
     metrics did not support, so the canonical verdict was substituted (COACH-R3 / EVAL-R5)
     — the audit trail for the fail-closed decision, mirroring grounding's GROUND-R3 caveat.
+    ``sufficiency`` adds the source-agnostic record-freshness caveat (OUTCOME-R4) via
+    :func:`~wattwise_core.agent.readiness_sufficiency.sufficiency_coverage_fields`.
     """
     coverage: dict[str, Any] = {
         "inputs_used": list(assessment.inputs_used),
@@ -415,11 +476,14 @@ def _coverage_map(
     }
     if override:
         coverage["verdict_override"] = "model_inconsistent_with_metrics"
+    if sufficiency is not None:
+        coverage.update(sufficiency_coverage_fields(sufficiency))
     return coverage
 
 
 __all__ = [
     "HRV_UNAVAILABLE_CLAUSE",
+    "STALE_DATA_CLAUSE",
     "Readiness",
     "ReadinessGrounder",
     "StructuredNarrationError",

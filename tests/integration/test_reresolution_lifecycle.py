@@ -65,9 +65,7 @@ async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]
     session.add(Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True))
     athlete = Athlete(sex="male", reference_timezone="UTC")
     session.add(athlete)
-    file_src = SourceDescriptor(
-        source_key="file_import", display_name="Files", kind="file_upload"
-    )
+    file_src = SourceDescriptor(source_key="file_import", display_name="Files", kind="file_upload")
     api_src = SourceDescriptor(source_key="other_api", display_name="Api", kind="oauth_api")
     session.add_all([file_src, api_src])
     await session.flush()
@@ -104,9 +102,7 @@ async def _ingest_two_sources(
     athlete, file_src, api_src = await _seed(session)
     svc = IngestService(session)
     await svc.ingest(athlete, file_src, [_ride(file_src, "f-1", 250.0, Fidelity.RAW_STREAM)])
-    await svc.ingest(
-        athlete, api_src, [_ride(api_src, "a-1", 240.0, Fidelity.PLATFORM_COMPUTED)]
-    )
+    await svc.ingest(athlete, api_src, [_ride(api_src, "a-1", 240.0, Fidelity.PLATFORM_COMPUTED)])
     act = (await session.execute(select(Activity))).scalar_one()
     assert float(act.avg_power_w) == 250.0  # raw_stream wins (CONF-R2)
     return athlete, file_src, api_src, act.activity_id
@@ -191,10 +187,14 @@ async def test_tombstone_removes_contribution_but_never_cascades(
     assert act is not None  # multi-source record persists (no cascade delete)
     assert float(act.avg_power_w) == 240.0  # the surviving source's value
     tomb = (
-        await session.execute(
-            select(SourceCandidate).where(SourceCandidate.is_tombstone.is_(True))
+        (
+            await session.execute(
+                select(SourceCandidate).where(SourceCandidate.is_tombstone.is_(True))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(tomb) == 1  # the deletion is itself a typed, versioned candidate
     assert await ingest_tombstone(session, athlete, api_src, "a-1", GboType.ACTIVITY)
     assert await session.get(Activity, activity_id) is None  # last contributor gone

@@ -379,9 +379,7 @@ async def test_degraded_fetch_persists_typed_gap(session_factory: Any) -> None:
         session_factory, source_key="broken_api", credential_ref=ref
     )
 
-    run = await _orch(session_factory, FailingAdapter(), store).run(
-        athlete_id, source="broken_api"
-    )
+    run = await _orch(session_factory, FailingAdapter(), store).run(athlete_id, source="broken_api")
 
     assert run.results[0].outcome is SyncOutcome.DEGRADED
     gaps = await _gaps(session_factory)

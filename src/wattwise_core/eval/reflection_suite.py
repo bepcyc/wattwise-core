@@ -124,7 +124,12 @@ class _ScriptedGrounder:
         self._decision = decision
 
     async def ground(
-        self, *, athlete_id: str, draft: str, retrieved: Mapping[str, Any]
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Mapping[str, Any],
+        request_text: str | None = None,
     ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="1", value=1.0, metric="ctl")
         survivor = GroundedClaim(

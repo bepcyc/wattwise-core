@@ -39,10 +39,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
+from wattwise_core.agent.state_store import AgentStateBase
 from wattwise_core.api import connection_catalog
 from wattwise_core.api.auth import Principal, Scope, authenticate
-from wattwise_core.api.deps import get_db, get_settings
+from wattwise_core.api.deps import get_agent_state_session, get_db, get_settings
 from wattwise_core.api.errors import install_error_handlers
 from wattwise_core.api.ratelimit import RateLimiter
 from wattwise_core.api.routers import connections as connections_router
@@ -255,7 +257,35 @@ def _build_app(
     )
     app.dependency_overrides[imports_router.import_processor] = lambda: processor
     app.dependency_overrides[sync_router.sync_orchestrator] = lambda: orchestrator
+    app.dependency_overrides[get_agent_state_session] = _make_state_session()
     return app
+
+
+def _make_state_session() -> Callable[[], AsyncIterator[AsyncSession]]:
+    """An agent-state session override for the import-job bookkeeping rows (ARCH-R13).
+
+    The minimal harness app has no real agent-state store, so the override lazily
+    builds one single-connection in-memory schema (job bookkeeping only — nothing
+    concurrency-shaped runs here) and serves sessions from it, committing on success
+    exactly like the production dependency.
+    """
+    holder: dict[str, async_sessionmaker[AsyncSession]] = {}
+
+    async def _state_session() -> AsyncIterator[AsyncSession]:
+        if "factory" not in holder:
+            engine = create_async_engine(
+                "sqlite+aiosqlite://",
+                poolclass=StaticPool,
+                connect_args={"check_same_thread": False},
+            )
+            async with engine.begin() as conn:
+                await conn.run_sync(AgentStateBase.metadata.create_all)
+            holder["factory"] = async_sessionmaker(engine, expire_on_commit=False)
+        async with holder["factory"]() as session:
+            yield session
+            await session.commit()
+
+    return _state_session
 
 
 async def _seed(session: AsyncSession) -> str:
@@ -313,8 +343,8 @@ def test_initiate_file_upload_returns_accepted_formats(harness: _Harness) -> Non
     assert resp.status_code == 200
     body = resp.json()
     assert body["kind"] == "file_upload"
-    # Pin every advertised format so dropping one (e.g. a regression removing .pwx) fails here.
-    assert {".fit", ".fit.gz", ".gpx", ".tcx", ".pwx"} <= set(body["accepted_formats"])
+    # Pin the EXACT spec accept set (API-R33): .fit/.fit.gz/.gpx/.tcx — nothing wider.
+    assert set(body["accepted_formats"]) == {".fit", ".fit.gz", ".gpx", ".tcx"}
 
 
 def test_initiate_unknown_source_is_404(harness: _Harness) -> None:
@@ -504,8 +534,15 @@ def test_list_connections_names_the_source(harness: _Harness) -> None:
     # (API-R46) -> the API-R47 first_sync_state stays `not_started`.
     assert row["first_sync_state"] == "not_started"  # the SECOND API-R47 additive field
     assert set(row) >= {
-        "connection_id", "source", "display_name", "status",
-        "connected_at", "last_synced_at", "scopes", "auth_archetype", "first_sync_state",
+        "connection_id",
+        "source",
+        "display_name",
+        "status",
+        "connected_at",
+        "last_synced_at",
+        "scopes",
+        "auth_archetype",
+        "first_sync_state",
     }
 
 
@@ -543,9 +580,7 @@ def test_disconnect_is_data_preserving_204(harness: _Harness) -> None:
     )
     _land_activity(harness)
     connection_id = str(_only_connection(harness).connection_id)
-    resp = harness.client.post(
-        f"/v1/connections/{connection_id}/disconnect", headers=_auth()
-    )
+    resp = harness.client.post(f"/v1/connections/{connection_id}/disconnect", headers=_auth())
     assert resp.status_code == 204
     assert resp.content == b""
     conn = _only_connection(harness)
@@ -638,19 +673,20 @@ def test_import_accepts_double_extension_fit_gz(harness: _Harness) -> None:
     assert resp.status_code == 202
 
 
-def test_import_pwx_extension_is_accepted_202(harness: _Harness) -> None:
-    """A .pwx upload passes the extension gate -> 202 (pins imports.ACCEPTED_EXTENSIONS, API-R33).
+def test_import_pwx_extension_is_rejected_415(harness: _Harness) -> None:
+    """A .pwx upload is OUTSIDE the spec accept set -> 415 (API-R33 / SCHEMA-R3).
 
-    The advertised-format list and the actual upload gate are duplicated constants; this
-    pins the gate side so dropping .pwx from imports.ACCEPTED_EXTENSIONS can no longer slip a
-    real .pwx upload into a silent 415 while initiate still advertises it.
+    API-R33 closes the upload allowlist at .fit/.fit.gz/.gpx/.tcx and SCHEMA-R3 closes the
+    ``activity_file_format`` enum at fit|gpx|tcx|json|other — ``pwx`` is in neither set, so
+    the gate must fail it closed BEFORE any parse.
     """
     resp = harness.client.post(
         "/v1/imports",
         headers=_auth(),
         files={"file": ("ride.pwx", b"<pwx>data</pwx>", "application/xml")},
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 415
+    assert resp.json()["type"].endswith("/unsupported-media-type")
 
 
 def test_accepted_format_lists_agree() -> None:

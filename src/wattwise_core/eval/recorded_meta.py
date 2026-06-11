@@ -7,7 +7,7 @@ fixture is a REVIEWED change via ``just eval-record`` (never a test-run side-eff
 the GOLD-R2 rule applied to cassettes).
 
 :func:`verify_recorded_datasets` is the CI static check: it recomputes the CURRENT pins
-from the layered config (:func:`wattwise_core.config.settings.load_recorded_pins`) and
+from the layered config (:func:`wattwise_core.config.recorded_pins.load_recorded_pins`) and
 fails when any dataset's metadata is missing or out of sync — a model/prompt change that
 was not re-recorded ("stale cassettes") fails the build instead of silently grading new
 behaviour against old recordings. Runs inside ``python -m wattwise_core.eval run`` /
@@ -20,7 +20,7 @@ import json
 import re
 from pathlib import Path
 
-from wattwise_core.config.settings import load_recorded_pins
+from wattwise_core.config.recorded_pins import load_recorded_pins
 
 _DATASETS_DIR = Path(__file__).parent / "datasets"
 

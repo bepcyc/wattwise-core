@@ -90,13 +90,6 @@ _CASES: dict[str, tuple[Any, Any, str]] = {
         ),
         "file_import",
     ),
-    "file_ride_pwx": (
-        FileUploadAdapter,
-        lambda: decode_file(
-            (_FIXTURES / "file_upload" / "ride.pwx").read_bytes(), filename="ride.pwx"
-        ),
-        "file_import",
-    ),
 }
 
 

@@ -386,7 +386,14 @@ class _ContractCoverage:
 
 
 class _ContractGrounder:
-    async def ground(self, *, athlete_id: str, draft: str, retrieved: Any) -> GroundingResult:
+    async def ground(
+        self,
+        *,
+        athlete_id: str,
+        draft: str,
+        retrieved: Any,
+        request_text: str | None = None,
+    ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="42", value=42.0)
         survivor = GroundedClaim(
             claim=claim, verdict=GroundVerdict.GROUNDED, citation={"metric": "weekly_load"}

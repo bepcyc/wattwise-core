@@ -23,8 +23,6 @@ into images. A required secret being absent fails the boot **closed** (RUN-R4.1)
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import tomllib
 from collections.abc import Mapping
@@ -164,6 +162,30 @@ class Settings(BaseSettings):
     api__rate_limit_per_minute: int = Field(ge=1)
     api__request_max_bytes: int = Field(ge=1)
 
+    # --- auth: first-party token lifetimes (SEC-R2.3, CFG-R1a) ---
+    # Access-token lifetime MUST be <= 60 minutes and a 0/negative/unbounded lifetime is
+    # rejected AT CONFIG LOAD (SEC-R2.3): ``ge=1`` refuses 0/negative and ``le=3600`` refuses
+    # an unbounded/over-an-hour lifetime — never interpreted as "never expires". Refresh is a
+    # SEPARATE, revocable opaque token whose own finite window (``auth__refresh_ttl_seconds``,
+    # declared with the auth-flow settings below) is bounded the same way.
+    auth__access_ttl_seconds: int = Field(ge=1, le=3600)
+
+    # --- privacy (PRIV-R2): athlete opt-out of storing raw GPS coordinates ---
+    # When false, ingestion drops the raw ``latlng`` channel before canonical landing while
+    # every derived non-locating metric still lands. Loaded config (CFG-R1a) — in the
+    # single-athlete OSS the layered config IS the athlete/operator surface.
+    privacy__store_raw_gps: bool
+
+    # --- database pool sizing (PERF-R4, CFG-R1a) ---
+    # Bounded connection pools with explicit sizes, acquisition timeout, and recycling for
+    # the server backends (PostgreSQL/MariaDB); pool exhaustion surfaces as a bounded-wait
+    # error after ``pool_timeout_s``, never an unbounded hang. SQLite keeps its small
+    # non-pooled footprint (these knobs do not apply there). Values live in defaults.toml.
+    database__pool_size: int = Field(ge=1)
+    database__max_overflow: int = Field(ge=0)
+    database__pool_timeout_s: float = Field(gt=0)
+    database__pool_recycle_s: int = Field(ge=-1)
+
     # --- security: CORS / allowed-host / transport headers (SEC-R10/.1/.2, CFG-R1a) ---
     # Config-driven, never hardcoded origins/hosts (SEC-R10.2 "no per-deployment values
     # baked into code"). The OSS defaults are first-party-client-correct out of the box;
@@ -177,6 +199,12 @@ class Settings(BaseSettings):
     # Security-header values (SEC-R10.1): HSTS max-age, the Referrer-Policy, and the CSP
     # for any HTML surface. Loaded content (CFG-R1a), never a code literal.
     security__hsts_max_age_seconds: int = Field(ge=0)
+    # --- AUTH-R8a / SEC-R4: the first-party service-principal shared secret ---
+    # A high-entropy secret a first-party service (bot runtime, BFF) presents in the
+    # dedicated ``X-Service-Auth`` header IN ADDITION to the per-athlete bearer token.
+    # Secret material: env-only (CFG-R2), ``None`` = the factor is not configured and
+    # any presented header fails closed (it can never be verified).
+    security__service_auth_secret: SecretStr | None = None
     security__referrer_policy: str
     security__content_security_policy: str
 
@@ -191,6 +219,15 @@ class Settings(BaseSettings):
     entitlement__wall_clock_seconds: float = Field(gt=0)
     entitlement__max_tool_iterations: int = Field(ge=1)
     entitlement__request_rate_per_minute: int = Field(ge=1)
+
+    # --- auth: refresh-token + account-link lifetimes (API-R23 / AUTH-R8, CFG-R1a) ---
+    # The rotating refresh-token family lifetime and the single-use link-challenge
+    # lifetime. Loaded content (CFG-R1a) — never a code literal.
+    auth__refresh_ttl_seconds: int = Field(ge=60)
+    auth__link_ttl_seconds: int = Field(ge=30)
+
+    # --- exports: the signed-download-URL lifetime (API-R34; short-lived, <= 5 min) ---
+    exports__signed_url_ttl_seconds: int = Field(ge=1, le=300)
 
     # --- rate-limit: the READ / MUTATING per-minute request ceilings (LIMIT-R2, CFG-R1a) ---
     # The per-athlete per-minute request ceilings for the read + mutating endpoint classes
@@ -215,6 +252,11 @@ class Settings(BaseSettings):
     # later batch fails (ING-UPS-R3). Strictly positive; the value lives here (CFG-R1a),
     # never a code literal.
     ingestion__batch_size: int = Field(ge=1)
+    # PERF-R2: independent source syncs run CONCURRENTLY bounded by this limit (the
+    # per-provider rate limit is the adapter token-bucket, CLI-R10). On SQLite the caller
+    # clamps to 1 (single-writer graceful degradation, PERF-R2 backend caveat). Strictly
+    # positive — 0/negative is rejected at config load (SEC-R11.2 fail-closed rule).
+    ingestion__sync_concurrency: int = Field(ge=1)
 
     # --- adapters: Intervals.icu outbound-client resilience (CLI-R6/R10/R11, CFG-R1a) ---
     # The typed client's per-source retry budget (CLI-R6) + client-side token-bucket limiter
@@ -260,6 +302,10 @@ class Settings(BaseSettings):
     analytics__endurance_score_window_days: int = Field(ge=1)
     analytics__endurance_score_long_duration_s: int = Field(ge=1)
     analytics__endurance_score_short_duration_s: int = Field(ge=1)
+    # CP-R3/R4 pre-fit power-degeneracy epsilon (relative MMP power spread below which
+    # the fit refuses with INSUFFICIENT_DATA before any regression); the VALUE lives in
+    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraint.
+    analytics__cp_power_spread_epsilon: float = Field(gt=0, lt=1)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str
@@ -325,6 +371,14 @@ class Settings(BaseSettings):
     # (LANG-R1). Shape-only here; resolution + the default-language fallback are owned by
     # ``LocalePolicy.from_config`` (the manifest's ``default_language`` is the LANG-R4 fallback).
     agent__coach__languages: dict[str, dict[str, str]]
+    # Generic any-language pass-through (accepted deviation from LANG-R1's packs-only reading,
+    # LANG-R4 fallback still recorded): when ON and a requested locale has no loaded pack, the
+    # compose prompt layers the templated directive (code interpolates {language_tag}/{locale})
+    # instead of the default pack's variant, so the coach answers in the requested language.
+    # Loaded packs stay authoritative; grounding/abstention are untouched. Schema only — the
+    # values live in defaults.toml (CFG-R1a).
+    agent__coach__language_passthrough: bool
+    agent__coach__language_passthrough_directive: str
     # Offline-eval cost/latency budgets (QA-EVAL-R8): the median cost-per-task and p95
     # latency the eval gate enforces, plus the price per 1k tokens used to cost a recorded
     # (network-free) run. Loaded content (CFG-R1a), never a gate hardcode; strictly positive.
@@ -576,45 +630,3 @@ def load_eval_budget() -> dict[str, float]:
             raise ConfigError(f"fail-closed: eval-budget {key} must be > 0 (got {value})")
         out[key] = value
     return out
-
-
-# The config keys whose values the recorded eval fixtures were captured under
-# (QA-EVAL-R12(a)): the pinned model identifier plus every coach prompt/persona/language
-# content key. A change to ANY of these without re-recording the fixtures is the
-# "stale cassette" condition the eval gate fails on.
-_RECORDED_PIN_PREFIXES: tuple[str, ...] = (
-    "agent__coach__system_prompt",
-    "agent__coach__prompts",
-    "agent__coach__languages",
-)
-
-
-def load_recorded_pins() -> dict[str, str]:
-    """Resolve the prompt/model pins the recorded eval fixtures depend on (QA-EVAL-R12(a)).
-
-    Returns ``{"model": <pinned model id>, "prompt_sha256": <digest>}`` where the digest
-    covers the resolved compose system prompt, every prompt fragment, and every language
-    pack — the content whose change invalidates recorded model outputs. Resolved from the
-    SAME layered config as the full settings (defaults -> operator file -> env override),
-    WITHOUT the secret fail-close (TIER-R1: the offline eval tier carries no secrets).
-    A missing model pin fails closed (CFG-R1a).
-    """
-    config_file_env = os.environ.get("WATTWISE_CONFIG_FILE")
-    config_file = Path(config_file_env) if config_file_env else None
-    merged: dict[str, Any] = {}
-    _flatten("", _read_toml(_DEFAULTS_PATH), merged)
-    if config_file is not None:
-        if not config_file.is_file():
-            raise ConfigError(f"WATTWISE_CONFIG_FILE does not exist: {config_file}")
-        _flatten("", _read_toml(config_file), merged)
-    model = os.environ.get("WATTWISE_AGENT__MODEL", merged.get("agent__model"))
-    if not model:
-        raise ConfigError(
-            "fail-closed: required config is missing: WATTWISE_AGENT__MODEL / [agent].model "
-            "(the recorded-fixture model pin, QA-EVAL-R12(a))"
-        )
-    content = {key: merged[key] for key in sorted(merged) if key.startswith(_RECORDED_PIN_PREFIXES)}
-    digest = hashlib.sha256(
-        json.dumps(content, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-    return {"model": str(model), "prompt_sha256": digest}

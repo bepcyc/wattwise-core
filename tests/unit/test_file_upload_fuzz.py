@@ -1,6 +1,6 @@
 """Fuzz tests for the file-upload decoders (TIER-R5 T-FUZZ, CLI-R2, FIL fuzz).
 
-Covers the FIT/GPX/TCX/PWX decoders.
+Covers the FIT/GPX/TCX decoders.
 
 The contract: arbitrary / corrupt / truncated bytes -> a TYPED
 :class:`FileDecodeError`, NEVER an uncaught exception escape and NEVER a
@@ -28,7 +28,6 @@ from hypothesis import strategies as st
 from wattwise_core.ingestion.adapters._asbo import ActivityAsbo, FileDecodeError
 from wattwise_core.ingestion.adapters._decode_fit import decode_fit
 from wattwise_core.ingestion.adapters._decode_gpx import decode_gpx
-from wattwise_core.ingestion.adapters._decode_pwx import decode_pwx
 from wattwise_core.ingestion.adapters._decode_tcx import decode_tcx
 from wattwise_core.ingestion.adapters.file_upload import decode
 
@@ -87,16 +86,6 @@ def test_decode_tcx_arbitrary_bytes_never_escapes(data: bytes) -> None:
     _assert_typed_or_asbo(result)
 
 
-@settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
-@given(data=st.binary(min_size=0, max_size=2048))
-def test_decode_pwx_arbitrary_bytes_never_escapes(data: bytes) -> None:
-    try:
-        result = decode_pwx(data)
-    except FileDecodeError:
-        return
-    _assert_typed_or_asbo(result)
-
-
 @settings(max_examples=400, suppress_health_check=[HealthCheck.too_slow])
 @given(
     index=st.integers(min_value=0, max_value=len(_VALID_FIT) - 1),
@@ -125,48 +114,9 @@ def test_truncation_of_valid_fit_never_escapes(cut: int) -> None:
 
 
 def test_empty_bytes_is_typed_error() -> None:
-    for decoder in (decode_fit, decode_gpx, decode_tcx, decode_pwx):
+    for decoder in (decode_fit, decode_gpx, decode_tcx):
         with pytest.raises(FileDecodeError):
             decoder(b"")
-
-
-def test_pwx_xxe_payload_does_not_trigger_external_fetch() -> None:
-    """An XXE-style entity in a PWX must not fetch a URL; it fails closed (no I/O)."""
-    xxe = (
-        b'<?xml version="1.0"?>'
-        b'<!DOCTYPE pwx [<!ENTITY e SYSTEM "file:///etc/passwd">]>'
-        b'<pwx xmlns="http://www.peaksware.com/PWX/1/0"><workout>'
-        b"<sportType>&e;</sportType><time>2024-01-02T10:00:00Z</time>"
-        b"<sample><timeoffset>0</timeoffset><hr>140</hr></sample>"
-        b"</workout></pwx>"
-    )
-    # Either a typed decode error (XXE guard rejects the DTD) or an ASBO whose
-    # content never expanded the entity (resolve_entities=False) — never a read.
-    try:
-        result = decode_pwx(xxe)
-    except FileDecodeError:
-        return
-    assert isinstance(result, ActivityAsbo)
-    assert "root:" not in str(result.session)
-
-
-def test_malformed_pwx_is_typed_error() -> None:
-    """Truncated / wrong-root / sampleless PWX -> typed FileDecodeError, never a crash."""
-    truncated = (
-        b'<?xml version="1.0"?>'
-        b'<pwx xmlns="http://www.peaksware.com/PWX/1/0"><workout>'
-        b"<sportType>Bike</sportType><sample><timeoffset>0"  # unclosed elements
-    )
-    wrong_root = b'<?xml version="1.0"?><gpx><trk></trk></gpx>'
-    no_samples = (
-        b'<?xml version="1.0"?>'
-        b'<pwx xmlns="http://www.peaksware.com/PWX/1/0"><workout>'
-        b"<sportType>Bike</sportType><time>2024-01-02T10:00:00Z</time>"
-        b"</workout></pwx>"  # no <sample> and no <segment>
-    )
-    for blob in (truncated, wrong_root, no_samples):
-        with pytest.raises(FileDecodeError):
-            decode_pwx(blob)
 
 
 def test_xml_xxe_payload_does_not_trigger_external_fetch() -> None:

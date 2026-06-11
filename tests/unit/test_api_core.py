@@ -21,7 +21,9 @@ connection is opened — the routes under test never touch persistence).
 
 from __future__ import annotations
 
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any
 
 import jwt
@@ -30,6 +32,7 @@ from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from tests.integration._schema import provision_app_schema
 from wattwise_core.api.app import API_PREFIX, create_app
 from wattwise_core.api.auth import (
     TOKEN_ALGORITHM,
@@ -49,10 +52,16 @@ _SIGNING_KEY = "unit-test-signing-key-not-a-real-secret"
 
 
 def _settings() -> Settings:
-    """Build dev settings with an in-memory DSN + a deterministic signing key."""
+    """Build dev settings on a throwaway FILE DB + a deterministic signing key.
+
+    A file-backed SQLite (never ``:memory:``) so every pooled connection sees the SAME
+    database — the token-issuance route persists the revocable refresh credential
+    (SEC-R2.3) on a different connection than the one that created the schema.
+    """
+    db_path = Path(tempfile.mkdtemp(prefix="wattwise-test-")) / "api_core.db"
     return load_settings(
         app__environment="development",
-        database_dsn="sqlite+aiosqlite:///:memory:",
+        database_dsn=f"sqlite+aiosqlite:///{db_path}",
         token_signing_key=_SIGNING_KEY,
     )
 
@@ -85,6 +94,7 @@ _WritePrincipal = Annotated[Principal, Depends(require_scope(Scope.READ, Scope.W
 def _app_with_probe_routes() -> TestClient:
     """Build the app and attach read/write probe routes guarded by the scope gate."""
     app = create_app(_settings())
+    provision_app_schema(app)  # the token route persists the refresh credential (SEC-R2.3)
     router = APIRouter(prefix=API_PREFIX, tags=["test"])
 
     @router.get("/_probe/read", operation_id="probeRead")
@@ -134,9 +144,7 @@ def test_valid_scope_passes_and_subject_is_server_derived() -> None:
     """A token with the right scope passes; the subject comes from the token (AUTH-R3)."""
     client = _app_with_probe_routes()
     token = _token(scopes=["read"])
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     assert resp.json() == {"subject": "owner"}
 
@@ -145,9 +153,7 @@ def test_expired_token_is_401() -> None:
     """An expired token -> 401 (signature/expiry verified every request, AUTH-R6)."""
     client = _app_with_probe_routes()
     token = _token(scopes=["read"], ttl_seconds=-10)
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 401
     assert resp.json()["type"] == f"{PROBLEM_BASE_URI}unauthenticated"
 
@@ -155,9 +161,7 @@ def test_expired_token_is_401() -> None:
 def test_non_bearer_scheme_is_401() -> None:
     """A non-bearer Authorization scheme is rejected as unauthenticated (AUTH-R2)."""
     client = _app_with_probe_routes()
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": "Basic abc123"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": "Basic abc123"})
     assert resp.status_code == 401
 
 
@@ -176,9 +180,7 @@ def test_wrong_audience_token_is_401() -> None:
         _SIGNING_KEY,
         algorithm=TOKEN_ALGORITHM,
     )
-    resp = client.get(
-        f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {bad}"}
-    )
+    resp = client.get(f"{API_PREFIX}/_probe/read", headers={"Authorization": f"Bearer {bad}"})
     assert resp.status_code == 401
 
 

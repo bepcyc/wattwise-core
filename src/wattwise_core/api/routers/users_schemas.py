@@ -56,7 +56,7 @@ class UserAccount(BaseModel):
     name, no model/tier (AUTH-R15 / API-R38).
     """
 
-    email: str | None = None
+    email: str | None = Field(default=None, json_schema_extra={"format": "email"})
     verified: bool = False
     notification_routes: list[NotificationRouteOut] = Field(default_factory=list)
 
@@ -74,7 +74,12 @@ class EmailCaptureRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    email: str = Field(min_length=3, max_length=320, pattern=EMAIL_PATTERN)
+    email: str = Field(
+        min_length=3,
+        max_length=320,
+        pattern=EMAIL_PATTERN,
+        json_schema_extra={"format": "email"},
+    )
 
 
 class AccountDeletionAck(BaseModel):

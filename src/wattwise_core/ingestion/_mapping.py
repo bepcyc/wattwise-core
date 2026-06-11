@@ -31,13 +31,35 @@ from wattwise_core.seams import ConflictResolver
 # Canonical scalar fields carried on an activity candidate's payload (resolved per
 # field across candidates; streams/laps are handled separately).
 _ACTIVITY_SCALARS = (
-    "start_time", "sport", "sub_sport", "elapsed_time_s", "moving_time_s", "distance_m",
-    "total_work_j", "energy_kj", "avg_power_w", "max_power_w", "avg_hr_bpm", "max_hr_bpm",
-    "avg_cadence_rpm", "avg_speed_mps", "elevation_gain_m", "avg_temp_c", "device_class",
+    "start_time",
+    "sport",
+    "sub_sport",
+    "elapsed_time_s",
+    "moving_time_s",
+    "distance_m",
+    "total_work_j",
+    "energy_kj",
+    "avg_power_w",
+    "max_power_w",
+    "avg_hr_bpm",
+    "max_hr_bpm",
+    "avg_cadence_rpm",
+    "avg_speed_mps",
+    "elevation_gain_m",
+    "avg_temp_c",
+    "device_class",
 )
 _LAP_SCALARS = (
-    "start_offset_s", "duration_s", "distance_m", "avg_power_w", "max_power_w",
-    "avg_hr_bpm", "max_hr_bpm", "avg_cadence_rpm", "avg_speed_mps", "elevation_gain_m",
+    "start_offset_s",
+    "duration_s",
+    "distance_m",
+    "avg_power_w",
+    "max_power_w",
+    "avg_hr_bpm",
+    "max_hr_bpm",
+    "avg_cadence_rpm",
+    "avg_speed_mps",
+    "elevation_gain_m",
 )
 
 _ACTIVITY_COLUMNS = frozenset(Activity.__table__.columns.keys())
@@ -151,15 +173,17 @@ def _activity_values(
     values["field_resolution"] = field_resolution or {}
     values["updated_at"] = utcnow()
     update_columns += [
-        "has_power", "has_hr", "coverage", "policy_version", "field_resolution",
+        "has_power",
+        "has_hr",
+        "coverage",
+        "policy_version",
+        "field_resolution",
         "updated_at",
     ]
     return values, update_columns
 
 
-def _channel_tier_of(
-    policy: TrustPolicy, channel: str
-) -> Callable[[SourceCandidate], Fidelity]:
+def _channel_tier_of(policy: TrustPolicy, channel: str) -> Callable[[SourceCandidate], Fidelity]:
     """A channel-bound effective-tier seam ``(candidate) -> Fidelity`` for ``_canonical``.
 
     Binds the channel so the single-arg ``tier_of`` the ``_canonical`` helpers call

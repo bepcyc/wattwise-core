@@ -27,6 +27,34 @@ port = 8000
 rate_limit_per_minute = 60
 request_max_bytes = 33554432   # 32 MiB upload ceiling for FIT/GPX/TCX imports
 
+[auth]
+# SEC-R2.3: access-token lifetime (seconds). MUST be <= 3600 (60 minutes); a 0/negative
+# or over-an-hour value is rejected at config load, never read as "never expires".
+access_ttl_seconds = 3600
+# Rotating refresh-token family lifetime + single-use account-link challenge lifetime
+# (API-R23 / AUTH-R8). Loaded content (CFG-R1a) — never a code literal.
+refresh_ttl_seconds = 1209600   # 14 days
+link_ttl_seconds = 600          # 10 minutes
+
+[privacy]
+# PRIV-R2: set false to opt out of storing raw GPS coordinates (the ``latlng`` channel);
+# derived non-locating metrics still land. In single-athlete OSS the layered config is
+# the athlete/operator surface.
+store_raw_gps = true
+
+[database]
+# PERF-R4: bounded pool sizing for the server backends (PostgreSQL/MariaDB); SQLite keeps
+# its small non-pooled footprint. Exhaustion surfaces as a bounded wait of pool_timeout_s.
+pool_size = 5
+max_overflow = 10
+pool_timeout_s = 30.0
+pool_recycle_s = 1800
+
+[exports]
+# Signed export-download URL lifetime (API-R34: short-lived, single-use, owner-bound;
+# the spec default ceiling is 5 minutes).
+signed_url_ttl_seconds = 300
+
 [security]
 # CORS / allowed-host / transport-header policy (SEC-R10/.1/.2). Config-driven, never
 # hardcoded in code (SEC-R10.2: "no per-deployment values baked into code"). The OSS
@@ -97,6 +125,10 @@ batch_size = 500
 # historical range oldest-first in bounded windows of this many days, committing + advancing
 # the resume cursor per window (SYN-R6). Loaded here (CFG-R1a), never a code literal.
 backfill_window_days = 90
+# PERF-R2: independent source syncs run concurrently bounded by this limit (per-provider
+# pacing is the adapter token-bucket, CLI-R10). The runner clamps to 1 on SQLite
+# (single-writer graceful degradation — PERF-R2 backend caveat).
+sync_concurrency = 4
 
 [adapters.intervals_icu]
 # Intervals.icu outbound-client resilience values (CLI-R6/R10/R11, CFG-R1a). The typed
@@ -128,6 +160,14 @@ atl_time_constant_days = 7
 # from a LOWER-fidelity equivalence-class member (substituted), so the day is never presented
 # at full fidelity. A factor in (0,1]; lives here (CFG-R1a), never baked into code.
 training_load_confidence_penalty = 0.7
+# Readiness record-sufficiency edges (GROUND-R6 sufficiency axis), in whole days. The hard
+# floor is keyed to the ATL time constant (= 2*tau_ATL = 14 with PMC-R1's tau = 7): past it
+# the assumed-rest tail dominates ATL and the verdict abstains; between fresh and max the
+# record is stale-disclosed (DEGRADED + caveat, never an aggressive GO). The sync edge is
+# the MNAR corroborator: a still-connected source silent this long reads as silently broken.
+readiness_fresh_staleness_days = 2
+readiness_max_staleness_days = 14
+readiness_sync_stale_after_days = 3
 # GBO-R28: a stored MODELED fitness signature whose fit quality (R^2) is below this
 # threshold is REFUSED by signature resolution (fail-closed: a typed gap surfaces
 # instead of thresholds derived from a bad fit). A modeled signature carrying NO
@@ -163,6 +203,15 @@ endurance_score_window_days = 90
 # Power-curve durations for the durability ratio MMP(long)/MMP(short) (ES-R1: 20 vs 5 min).
 endurance_score_long_duration_s = 1200
 endurance_score_short_duration_s = 300
+# CP-R3/R4 pre-fit degeneracy gate: when the distinct in-domain MMP powers are
+# (near-)constant — relative power spread (max - min) / max|P| strictly below this
+# epsilon — the CP/W' fit is REFUSED before any regression as
+# Unavailable(INSUFFICIENT_DATA) (points too clustered in power to determine CP and
+# W' separately). The verdict must be decided by this declared gate, never by
+# platform-dependent fit numerics (a perfectly linear W = P*t system can "converge"
+# with a tiny spurious positive intercept on one BLAS build and a non-positive one on
+# another). The VALUE lives here (CFG-R1a), never a code literal.
+cp_power_spread_epsilon = 1e-6
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.
@@ -267,6 +316,20 @@ system verifies every number against the canonical data and quietly removes anyt
 confirm, so describing the athlete's real state in plain coach language is exactly what reaches \
 them — a metrics dump is not."""
 
+# Generic any-language pass-through (LANG-R4 observability kept; accepted deviation from
+# LANG-R1's packs-only reading): when a requested locale has NO loaded pack below, the engine
+# composes with the default pack's POLICY but layers this templated directive instead — telling
+# the model to ANSWER IN THE REQUESTED LANGUAGE. The template is loaded content (CFG-R1a/CFG-R3);
+# code only interpolates the requested tag/locale into the {language_tag}/{locale} placeholders.
+# The fallback is still RECORDED (log + metric) and loaded packs stay authoritative when present;
+# grounding/abstention copy are untouched (the limitation stays the default pack's). Gate it off
+# to restore the strict packs-only LANG-R1 behaviour.
+language_passthrough = true
+language_passthrough_directive = """Answer entirely in the language whose IETF language tag is \
+'{language_tag}' (the athlete requested the locale '{locale}'). Every sentence of your answer — \
+including caveats and any note about missing data — must be written in that language. Never \
+switch to another language mid-answer."""
+
 # The per-language surface packs (LANG-R1/-R3/-R4): the SUPPORTED language set IS the keys of
 # this table (EN/DE/RU out of the box), and ADDING a language is editing THIS config — never an
 # engine code change (LANG-R1). Each pack carries the localized prompt VARIANT layered into the
@@ -323,6 +386,12 @@ claim_system = "Extract every factual numeric claim in the draft as a candidate 
 # The reflection system prompt (REFLECT-R2 / STRUCT-R1): moved VERBATIM from the former inline
 # ``_REFLECT_SYSTEM``. Constrains the model to the closed reflect verdict set; code routes on it.
 reflect_system = "You are the coaching agent's reflection step. Given the open coverage gaps and what has already been retrieved, decide the next move over the CLOSED verdict set {replan, answer_with_caveat, give_up_gracefully}. Choose replan only when adding or widening capability requests could close a gap; answer_with_caveat when a useful grounded answer is possible despite a gap; give_up_gracefully when nothing more can be retrieved. For replan, list the capability keys to add/widen."
+# The DETAILED-length compose steering fragment (VOICE-R7/-R8): layered after the localized
+# system prompt ONLY when the athlete asked for a detailed answer. A detailed deep-dive that
+# names ZERO grounded figures is under-informative, so this steers the model to weave up to the
+# VOICE-R7 detailed cap (four) of the canonical numbers it was given into the prose — each copied
+# exactly, with its date when recorded. Grounding still decides truth (§7); this only steers.
+detailed_compose_directive = "The athlete asked for a DETAILED answer: weave the few canonical numbers that matter most — up to four — into your prose, each copied exactly from the data with its date when the data records one. A detailed answer that names no concrete figure from the data is under-informative; keep it flowing coach prose, never a list or metrics dump."
 # The readiness narration system prompt (QA-EVAL-R2.4 / STRUCT-R1): moved VERBATIM from the former
 # inline ``_READINESS_SYSTEM``. Steers the structured readiness narration; the verdict is the
 # deterministic oracle's (canonical wins), the model only narrates it.
@@ -432,6 +501,20 @@ max_infra_error_rate = 0.1
 "hrv" = "hrv_rmssd_ms"
 "rmssd" = "hrv_rmssd_ms"
 "heart rate variability" = "hrv_rmssd_ms"
+# Maintenance AGGREGATE load targets (§16 aggregates): natural week/month phrasings a model
+# uses for a maintenance plan's load target, resolved to the deterministic CTL-derived
+# aggregate metrics (weekly = 7xCTL, 4-week = 28xCTL) so a month-horizon plan grounds its
+# targets against canonical PMC instead of scrubbing them.
+"weekly load" = "weekly_load_target"
+"weekly load target" = "weekly_load_target"
+"weekly training load" = "weekly_load_target"
+"monthly load" = "monthly_load_target"
+"monthly load target" = "monthly_load_target"
+"monthly training load" = "monthly_load_target"
+"monthly aggregate load" = "monthly_load_target"
+"4-week load" = "monthly_load_target"
+"four-week load" = "monthly_load_target"
+"28-day load" = "monthly_load_target"
 
 [retention]
 # 0 = retain indefinitely; >0 = per-athlete retention window in days (PRIV-R*).

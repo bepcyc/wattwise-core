@@ -23,7 +23,7 @@ import hmac
 import json
 from typing import Final
 
-from wattwise_core.api.errors import ProblemError
+from wattwise_core.api.errors import FieldError, ProblemError
 
 #: The HMAC digest the cursor signature uses (truncated to keep the token compact).
 _DIGEST: Final = hashlib.sha256
@@ -37,9 +37,20 @@ DEFAULT_PAGE_LIMIT: Final = 50
 
 
 def clamp_limit(limit: int, *, default: int = DEFAULT_PAGE_LIMIT) -> int:
-    """Clamp a requested page size into ``[1, MAX_PAGE_LIMIT]`` (PAGE-R3)."""
-    if limit <= 0:
-        return default
+    """Bound a requested page size per PAGE-R3: reject ``< 1`` (422), clamp ``> 200``.
+
+    The spec splits the two bounds asymmetrically: a ``limit`` below ``1`` SHALL be
+    REJECTED ``422 validation-error`` (never silently coerced to a default), while an
+    over-large ``limit`` SHALL be CLAMPED to :data:`MAX_PAGE_LIMIT` (not rejected).
+    ``default`` is kept in the signature for callers that resolve an *absent* limit
+    before calling this bound; it is never applied to a presented value.
+    """
+    del default  # a presented limit < 1 is rejected (PAGE-R3), never defaulted
+    if limit < 1:
+        raise ProblemError(
+            "validation-error",
+            errors=[FieldError(code="limit_out_of_range", message="", parameter="limit")],
+        )
     return min(int(limit), MAX_PAGE_LIMIT)
 
 
@@ -70,9 +81,7 @@ def encode_cursor(
     return token
 
 
-def decode_cursor(
-    cursor: str, *, params: dict[str, str], key: str
-) -> tuple[_dt.datetime, str]:
+def decode_cursor(cursor: str, *, params: dict[str, str], key: str) -> tuple[_dt.datetime, str]:
     """Verify + decode a signed cursor to its keyset position (PAGE-R5/R6).
 
     A malformed token or a bad/forged signature -> ``invalid-cursor`` (400); a valid
