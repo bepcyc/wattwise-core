@@ -73,20 +73,26 @@ def test_durability_decrement_canonical() -> None:
 
 @pytest.mark.golden
 def test_accumulated_work_axis_is_intensity_weighted() -> None:
-    """DUR-R1: the fatigue axis is cumulative work ABOVE CP, gaps contribute zero."""
-    power = np.array([300.0, np.nan, 240.0, 260.0], dtype=np.float64)  # cp = 250
+    """DUR-R1: the fatigue axis is cumulative work ABOVE CP; gaps and P == CP add zero."""
+    power = np.array([300.0, np.nan, 240.0, 250.0, 260.0], dtype=np.float64)  # cp = 250
     axis = accumulated_work_above_cp_j(power, CP_W)
-    # increments: 50, 0 (gap), 0 (below CP), 10  ⇒ cumulative 50, 50, 50, 60.
-    np.testing.assert_allclose(axis, [50.0, 50.0, 50.0, 60.0], atol=TOL)
+    # increments: 50, 0 (gap), 0 (below CP), 0 (exactly AT CP: max(0, 0) == 0, no
+    # floating-point residual), 10  ⇒ cumulative 50, 50, 50, 50, 60.
+    np.testing.assert_allclose(axis, [50.0, 50.0, 50.0, 50.0, 60.0], atol=TOL)
     assert float(axis[-1]) == pytest.approx(60.0, abs=TOL)
 
 
 @pytest.mark.golden
 def test_fatigue_threshold_from_wprime_is_multiple_of_wprime() -> None:
-    """DUR-R7: the per-athlete threshold is ``multiple · W'`` joules of work-above-CP."""
-    result = fatigue_threshold_from_wprime(20_000.0, multiple=10.0)
+    """DUR-R7: the per-athlete threshold is ``multiple · W'`` joules of work-above-CP.
+
+    The multiple (3.0) is deliberately NOT the packaged default (10.0), so an
+    implementation that ignores the argument and reads the config constant fails here
+    (non-vacuity): 3 · 20 000 = 60 000, whereas the default would give 200 000.
+    """
+    result = fatigue_threshold_from_wprime(20_000.0, multiple=3.0)
     assert isinstance(result, Computed)
-    assert result.value == pytest.approx(200_000.0, abs=TOL)
+    assert result.value == pytest.approx(60_000.0, abs=TOL)
 
 
 @pytest.mark.golden

@@ -132,6 +132,22 @@ def test_fresh_segment_too_short_is_insufficient() -> None:
     assert result.reason is UnavailableReason.INSUFFICIENT_DATA
 
 
+@pytest.mark.property
+def test_fatigued_segment_too_short_is_insufficient() -> None:
+    """A fatigued segment shorter than the target ⇒ INSUFFICIENT_DATA (DUR-T4).
+
+    The threshold is crossed half a step into a 5-second tail, so the fatigued segment
+    has only 5 samples for a 300 s target — a partial window must never be averaged as
+    if it were a full one (the symmetric twin of the fresh-side case above).
+    """
+    power = np.concatenate([np.full(350, 330.0), np.full(5, 300.0)])
+    threshold = 350.0 * (330.0 - CP_W) + (300.0 - CP_W) / 2.0  # crosses at second 350
+    result = durability_decrement(power, CP_W, fatigue_threshold_j=threshold, target_duration_s=300)
+    assert isinstance(result, Unavailable)
+    assert result.reason is UnavailableReason.INSUFFICIENT_DATA
+    assert "fatigued" in result.detail
+
+
 # --- DUR-T5: fail-closed gates -----------------------------------------------------
 @pytest.mark.property
 def test_non_cycling_sport_not_applicable() -> None:

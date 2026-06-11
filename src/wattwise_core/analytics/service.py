@@ -432,7 +432,7 @@ class AnalyticsService:  # noqa: size-limits
         return await asyncio.to_thread(_mmp.cp_wprime, points, sport=sport)
 
     async def endurance_score(self, athlete_id: str, as_of: _dt.date) -> MetricResult[float]:
-        # Composed of upstream capability results only (CTL / durability / decoupling):
+        # Composed of upstream capability results only (CTL / curve_shape / decoupling):
         # gather lives in ._service_loaders, numeric truth in .endurance_score (ES-R2).
         """Composed ``[0,100]`` endurance score as-of a local date (ES-R1/R2/R3)."""
         return await _gather_endurance_score(self, athlete_id, as_of)
