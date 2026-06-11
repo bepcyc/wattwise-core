@@ -17,24 +17,23 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
-from collections import defaultdict
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from wattwise_core.analytics import _service_load as _load_path
 from wattwise_core.analytics import decoupling as _dec
 from wattwise_core.analytics import hrv as _hrv
 from wattwise_core.analytics import load_resolution as _load_res
-from wattwise_core.analytics import load_substitution as _ls
 from wattwise_core.analytics import mmp_cp as _mmp
 from wattwise_core.analytics import np_if_tss as _np
 from wattwise_core.analytics import pmc as _pmc
+from wattwise_core.analytics import srpe as _srpe
 from wattwise_core.analytics import trimp as _trimp
 from wattwise_core.analytics import wbal as _wbal
 from wattwise_core.analytics._service_es import _gather_endurance_score
 from wattwise_core.analytics._service_loaders import (
     _activities_in_local_range,
-    _activity_local_date,
     _f,
     _fold_curve_point,
     _load_activity_channels,
@@ -59,8 +58,7 @@ from wattwise_core.analytics.result import (
     is_computed,
 )
 from wattwise_core.analytics.series import Stream, resample_to_1hz
-from wattwise_core.domain.coverage import Coverage
-from wattwise_core.domain.enums import Fidelity, StreamChannelName
+from wattwise_core.domain.enums import StreamChannelName
 from wattwise_core.persistence.models import Activity, Athlete, FitnessSignature
 
 ENGINE_VERSION = "analytics-1"
@@ -239,6 +237,25 @@ class AnalyticsService:  # noqa: size-limits
         sex = await _load_athlete_sex(self._session, str(act.athlete_id))
         return _trimp.banister_hr_load(hr, sig.max_hr_bpm, sig.resting_hr_bpm, sex)
 
+    async def srpe(self, activity_id: str) -> MetricResult[float]:
+        """Compute the session-RPE load for an activity (SRPE-R1).
+
+        Reads the canonical athlete-reported ``perceived_exertion`` and the session
+        duration (``moving_time_s``, else ``elapsed_time_s`` — Foster's method prices
+        the whole session) and delegates to the pure
+        :func:`~wattwise_core.analytics.srpe.srpe_load`. An unreported session fails
+        closed inside the metric (``MISSING_REQUIRED_INPUT``), never a default RPE.
+        """
+        act = await self._activity(activity_id)
+        if act is None:
+            return Unavailable(_MISSING, "unknown activity")
+        duration = act.moving_time_s if act.moving_time_s is not None else act.elapsed_time_s
+        return _srpe.srpe_load(
+            _f(act.perceived_exertion),
+            None if duration is None else float(duration),
+            sport=act.sport,
+        )
+
     # --- athlete-level metrics ---
 
     async def _athlete_or_fail(self, athlete_id: str) -> Athlete:
@@ -270,77 +287,11 @@ class AnalyticsService:  # noqa: size-limits
 
         Reads RESOLVED canonical activities (DEDUP-R4 — never per-source rows); a no-activity
         day is a real ``0`` rest day, a computable-load-less day is a surfaced ``None`` (never
-        a silent zero). See :meth:`_daily_loads_with_coverage` for the per-day coverage.
+        a silent zero). The per-day resolution (LOAD-R3 fallback over the ``training_load``
+        members + DEGR-R2 coverage) lives in :mod:`wattwise_core.analytics._service_load`.
         """
-        loads, _ = await self._daily_loads_with_coverage(athlete_id, from_date, to_date)
+        loads, _ = await _load_path.daily_loads_with_coverage(self, athlete_id, from_date, to_date)
         return loads
-
-    async def _daily_loads_with_coverage(
-        self, athlete_id: str, from_date: _dt.date, to_date: _dt.date
-    ) -> tuple[dict[_dt.date, float | None], dict[_dt.date, Coverage | None]]:
-        """Resolve per-day load AND its equivalence-class coverage in one pass (LOAD-R1/DEGR-R2).
-
-        Each resolved activity contributes its load once via the LOAD-R3 fallback; a day is
-        flagged SUBSTITUTED iff ANY contributing activity's load came from a lower-fidelity
-        member (DEGR-R2 — a partially substituted day is never presented at full fidelity).
-        """
-        activities = await self._activities_in_range(athlete_id, from_date, to_date)
-        by_day: dict[_dt.date, float] = defaultdict(float)
-        substituted_day: set[_dt.date] = set()
-        loaded_day: set[_dt.date] = set()
-        seen: set[_dt.date] = set()
-        if activities:
-            # Any activity in range implies a real athlete row; load it for bucketing only then,
-            # so an athlete with no data yields an all-rest series without needing a reference tz.
-            athlete = await self._athlete_or_fail(athlete_id)
-            for act in activities:
-                # GBO-R35: attribute the activity to its athlete-LOCAL calendar day (the
-                # persisted local_date, recomputed from start_time + as-of tz when absent),
-                # NOT the UTC date.
-                day = _activity_local_date(act, athlete)
-                seen.add(day)
-                contribution = await self._activity_load(str(act.activity_id))
-                if contribution is not None:
-                    by_day[day] += contribution.value
-                    loaded_day.add(day)
-                    if contribution.coverage.fidelity is Fidelity.SUBSTITUTED:
-                        substituted_day.add(day)
-        loads: dict[_dt.date, float | None] = {}
-        coverage: dict[_dt.date, Coverage | None] = {}
-        cur = from_date
-        while cur <= to_date:
-            # A day with no activity is a real 0 rest day; a day that had an activity
-            # but no computable load is a surfaced None, never a silent zero (LOAD-R1).
-            loads[cur] = by_day.get(cur, None if cur in seen else 0.0)
-            coverage[cur] = _ls.day_load_coverage(
-                has_load=cur in loaded_day, substituted=cur in substituted_day
-            )
-            cur += _dt.timedelta(days=1)
-        return loads, coverage
-
-    async def _activity_load(self, activity_id: str) -> _ls.LoadContribution | None:
-        """Per-activity training load by the LOAD-R3 priority: power_tss -> hr_load -> None.
-
-        Resolves the ``training_load`` equivalence class (DM-SUB-R1) from the SINGLE
-        per-activity bundle so the daily-load path and the activity-detail surface agree on
-        the same load model (LOAD-R4): power-TSS (the ``raw_stream`` top member) else the
-        labeled HR load (``hr_load`` / ``hr_load_zonal``, honouring the athlete default,
-        resolved into the bundle per LOAD-R4) carried as a SUBSTITUTED contribution
-        (DEGR-R2) — so a withdrawn power source never presents an HR load as power-TSS —
-        else ``None`` (empty class: a surfaced unknown-load day, DEGR-R3). The bundle's
-        ``load_model`` records which family produced it, so the two load families are never
-        silently mixed (TSS-R3 / LOAD-R4).
-        """
-        bundle = await self.coggan(activity_id)
-        if not is_computed(bundle):
-            return None
-        tss = bundle.value.tss
-        if is_computed(tss):
-            return _ls.LoadContribution(float(tss.value), _ls.LOAD_TOP_COVERAGE)
-        hr_load = bundle.value.hr_load
-        if is_computed(hr_load):
-            return _ls.LoadContribution(float(hr_load.value), _ls.LOAD_SUBSTITUTED_COVERAGE)
-        return None
 
     async def _earliest_activity_date(self, athlete_id: str) -> _dt.date | None:
         """The athlete-LOCAL date of the first-ever activity, or ``None`` if none (GBO-R35).
@@ -382,7 +333,9 @@ class AnalyticsService:  # noqa: size-limits
         origin = from_date if seed is not None else (await self._earliest_activity_date(athlete_id))
         if origin is None or origin > from_date:
             origin = from_date
-        loads, day_cov = await self._daily_loads_with_coverage(athlete_id, origin, to_date)
+        loads, day_cov = await _load_path.daily_loads_with_coverage(
+            self, athlete_id, origin, to_date
+        )
         ordered = sorted(loads)
         series = [loads[d] for d in ordered]
         # Thread per-day load coverage: a day fed by a substituted member carries

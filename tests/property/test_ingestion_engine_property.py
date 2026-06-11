@@ -245,6 +245,8 @@ _CANONICAL_ACTIVITY_KEYS = {
     "avg_speed_mps",
     "elevation_gain_m",
     "avg_temp_c",
+    "perceived_exertion",
+    "feel",
     "device_class",
     "has_power",
     "has_hr",

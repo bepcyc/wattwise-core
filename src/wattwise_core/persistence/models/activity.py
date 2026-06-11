@@ -91,6 +91,14 @@ class Activity(Base, TimestampMixin):
     avg_speed_mps: Mapped[float | None] = numeric_column(nullable=True)
     elevation_gain_m: Mapped[float | None] = numeric_column(nullable=True)
     avg_temp_c: Mapped[float | None] = numeric_column(nullable=True)
+    # Athlete-reported session exertion on the CR-10 scale (0..10, SRPE-R1): the ONLY
+    # internal-load input that exists for power-less, HR-less sessions (strength, most
+    # swims). Captured from the source when it carries one (FIT perceived_exertion,
+    # intervals.icu icu_rpe); NULL is a typed absence — never imputed to a default.
+    perceived_exertion: Mapped[float | None] = numeric_column(nullable=True)
+    # Athlete-reported session feel, the intervals.icu 1..5 ordinal (1 = strong,
+    # 5 = weak). A subjective summary token, not a load input; NULL when unreported.
+    feel: Mapped[int | None] = smallint_column(nullable=True)
     training_effect_aerobic: Mapped[float | None] = numeric_column(nullable=True)
     anaerobic_effect: Mapped[float | None] = numeric_column(nullable=True)
     vo2max_estimate: Mapped[float | None] = numeric_column(nullable=True)
