@@ -42,6 +42,7 @@ from wattwise_core.api.routers.agent_caveat_schemas import (
     CoverageCaveatOut,
     PlanBodyOut,
 )
+from wattwise_core.api.routers.agent_request import catalog_locale
 from wattwise_core.api.sanitize import sanitize_html
 
 #: The athlete's HITL verdict on a paused approval-gated PLAN (API-R12a / CKPT-R9).
@@ -320,7 +321,7 @@ def _degraded_out(answer: AgentAnswer, locale: str) -> DegradedOut | None:
         if answer.coverage_caveat is not None
         else None
     )
-    reason = DEGRADED_REASON_BY_LOCALE.get(locale, DEGRADED_REASON_BY_LOCALE["en"])
+    reason = DEGRADED_REASON_BY_LOCALE[catalog_locale(locale)]
     return DegradedOut(reason_text=reason, coverage_caveat=caveat)
 
 

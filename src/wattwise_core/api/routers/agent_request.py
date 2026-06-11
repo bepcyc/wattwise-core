@@ -11,10 +11,12 @@ API-R11e), the ``Accept-Language`` -> locale resolution (API-R37), and the respo
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from wattwise_core.api.errors import FieldError, ProblemError
-from wattwise_core.api.routers.agent_schemas import AgentAskRequest, ResponseLength
+
+if TYPE_CHECKING:
+    from wattwise_core.api.routers.agent_schemas import AgentAskRequest, ResponseLength
 
 
 def validate_request(body: AgentAskRequest) -> None:
@@ -98,6 +100,22 @@ def header_locale(accept_language: str | None) -> str:
     return scan_header_locale(accept_language) or "en"
 
 
+def catalog_locale(tag: str | None) -> str:
+    """The model-free CATALOG key for a resolved locale tag (API-R37).
+
+    The directive (the coach's output language, LANG-R1/-R3) keeps the FULL well-formed BCP-47 tag
+    so a ``de-DE`` / ``zh-Hant`` / ``pt-BR`` request answers in exactly that variant. The model-free
+    fail-closed COPY (degraded reason, phase-gated gloss, limitation floor) ships only for the
+    enumerated :data:`SUPPORTED_LOCALES`, keyed by the PRIMARY language subtag — so the SAME tag
+    drives both roles from one value: ``de-DE`` -> directive ``de-DE`` + catalog key ``de``;
+    ``zh-Hant`` -> directive ``zh-Hant`` + catalog floor ``en``. The rule lives HERE so each catalog
+    lookup reduces a region/script tag to its primary subtag before the English floor, rather than
+    missing on the exact key. An unsupported primary subtag falls to ``en`` (the floor).
+    """
+    primary = (tag or "").split("-", 1)[0].strip().lower()
+    return primary if primary in SUPPORTED_LOCALES else "en"
+
+
 def resolve_locale(
     body: AgentAskRequest, accept_language: str | None, persisted: str | None = None
 ) -> str:
@@ -136,6 +154,7 @@ def resolve_response_length(body: AgentAskRequest) -> ResponseLength | None:
 
 __all__ = [
     "SUPPORTED_LOCALES",
+    "catalog_locale",
     "header_locale",
     "resolve_locale",
     "resolve_response_length",

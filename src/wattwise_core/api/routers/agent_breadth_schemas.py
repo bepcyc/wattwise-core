@@ -38,6 +38,7 @@ from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import Digest
 from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, InputCoverage
 from wattwise_core.agent.memory import RecalledItem
+from wattwise_core.api.routers.agent_request import catalog_locale
 from wattwise_core.api.routers.agent_schemas import (
     DEGRADED_REASON_BY_LOCALE,
     DegradedOut,
@@ -152,7 +153,7 @@ def render_digest(digest: Digest, trace_id: str, locale: str) -> DigestBody:
     degraded = None
     if digest.status is RunStatus.DEGRADED:
         caveat = dict(digest.coverage_caveat) if digest.coverage_caveat is not None else None
-        reason = DEGRADED_REASON_BY_LOCALE.get(locale, DEGRADED_REASON_BY_LOCALE["en"])
+        reason = DEGRADED_REASON_BY_LOCALE[catalog_locale(locale)]
         degraded = DegradedOut(reason_text=reason, coverage_caveat=caveat)
     return DigestBody(
         status=member,
