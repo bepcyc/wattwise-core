@@ -182,7 +182,7 @@ class _GroundingSettings(BaseModel):
     agent__entailment__max_checks: int = Field(ge=1)
 
 
-class Settings(_AnalyticsSettings, _GroundingSettings, BaseSettings):
+class Settings(_GroundingSettings, _AnalyticsSettings, BaseSettings):
     """Resolved, validated engine configuration.
 
     Fields are populated from the layered sources in :meth:`settings_customise_sources`.
@@ -326,36 +326,6 @@ class Settings(_AnalyticsSettings, _GroundingSettings, BaseSettings):
     adapters__intervals_icu__discover_page_size: int = Field(ge=1)
     ingestion__backfill_window_days: int = Field(ge=1)
 
-    # --- analytics (doc 40 constants) ---
-    analytics__ctl_time_constant_days: float = Field(gt=0)
-    analytics__atl_time_constant_days: float = Field(gt=0)
-    # DEGR-R2 substitution confidence multiplier (in (0,1]); the VALUE lives in defaults.toml
-    # (CFG-R1a), this declares only the typed schema + range constraint.
-    analytics__training_load_confidence_penalty: float = Field(gt=0, le=1)
-    # GBO-R28 fail-closed floor for a stored MODELED signature's fit quality (R^2);
-    # the VALUE lives in defaults.toml (CFG-R1a) — this is schema + range only.
-    analytics__signature_min_fit_r2: float = Field(ge=0, le=1)
-    # Endurance-score (ES-R1) declared weighting + normalization; the VALUES live in
-    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraints.
-    # Weights are relative, non-negative; the composition renormalizes over the present
-    # components, so only the SUM must be positive (validated at composition time).
-    analytics__endurance_score_weight_ctl: float = Field(ge=0)
-    analytics__endurance_score_weight_curve_shape: float = Field(ge=0)
-    analytics__endurance_score_weight_decoupling: float = Field(ge=0)
-    analytics__endurance_score_ctl_full_scale: float = Field(gt=0)
-    analytics__endurance_score_curve_shape_floor: float = Field(ge=0)
-    analytics__endurance_score_curve_shape_ceiling: float = Field(gt=0)
-    analytics__endurance_score_decoupling_full_penalty_pct: float = Field(gt=0)
-    analytics__endurance_score_allow_partial: bool
-    analytics__endurance_score_partial_confidence_penalty: float = Field(gt=0, le=1)
-    analytics__endurance_score_window_days: int = Field(ge=1)
-    analytics__endurance_score_long_duration_s: int = Field(ge=1)
-    analytics__endurance_score_short_duration_s: int = Field(ge=1)
-    # CP-R3/R4 pre-fit power-degeneracy epsilon (relative MMP power spread below which
-    # the fit refuses with INSUFFICIENT_DATA before any regression); the VALUE lives in
-    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraint.
-    analytics__cp_power_spread_epsilon: float = Field(gt=0, lt=1)
-
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str
     # 2026 default model + budget live in defaults.toml (MODEL-R5a); the budget is
@@ -434,8 +404,6 @@ class Settings(_AnalyticsSettings, _GroundingSettings, BaseSettings):
     agent__eval__median_cost_usd: float = Field(gt=0)
     agent__eval__p95_latency_ms: float = Field(gt=0)
     agent__eval__cost_per_1k_tokens_usd: float = Field(gt=0)
-    # QA-EVAL-R12(b): live-mode max INFRA_ERROR rate before alert + blocked promotion.
-    agent__eval__max_infra_error_rate: float = Field(gt=0, le=1)
     agent__metric_aliases: dict[str, str]
 
     # --- agent grounding-faithfulness fields live on the _GroundingSettings mixin
@@ -645,9 +613,6 @@ _EVAL_BUDGET_KEYS: tuple[str, ...] = (
     "agent__eval__median_cost_usd",
     "agent__eval__p95_latency_ms",
     "agent__eval__cost_per_1k_tokens_usd",
-    # The live-mode max infrastructure-error rate (QA-EVAL-R12(b)): the fraction of live
-    # cases allowed to land INFRA_ERROR before the run alerts and blocks promotion.
-    "agent__eval__max_infra_error_rate",
 )
 
 
