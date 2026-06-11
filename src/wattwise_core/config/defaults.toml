@@ -212,6 +212,15 @@ endurance_score_short_duration_s = 300
 # with a tiny spurious positive intercept on one BLAS build and a non-positive one on
 # another). The VALUE lives here (CFG-R1a), never a code literal.
 cp_power_spread_epsilon = 1e-6
+# --- session-RPE load (SRPE-R1): the last-resort training_load class member ---
+# Foster's session-RPE method scaled into the training_load class's TSS-commensurate
+# currency via the industry RPE-as-intensity mapping (the convention intervals.icu uses):
+#   srpe_load = (RPE / rpe_full_scale)^2 * (duration_s / 3600) * load_per_hour_at_full_scale
+# CR-10 full scale is 10; an hour at the athlete's reported maximum reads as 100 — the
+# same shape as TSS = IF^2 * hours * 100, with RPE/10 standing in for IF. Both knobs
+# live here (CFG-R1a), never as code literals.
+srpe_rpe_full_scale = 10.0
+srpe_load_per_hour_at_full_scale = 100.0
 
 [agent]
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.
@@ -612,4 +621,9 @@ penalty = "moderate"
 metric = "hr_trimp"
 tier = "modeled"
 note = "HR-derived proxy estimate of load (Banister TRIMP); weather/drift sensitive"
+penalty = "high"
+[[canonical.equivalence_class.members]]
+metric = "srpe_load"
+tier = "summary_only"
+note = "session-RPE load (Foster): athlete-reported exertion x duration; subjective scale"
 penalty = "high"

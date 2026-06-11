@@ -149,6 +149,16 @@ TRIMP_B_MALE: Final = 1.92  # TRIMP-R1
 TRIMP_A_FEMALE: Final = 0.86  # TRIMP-R1
 TRIMP_B_FEMALE: Final = 1.67  # TRIMP-R1
 
+# --- session-RPE load (SRPE-R1) — the last-resort training_load class member ---
+# Foster's session-RPE scaled into the class's TSS-commensurate currency via the
+# RPE-as-intensity mapping (srpe_load = (RPE/full_scale)^2 * hours * per_hour). The
+# VALUES are NOT code literals (CFG-R1a): they load from ``[analytics]`` in the
+# packaged defaults.toml, typed + range-validated by ``Settings.analytics__srpe_*``.
+SRPE_RPE_FULL_SCALE: Final[float] = _analytics_default("srpe_rpe_full_scale")
+SRPE_LOAD_PER_HOUR_AT_FULL_SCALE: Final[float] = _analytics_default(
+    "srpe_load_per_hour_at_full_scale"
+)
+
 # --- HRV ---
 HRV_ARTIFACT_CEILING_FRAC: Final = 0.05  # HRV-R2
 HRV_MIN_DURATION_S: Final = 120  # HRV-R4 (≥ 2 min usable)

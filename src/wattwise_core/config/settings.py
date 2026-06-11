@@ -346,6 +346,11 @@ class Settings(_GroundingSettings, BaseSettings):
     # the fit refuses with INSUFFICIENT_DATA before any regression); the VALUE lives in
     # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraint.
     analytics__cp_power_spread_epsilon: float = Field(gt=0, lt=1)
+    # Session-RPE load mapping knobs (SRPE-R1): the reported-exertion full scale (CR-10)
+    # and the load one hour at full scale reads as (the TSS-commensurate anchor); the
+    # VALUES live in defaults.toml (CFG-R1a) — this declares only schema + range.
+    analytics__srpe_rpe_full_scale: float = Field(gt=0)
+    analytics__srpe_load_per_hour_at_full_scale: float = Field(gt=0)
 
     # --- agent (model-routing seam, grounding) ---
     agent__base_url: str
