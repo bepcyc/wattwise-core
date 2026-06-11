@@ -26,6 +26,15 @@ semver derived from Conventional Commits.
     reports are immutable lineage and are not rewritten.
 
 ### Added
+- Probative E2E smoke (issue #29, ADR 0007): `tools/fit_forge.py` — a stdlib-only,
+  deterministic FIT activity forge whose timestamps are computed relative to "now"
+  (round-trip-pinned to the production `garmin-fit-sdk` decode path by a unit
+  contract) — and a reworked `tools/e2e_smoke.py` that pins BOTH truthful-agent
+  guarantees separately: the honest refusal on an empty profile (`degraded` + zero
+  citations) and a grounded `completed` answer with ≥ 1 citation over the forged
+  recent batch (`degraded` no longer passes the answer step). The smoke also sets the
+  owner FTP signature over the API and asserts a model-free recency proof (PMC over
+  the last two weeks shows non-zero fitness off the forged batch).
 - Durability / fatigue resistance (issue #26): the work-conditioned power decrement —
   best target-duration power fresh vs. after a per-athlete amount of accumulated work
   above Critical Power (the intensity-weighted W′-expenditure axis), with sufficiency
