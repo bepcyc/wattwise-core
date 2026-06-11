@@ -142,6 +142,17 @@ def endurance_score(
     raw = 100.0 * sum(_WEIGHTS[name] * scores[name] for name in scores) / weight_sum
     value = min(100.0, max(0.0, raw))  # ES-R3: the bound is part of the normalization
     confidence = ES_PARTIAL_CONFIDENCE_PENALTY if missing else 1.0
+    # NOTE: these component keys ("ctl"/"curve_shape"/"decoupling") and the
+    # components_present/components_missing report are DERIVED PER REQUEST and NEVER PERSISTED.
+    # endurance-score is computed in-flight via AnalyticsService.endurance_score() (returns a
+    # MetricResult[float]); it has no agent capability resolver (absent from
+    # agent.capabilities.RESOLVERS), so it never enters durable agent state/checkpoints, and no
+    # DB column or coach deliverable stores this QualityReport.extra (the wellness
+    # endurance_score column is an unrelated ingested source scalar). The "durability" ->
+    # "curve_shape" rename therefore needs no read-side migration shim — there are no stored
+    # records carrying the old component string. (Operator CONFIG-key compatibility, which DOES
+    # have a persistence surface via env/file overrides, is handled by the fail-closed rename
+    # guard in config/_renamed_keys.py.)
     quality = QualityReport(
         confidence=confidence,
         extra={
