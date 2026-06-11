@@ -34,6 +34,8 @@ from wattwise_core.agent.engine_planner import ModelPlanner, PlanCapability
 from wattwise_core.agent.engine_planner import (
     _PlanSchema as _PlanSchema,  # noqa: PLC0414  explicit re-export (historical import path)
 )
+from wattwise_core.agent.grounding_binding import BindingGuard, guard_from_settings
+from wattwise_core.agent.grounding_entailment import EntailmentGate, gate_from_settings
 from wattwise_core.agent.grounding_evidence import CANONICAL_WORKOUT_NAMES, ClaimGrounder
 from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.seams import AgentServices
@@ -93,8 +95,10 @@ class CoachBundle:
 
     __slots__ = (
         "allowed_hosts",
+        "binding",
         "claim_system",
         "detailed_compose_directive",
+        "entailment",
         "equivalence",
         "locales",
         "lookback_days",
@@ -125,6 +129,8 @@ class CoachBundle:
         manifest: CoachManifest | None = None,
         locales: LocalePolicy | None = None,
         detailed_compose_directive: str = "",
+        binding: BindingGuard | None = None,
+        entailment: EntailmentGate | None = None,
     ) -> None:
         self.system_prompt = system_prompt
         self.equivalence = equivalence if equivalence is not None else MetricEquivalence({})
@@ -165,6 +171,13 @@ class CoachBundle:
         # (a detailed deep-dive with zero cited numbers is under-informative). Loaded content
         # (CFG-R1a); the empty default keeps the prior compose behaviour for no-bundle seams.
         self.detailed_compose_directive = detailed_compose_directive
+        # Issue #10 binding-faithful grounding layers (proposed GROUND-R10/R11): the
+        # deterministic claim-binding guard and the optional decorrelated entailment gate,
+        # threaded into EVERY grounder this bundle builds (answer/digest/plan-edit). The
+        # ``None`` defaults preserve the prior value-only behaviour for the empty bundle
+        # (the FakeModel suite); ``from_settings`` wires the loaded config in.
+        self.binding = binding
+        self.entailment = entailment
 
     @property
     def compose_system(self) -> str:
@@ -201,9 +214,10 @@ class CoachBundle:
             manifest=settings.agent__coach__manifest,
             skills=settings.agent__coach__skills,
         )
+        equivalence = MetricEquivalence(settings.agent__metric_aliases)
         return cls(
             system_prompt=settings.agent__coach__system_prompt,
-            equivalence=MetricEquivalence(settings.agent__metric_aliases),
+            equivalence=equivalence,
             tolerance=_grounding.NumericTolerance(
                 rel=settings.agent__coach__grounding_rel_tolerance,
                 abs_=settings.agent__coach__grounding_abs_tolerance,
@@ -232,6 +246,12 @@ class CoachBundle:
                 passthrough_directive=settings.agent__coach__language_passthrough_directive,
             ),
             detailed_compose_directive=settings.agent__coach__prompts["detailed_compose_directive"],
+            # Issue #10 layers, both loaded config (CFG-R1a): the GROUND-R10 binding guard
+            # (mode validated through the closed enum — a bad mode fails the boot) and the
+            # optional GROUND-R11 entailment gate (a configured-but-malformed calibration
+            # artifact fails the boot closed too, GROUND-R12).
+            binding=guard_from_settings(settings, equivalence),
+            entailment=gate_from_settings(settings),
         )
 
     def services(
@@ -248,6 +268,8 @@ class CoachBundle:
             lookback_days=self.lookback_days,
             plan_system=self.plan_system,
             claim_system=self.claim_system,
+            binding=self.binding,
+            entailment=self.entailment,
         )
 
     def grounder(self, model: ChatModel, svc: AnalyticsService) -> ClaimGrounder:
@@ -260,6 +282,8 @@ class CoachBundle:
             allowed_hosts=self.allowed_hosts,
             lookback_days=self.lookback_days,
             claim_system=self.claim_system,
+            binding=self.binding,
+            entailment=self.entailment,
         )
 
 
@@ -275,6 +299,8 @@ def build_services(
     lookback_days: int | None = None,
     plan_system: str = "",
     claim_system: str = "",
+    binding: BindingGuard | None = None,
+    entailment: EntailmentGate | None = None,
 ) -> AgentServices:
     """Assemble the concrete production service bundle for the graph (GRAPH-R5).
 
@@ -305,6 +331,8 @@ def build_services(
             allowed_hosts=allowed_hosts,
             lookback_days=lookback_days,
             claim_system=claim_system,
+            binding=binding,
+            entailment=entailment,
         ),
     )
 

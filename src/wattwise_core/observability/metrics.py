@@ -32,6 +32,15 @@ from dataclasses import dataclass, field
 # logging field allowlist). Names follow the Prometheus convention (unit suffix on summaries).
 GROUNDING_RUNS = "wattwise_agent_grounding_runs_total"
 GROUNDING_SCRUBS = "wattwise_agent_grounding_scrubs_total"
+# Issue #10 binding-faithful grounding signals (proposed GROUND-R10/R11): binding-guard
+# events (rebinds + residual violations, labelled by event + mode so a SHADOW rollout is
+# observable before ENFORCE — a drifting claim extractor shows up HERE), entailment-gate
+# checks/vetoes, and verifier-unavailable degradations (the "deterministic-layers-only +
+# recorded" fail-closed path — alertable, AGT-OBS-R7).
+GROUNDING_BINDING_EVENTS = "wattwise_agent_grounding_binding_events_total"
+ENTAILMENT_CHECKS = "wattwise_agent_grounding_entailment_checks_total"
+ENTAILMENT_VETOES = "wattwise_agent_grounding_entailment_vetoes_total"
+ENTAILMENT_UNAVAILABLE = "wattwise_agent_grounding_entailment_unavailable_total"
 VALIDATION_FAILURES = "wattwise_agent_structured_validation_failures_total"
 REFLECTIONS = "wattwise_agent_reflections_total"
 REFLECTION_EXHAUSTIONS = "wattwise_agent_reflection_exhaustions_total"
@@ -200,6 +209,10 @@ def get_registry() -> MetricsRegistry:
 __all__ = [
     "ENDPOINT_LATENCY_SECONDS",
     "ENDPOINT_REQUESTS",
+    "ENTAILMENT_CHECKS",
+    "ENTAILMENT_UNAVAILABLE",
+    "ENTAILMENT_VETOES",
+    "GROUNDING_BINDING_EVENTS",
     "GROUNDING_RUNS",
     "GROUNDING_SCRUBS",
     "INJECTION_ANOMALIES",

@@ -24,8 +24,16 @@ from wattwise_core.agent import grounding as _grounding
 from wattwise_core.agent import grounding_sweep as _sweep
 from wattwise_core.agent.capabilities import CanonicalEvidence, MetricEquivalence
 from wattwise_core.agent.contracts import ChatModel, Claim, ClaimKind, GroundingResult
+from wattwise_core.agent.grounding_binding import BindingGuard, BindingMode
+from wattwise_core.agent.grounding_entailment import EntailmentGate
+from wattwise_core.agent.grounding_factsheet import render_fact_sheet
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
 from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.observability import metrics as obs_metrics
+from wattwise_core.observability.logging import get_logger
+from wattwise_core.persistence.types import utcnow
+
+_logger = get_logger(__name__)
 
 # The canonical training-prescription workout NAME library (GROUND-R2). A prescribed workout NAME
 # in a multi-day PLAN deliverable grounds ONLY if it normalizes to one of these canonical
@@ -177,6 +185,8 @@ class ClaimGrounder:
         allowed_hosts: frozenset[str] | None = None,
         lookback_days: int | None = None,
         claim_system: str = "",
+        binding: BindingGuard | None = None,
+        entailment: EntailmentGate | None = None,
     ) -> None:
         self._model = model
         self._svc = svc
@@ -195,6 +205,11 @@ class ClaimGrounder:
         # inline (CFG-R3 / ARCH-R29). Empty default preserves the prior FakeModel-suite behaviour
         # (the suite scripts the extracted claims, so the prompt text is immaterial offline).
         self._claim_system = claim_system
+        # Issue #10 binding-faithful layers, both OPTIONAL so every existing seam/test keeps its
+        # prior value-only behaviour: ``binding`` is the deterministic GROUND-R10 guard (its mode
+        # decides enforce/shadow/off), ``entailment`` the decorrelated GROUND-R11 sentence gate.
+        self._binding = binding
+        self._entailment = entailment
 
     async def ground(
         self,
@@ -214,6 +229,8 @@ class ClaimGrounder:
             ]
         except (StructuredOutputError, NotImplementedError):
             claims = []
+        guard = self._anchored_guard()
+        claims = self._rebind_claims(guard, draft, claims)
         evidence = CanonicalEvidence(
             self._svc,
             athlete_id,
@@ -234,14 +251,86 @@ class ClaimGrounder:
             if request_text
             else frozenset()
         )
-        return _grounding.ground(
+        result = _grounding.ground(
             draft,
             claims,
             snapshot_evidence,
             allow_urls=(),
             tolerance=self._tolerance,
             request_numbers=request_numbers,
+            binding=guard if guard is not None and guard.mode is BindingMode.ENFORCE else None,
         )
+        return await self._apply_entailment(result, snapshots, retrieved, request_text)
+
+    def _anchored_guard(self) -> BindingGuard | None:
+        """The run's GROUND-R10 guard, anchored ONCE to the evidence's reference date.
+
+        Anchoring to the SAME clock the canonical evidence uses keeps the temporal rule
+        and the value reads on one reference date, and keeps ``ground`` a deterministic
+        function of its inputs (GRAPH-R4). ``None`` when unconfigured or mode ``off``.
+        """
+        if self._binding is None or self._binding.mode is BindingMode.OFF:
+            return None
+        return self._binding.anchored(self._reference_date or utcnow().date())
+
+    def _rebind_claims(
+        self, guard: BindingGuard | None, draft: str, claims: list[Claim]
+    ) -> list[Claim]:
+        """Re-derive each claim's canonical cell out of its own sentence (issue #10, R10).
+
+        Runs BEFORE snapshot resolution, so the values fetched and verified are the cells
+        the SENTENCES assert — the model's extracted binding cannot route verification.
+        Every rebind is recorded (alertable counter + log: a drifting extractor is an
+        operational signal, AGT-OBS-R7). SHADOW records what WOULD change and applies
+        nothing; residual non-rebindable inconsistencies are recorded here too and fail
+        closed inside ``ground`` when the mode is ENFORCE.
+        """
+        if guard is None:
+            return claims
+        rebound, events = guard.rebind(draft, claims)
+        registry = obs_metrics.get_registry()
+        for event in (*events, *guard.assess(draft, rebound)):
+            registry.increment(
+                obs_metrics.GROUNDING_BINDING_EVENTS,
+                labels={"event": event.value, "mode": guard.mode.value},
+            )
+        if events:
+            _logger.warning(
+                "grounding_binding_rebound",
+                mode=guard.mode.value,
+                events=[e.value for e in events],
+            )
+        return list(rebound) if guard.mode is BindingMode.ENFORCE else claims
+
+    async def _apply_entailment(
+        self,
+        result: GroundingResult,
+        snapshots: Mapping[tuple[str, str | None], float | None],
+        retrieved: Mapping[str, Any],
+        request_text: str | None,
+    ) -> GroundingResult:
+        """Run the optional GROUND-R11 sentence gate over the grounded result (issue #10).
+
+        The fact sheet is rendered by CODE from the same snapshots the value gate verified
+        against plus the turn's retrieved records (and the athlete's own request, so an
+        echoed constraint is entailed rather than vetoed). A verifier failure degrades to
+        the deterministic layers and is RECORDED (counter + log) — never silently open.
+        """
+        if self._entailment is None or not result.scrubbed_text.strip():
+            return result
+        facts = render_fact_sheet(snapshots, retrieved, request_text=request_text)
+        gated, report = await self._entailment.apply(result, facts=facts)
+        registry = obs_metrics.get_registry()
+        if report.unavailable:
+            registry.increment(obs_metrics.ENTAILMENT_UNAVAILABLE)
+            _logger.warning("grounding_entailment_unavailable")
+            return gated
+        if report.checked:
+            registry.increment(obs_metrics.ENTAILMENT_CHECKS, amount=float(report.checked))
+        if report.vetoed:
+            registry.increment(obs_metrics.ENTAILMENT_VETOES, amount=float(len(report.vetoed)))
+            _logger.warning("grounding_entailment_vetoes", count=len(report.vetoed))
+        return gated
 
 
 __all__ = [

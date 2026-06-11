@@ -59,6 +59,16 @@ class MetricEquivalence:
                 return resolved
         return None
 
+    def surface_forms(self) -> frozenset[str]:
+        """Every folded surface form this layer can resolve (alias keys + canonical keys).
+
+        The vocabulary the BINDING guard scans a claim's sentence with (issue #10, proposed
+        GROUND-R10a): the guard and the value verifier must share ONE metric vocabulary, so
+        the guard reads it from here rather than re-declaring labels. Pure and loaded-content
+        derived — adding an alias in ``[agent.metric_aliases]`` extends both layers at once.
+        """
+        return frozenset(self._aliases) | frozenset(member.value for member in MetricName)
+
     def _resolve_exact(self, folded: str) -> str | None:
         """Resolve one already-folded candidate via the canonical enum / loaded alias map."""
         try:

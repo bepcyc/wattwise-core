@@ -53,6 +53,12 @@ trusted as usual.
   total confidence. Here the model never self-certifies: it proposes claims, and
   deterministic code verifies each one against canonical data before it reaches you.
   Unverifiable numbers are scrubbed — when in doubt, the agent abstains.
+  And checking goes beyond "does this number exist somewhere in your data": each sentence
+  is verified to mean what your record says. The words you read pick the metric and the
+  date the number is checked against — so "your fatigue is 71" can never be quietly
+  "verified" against your fitness, and a stale value can never be passed off as today's.
+  When the wires get crossed, the agent doesn't just delete the number — it puts the true
+  one in its place.
 - **Sports-science metrics done carefully.** PMC, NP/IF/TSS, CP/W′, W′bal, aerobic
   decoupling, HRV, TRIMP — computed from the canonical record, with an offline evaluation
   suite guarding the agent's grounding and abstention behavior.
@@ -79,6 +85,11 @@ trusted as usual.
   by DSN only; no code changes, no vendor-specific SQL outside one audited seam.
 - **Hardened by design** — prompt-injection isolation, server-derived identity end to end,
   fail-closed boot, and an offline agent eval suite.
+- **Binding-faithful answers** — the sentence you read selects what it is checked against:
+  metric wording and dates in the prose pick the canonical cell, mis-attributed figures are
+  corrected in place, and an optional self-hosted fact-checking model
+  ([MiniCheck](https://arxiv.org/abs/2404.10774)) re-reads every claim sentence against your
+  data — with statistically calibrated strictness when you provide a calibration set.
 - **Self-hosted, single-athlete** — one instance per human; a radically simpler trust and
   data model.
 
