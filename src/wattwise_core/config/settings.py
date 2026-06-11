@@ -81,6 +81,10 @@ def _read_toml(path: Path) -> dict[str, Any]:
 _LEAF_TABLE_KEYS: frozenset[str] = frozenset(
     {
         "agent__metric_aliases",
+        # The multilingual workout-name equivalence table (#17 / GROUND-R2): a localized
+        # workout name -> canonical English name map the grounder resolves a prescribed plan
+        # NAME claim through, mirroring ``agent__metric_aliases``. One dict-valued setting.
+        "agent__workout_aliases",
         # The externalized coach-config behavior-asset tables (§16 / SKILL-R1/-R3): each is a
         # free-form name->content map (prompt fragments, grounding rules) or a single closed
         # record (the bundle manifest) the engine consumes WHOLE, not a nested set of scalar
@@ -386,6 +390,12 @@ class Settings(BaseSettings):
     agent__eval__p95_latency_ms: float = Field(gt=0)
     agent__eval__cost_per_1k_tokens_usd: float = Field(gt=0)
     agent__metric_aliases: dict[str, str]
+    # Multilingual canonical workout-NAME equivalence (#17 / GROUND-R2): a localized (or English
+    # synonym) workout name -> canonical English name the grounder resolves a prescribed PLAN
+    # NAME claim through, mirroring ``agent__metric_aliases``. The canonical values MUST be members
+    # of ``CANONICAL_WORKOUT_NAMES``; a name outside the table and not itself canonical scrubs
+    # (fail-closed, GROUND-R3). Shape-only here; resolution is owned by ``WorkoutEquivalence``.
+    agent__workout_aliases: dict[str, str]
 
     # --- retention ---
     retention__raw_file_days: int = Field(ge=0)

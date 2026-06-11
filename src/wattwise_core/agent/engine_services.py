@@ -34,7 +34,11 @@ from wattwise_core.agent.engine_planner import ModelPlanner, PlanCapability
 from wattwise_core.agent.engine_planner import (
     _PlanSchema as _PlanSchema,  # noqa: PLC0414  explicit re-export (historical import path)
 )
-from wattwise_core.agent.grounding_evidence import CANONICAL_WORKOUT_NAMES, ClaimGrounder
+from wattwise_core.agent.grounding_evidence import (
+    CANONICAL_WORKOUT_NAMES,
+    ClaimGrounder,
+    WorkoutEquivalence,
+)
 from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.seams import AgentServices
 from wattwise_core.agent.skills import CoachManifest, load_manifest
@@ -106,12 +110,14 @@ class CoachBundle:
         "shared_preamble",
         "system_prompt",
         "tolerance",
+        "workout_equivalence",
     )
 
     def __init__(
         self,
         system_prompt: str = "",
         equivalence: MetricEquivalence | None = None,
+        workout_equivalence: WorkoutEquivalence | None = None,
         tolerance: _grounding.NumericTolerance | None = None,
         allowed_hosts: frozenset[str] = frozenset(),
         lookback_days: int | None = None,
@@ -128,6 +134,16 @@ class CoachBundle:
     ) -> None:
         self.system_prompt = system_prompt
         self.equivalence = equivalence if equivalence is not None else MetricEquivalence({})
+        # The config-loaded multilingual workout-name equivalence (#17 / GROUND-R2): resolves a
+        # localized prescription NAME claim onto the canonical English id so a non-English PLAN
+        # grounds instead of scrubbing every workout name. The empty default (no aliases, only the
+        # CANONICAL_WORKOUT_NAMES floor) preserves the prior English-only behaviour for no-bundle
+        # seams; :meth:`from_settings` wires the loaded [agent.workout_aliases] table.
+        self.workout_equivalence = (
+            workout_equivalence
+            if workout_equivalence is not None
+            else WorkoutEquivalence({}, CANONICAL_WORKOUT_NAMES)
+        )
         self.tolerance = tolerance if tolerance is not None else _grounding.NumericTolerance()
         # GROUND-R4 first-party URL allow-list + §16 dateless-claim lookback, loaded content
         # (CFG-R1a). The empty default bundle ships no hosts (fail-closed) and no lookback override.
@@ -204,6 +220,12 @@ class CoachBundle:
         return cls(
             system_prompt=settings.agent__coach__system_prompt,
             equivalence=MetricEquivalence(settings.agent__metric_aliases),
+            # The loaded multilingual workout-name table (#17): localized name -> canonical English
+            # name, validated against the CANONICAL_WORKOUT_NAMES floor (a misconfigured value is
+            # dropped, fail-closed). The PLAN grounder resolves prescription names through this.
+            workout_equivalence=WorkoutEquivalence(
+                settings.agent__workout_aliases, CANONICAL_WORKOUT_NAMES
+            ),
             tolerance=_grounding.NumericTolerance(
                 rel=settings.agent__coach__grounding_rel_tolerance,
                 abs_=settings.agent__coach__grounding_abs_tolerance,
@@ -242,6 +264,11 @@ class CoachBundle:
             model,
             svc,
             allow_names=allow_names,
+            # The PLAN path passes allow_names=CANONICAL_WORKOUT_NAMES; threading the loaded
+            # workout-equivalence here is what lets a localized prescription NAME ground (#17). A
+            # free-form (empty-allow_names) path still scrubs every NAME (the equivalence only
+            # resolves canonical concepts, never invents one), so behaviour there is unchanged.
+            workout_equivalence=self.workout_equivalence if allow_names else None,
             equivalence=self.equivalence,
             tolerance=self.tolerance,
             allowed_hosts=self.allowed_hosts,
@@ -268,6 +295,7 @@ def build_services(
     svc: AnalyticsService,
     *,
     allow_names: frozenset[str] = frozenset(),
+    workout_equivalence: WorkoutEquivalence | None = None,
     equivalence: MetricEquivalence | None = None,
     reference_date: _dt.date | None = None,
     tolerance: _grounding.NumericTolerance | None = None,
@@ -299,6 +327,7 @@ def build_services(
             model,
             svc,
             allow_names=allow_names,
+            workout_equivalence=workout_equivalence,
             equivalence=equivalence,
             reference_date=reference_date,
             tolerance=tolerance,

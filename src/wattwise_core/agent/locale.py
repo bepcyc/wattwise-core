@@ -48,6 +48,27 @@ _LIMITATION_FLOOR = {
     "Sinhroniziruj istochniki i ya posmotryu snova.",
 }
 
+# The deterministic readiness-sentence FLOOR for a caller with NO loaded language packs (#18 /
+# GROUND-R6, COACH-R7, OUTCOME-R4): the per-verdict state leads, the truthful abstain/stale-abstain
+# leads, and the HRV-missing / stale disclosure clauses — the SAME English text the readiness
+# deliverable used to hold as code constants, now relocated so a loaded pack's localized
+# ``readiness_*`` copy always wins (mirroring ``_LIMITATION_FLOOR``). Only the English floor lives
+# in code; DE/RU surface only through loaded packs (CFG-R3 / LANG-R1). The keys mirror the
+# ``[agent.coach.languages.<lang>]`` config keys (sans the ``readiness_`` prefix).
+_READINESS_FLOOR: dict[str, str] = {
+    "state_go": "You're fresh and ready for a hard day.",
+    "state_maintain": "You're in a steady place — keep things as planned.",
+    "state_ease": "You're carrying some fatigue, so ease off a little today.",
+    "state_rest": "You're deep in fatigue right now, so today is for rest.",
+    "abstain": "There isn't enough recent data to read your readiness yet.",
+    "stale_abstain": (
+        "I haven't seen any recent training data, so I can't read your readiness right now — "
+        "if you've been training, it's worth checking that your data sync is still connected."
+    ),
+    "hrv_unavailable": "I don't have a recent HRV reading, so this is from your form.",
+    "stale_data": "I haven't seen new training data in a few days, so this may lag where you are.",
+}
+
 #: The engine-baseline default language LANG-R4 pins for OSS ("en"); the LOADED bundle's
 #: ``default_language`` (config, operator-overridable to de/ru) governs whenever a bundle is wired.
 _BASELINE_DEFAULT_LANGUAGE = "en"
@@ -59,16 +80,50 @@ def _primary_subtag(locale: str | None) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ReadinessCopy:
+    """The readiness deliverable's localized surface sentences (#18 / COACH-R7, GROUND-R6).
+
+    The catalog-keyed readiness strings — per-verdict state leads, the abstain / stale-abstain
+    leads, and the HRV-missing / stale disclosure clauses — resolved for ONE language (loaded pack
+    copy, else the English code floor). The readiness deliverable composes its fail-closed lead from
+    THIS object instead of the former in-code English constants, so a localized run narrates its
+    deterministic sentences in the requested language too. ``state_for`` maps a verdict name (the
+    lowercase :class:`~wattwise_core.domain.enums.ReadinessVerdict` value) to its state lead.
+    """
+
+    state_go: str = ""
+    state_maintain: str = ""
+    state_ease: str = ""
+    state_rest: str = ""
+    abstain: str = ""
+    stale_abstain: str = ""
+    hrv_unavailable: str = ""
+    stale_data: str = ""
+
+    def state_for(self, verdict_value: str) -> str:
+        """The per-verdict state lead for a ``ReadinessVerdict`` value (``go``/``maintain``/…)."""
+        return {
+            "go": self.state_go,
+            "maintain": self.state_maintain,
+            "ease": self.state_ease,
+            "rest": self.state_rest,
+        }[verdict_value]
+
+
+@dataclass(frozen=True, slots=True)
 class LanguagePack:
     """One language's loaded surface content (LANG-R1; config, never engine code).
 
     ``compose_directive`` is the localized prompt VARIANT layered into the compose system prompt
     at composition time (LANG-R3) — written in the target language so the model answers in it
     end-to-end; ``limitation`` is the localized fail-closed abstain copy (GROUND-R6).
+    ``readiness`` carries this language's loaded readiness sentences (#18; empty fields fall back
+    to the English code floor at resolution time).
     """
 
     compose_directive: str = ""
     limitation: str = ""
+    readiness: ReadinessCopy = field(default_factory=ReadinessCopy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +170,19 @@ class LocalePolicy:
             _primary_subtag(lang): LanguagePack(
                 compose_directive=str(table.get("compose_directive", "")),
                 limitation=str(table.get("limitation", "")),
+                # The localized readiness sentences (#18): loaded by the SAME catalog-key convention
+                # as compose_directive/limitation — ``readiness_<key>`` in the language table. An
+                # absent key stays "" and falls back to the English floor at resolution time.
+                readiness=ReadinessCopy(
+                    state_go=str(table.get("readiness_state_go", "")),
+                    state_maintain=str(table.get("readiness_state_maintain", "")),
+                    state_ease=str(table.get("readiness_state_ease", "")),
+                    state_rest=str(table.get("readiness_state_rest", "")),
+                    abstain=str(table.get("readiness_abstain", "")),
+                    stale_abstain=str(table.get("readiness_stale_abstain", "")),
+                    hrv_unavailable=str(table.get("readiness_hrv_unavailable", "")),
+                    stale_data=str(table.get("readiness_stale_data", "")),
+                ),
             )
             for lang, table in languages.items()
         }
@@ -237,6 +305,48 @@ class LocalePolicy:
         loaded = self.packs.get(lang, LanguagePack()).limitation
         return loaded or _LIMITATION_FLOOR.get(lang, _LIMITATION_FLOOR["en"])
 
+    def readiness_copy(self, requested: str | None) -> ReadinessCopy:
+        """The resolved localized readiness sentences for the run (#18 / COACH-R7, GROUND-R6).
+
+        Resolves the run's language through the SAME LANG-R4 fallback (recorded), then returns a
+        :class:`ReadinessCopy` whose every field is the loaded pack's localized sentence when
+        present, else the deterministic English code FLOOR (``_READINESS_FLOOR``) — so a readiness
+        run NEVER ships an empty or English-by-construction sentence on a supported localized run,
+        and a no-bundle caller keeps the historical English sentences. The EMPTY policy (no packs)
+        keys the floor on the REQUESTED language directly, mirroring :meth:`limitation`; since only
+        the English floor exists in code, an unsupported/no-bundle locale resolves to English (the
+        deterministic abstain path is model-free and cannot be generated per-language here).
+        """
+        if not self.packs:
+            return _readiness_floor_copy()
+        lang = self.resolve_recorded(requested, surface="readiness")
+        loaded = self.packs.get(lang, LanguagePack()).readiness
+        floor = _READINESS_FLOOR
+        return ReadinessCopy(
+            state_go=loaded.state_go or floor["state_go"],
+            state_maintain=loaded.state_maintain or floor["state_maintain"],
+            state_ease=loaded.state_ease or floor["state_ease"],
+            state_rest=loaded.state_rest or floor["state_rest"],
+            abstain=loaded.abstain or floor["abstain"],
+            stale_abstain=loaded.stale_abstain or floor["stale_abstain"],
+            hrv_unavailable=loaded.hrv_unavailable or floor["hrv_unavailable"],
+            stale_data=loaded.stale_data or floor["stale_data"],
+        )
+
+
+def _readiness_floor_copy() -> ReadinessCopy:
+    """The English readiness FLOOR as a :class:`ReadinessCopy` (the no-bundle / unsupported path)."""
+    return ReadinessCopy(
+        state_go=_READINESS_FLOOR["state_go"],
+        state_maintain=_READINESS_FLOOR["state_maintain"],
+        state_ease=_READINESS_FLOOR["state_ease"],
+        state_rest=_READINESS_FLOOR["state_rest"],
+        abstain=_READINESS_FLOOR["abstain"],
+        stale_abstain=_READINESS_FLOOR["stale_abstain"],
+        hrv_unavailable=_READINESS_FLOOR["hrv_unavailable"],
+        stale_data=_READINESS_FLOOR["stale_data"],
+    )
+
 
 #: The shared no-bundle policy (module-level so isolated callers get ONE stable instance).
 EMPTY_LOCALE_POLICY = LocalePolicy()
@@ -246,4 +356,5 @@ __all__ = [
     "EMPTY_LOCALE_POLICY",
     "LanguagePack",
     "LocalePolicy",
+    "ReadinessCopy",
 ]

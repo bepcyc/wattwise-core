@@ -49,7 +49,9 @@ from wattwise_core.agent import tiering
 from wattwise_core.agent.contracts import (
     AgentState,
     ChatModel,
+    ClaimKind,
     GroundDecision,
+    GroundingResult,
     RunStatus,
     stamp_coverage_gaps,
     stamp_retrieved,
@@ -207,6 +209,26 @@ def _make_assess_coverage(svc: AgentServices) -> GraphNode:
     return assess_coverage
 
 
+def _detailed_citation_floor_unmet(state: AgentState, result: GroundingResult) -> bool:
+    """A ``detailed`` answer that emitted NUMBER claims but cited none of them (#17 floor).
+
+    The detailed-length citation floor is enforced on the GROUNDED SURVIVORS, never assumed
+    from the compose directive: a ``detailed`` run that GROUNDED (PROCEED), emitted at least
+    one NUMBER claim, yet has ZERO surviving NUMBER citations "steered away from numbers
+    entirely" (a cross-language hedging shift) and MUST degrade at finalize rather than ship
+    a complete-looking but number-light deliverable. Scoped to the scrubbed-NUMBER case: a
+    qualitative detailed answer that made no NUMBER claim, and a grounded plan whose NAME
+    claims survive, are NOT breaches.
+    """
+    if state.get("response_length") != "detailed":
+        return False
+    if result.decision is not GroundDecision.PROCEED:
+        return False
+    number_emitted = any(c.claim.kind is ClaimKind.NUMBER for c in result.claims)
+    number_survived = any(c.claim.kind is ClaimKind.NUMBER for c in result.survivors)
+    return number_emitted and not number_survived
+
+
 def _make_ground(svc: AgentServices) -> GraphNode:
     async def ground(state: AgentState) -> dict[str, Any]:
         """Deterministically verify the draft and decide recovery (GROUND-R*, COACH-R8).
@@ -234,7 +256,13 @@ def _make_ground(svc: AgentServices) -> GraphNode:
         )
         obs.record_grounding(result)
         citations = [gc.citation for gc in result.survivors if gc.citation is not None]
-        verdict_msg = {"role": "system", "kind": "ground", "decision": result.decision.value}
+        # The detailed-length citation FLOOR (#17), enforced on the GROUNDED SURVIVORS (not assumed
+        # from the directive): a ``detailed`` answer that retrieved canonical evidence and emitted
+        # NUMBER claims that ALL scrubbed (zero surviving citations) "steered away from numbers
+        # entirely" (a documented cross-language hedging shift) — it degrades at finalize. Scoped to
+        # the scrubbed-NUMBER failure, so a qualitative detailed answer (no NUMBER claim) and a
+        # grounded plan whose NAMEs survive are NOT breaches.
+        floor_unmet = _detailed_citation_floor_unmet(state, result)
         return gs.tick_visit(
             state,
             {
@@ -242,7 +270,10 @@ def _make_ground(svc: AgentServices) -> GraphNode:
                 "grounded_html": gs.safe_html(result.scrubbed_text),
                 "citations": citations,
                 "observations": gs.build_observations(result.survivors),
-                "messages": [verdict_msg],
+                "messages": [
+                    {"role": "system", "kind": "ground", "decision": result.decision.value}
+                ],
+                "detailed_citation_floor_unmet": floor_unmet,
             },
         )
 

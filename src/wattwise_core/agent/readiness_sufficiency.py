@@ -18,24 +18,28 @@ from __future__ import annotations
 
 from typing import Any
 
+from wattwise_core.agent.locale import _readiness_floor_copy
 from wattwise_core.analytics.sufficiency import RecordSufficiency
 from wattwise_core.domain.enums import ReadinessVerdict
+
+# The English readiness-staleness FLOOR (#18): sourced from the SAME ``locale._READINESS_FLOOR`` the
+# language packs fall back to, so there is ONE English text. These stay the no-bundle / unsupported
+# FLOOR; the DELIVERED sentence is taken from the run's resolved ``ReadinessCopy`` (loaded pack copy
+# else this floor) so a localized run discloses staleness in the requested language too.
+_FLOOR = _readiness_floor_copy()
 
 #: The truthful abstain lead when the form number EXISTS but the record behind it has gone stale
 #: (GROUND-R6, sufficiency axis): the most recent OBSERVED data is old enough that the verdict would
 #: be read off an EWMA tail of assumed-rest days, which can be real rest OR a silently-broken sync —
 #: data alone cannot tell (MNAR). Honest under BOTH branches: it asks the athlete to check sync
 #: without asserting it, and emits no verdict/number. Carries no digit (VOICE-R7).
-STALE_ABSTAIN_SENTENCE = (
-    "I haven't seen any recent training data, so I can't read your readiness right now — "
-    "if you've been training, it's worth checking that your data sync is still connected."
-)
+STALE_ABSTAIN_SENTENCE = _FLOOR.stale_abstain
 
 #: The honest staleness clause appended to a delivered verdict in the disclose zone (FRESH < gap <=
 #: MAX): the verdict still ships (and is only ever a less-aggressive, safe-side call there — GO is
 #: blocked upstream) but its currency is disclosed. Digit-free so it never trips the number cap and
 #: keeps the precise staleness only in the structured coverage caveat (VOICE-R7).
-STALE_DATA_CLAUSE = "I haven't seen new training data in a few days, so this may lag where you are."
+STALE_DATA_CLAUSE = _FLOOR.stale_data
 
 
 def freshness_blocks_verdict(sufficiency: RecordSufficiency, verdict: ReadinessVerdict) -> bool:

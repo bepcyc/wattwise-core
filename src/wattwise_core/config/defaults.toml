@@ -343,6 +343,22 @@ compose_directive = """Reply entirely in English — every sentence of your answ
 caveats and any note about missing data."""
 limitation = """I don't have enough confirmed data to answer that reliably yet. Sync your \
 sources and I'll take another look."""
+# Readiness deliverable surface strings (LANG-R1/CFG-R3 #18): the deterministic per-verdict
+# state-first lead sentences (COACH-R7 fallback), the truthful abstain/stale-abstain leads
+# (GROUND-R6), and the HRV-missing / stale disclosure clauses (GROUND-R7 / OUTCOME-R4). These
+# are CONFIG content keyed by name, NEVER code literals — the engine keeps an English FLOOR in
+# locale.py only for the no-bundle seam (mirroring the limitation floor); a loaded pack always
+# wins, so a localized run narrates its fail-closed sentences in the requested language too.
+readiness_state_go = "You're fresh and ready for a hard day."
+readiness_state_maintain = "You're in a steady place — keep things as planned."
+readiness_state_ease = "You're carrying some fatigue, so ease off a little today."
+readiness_state_rest = "You're deep in fatigue right now, so today is for rest."
+readiness_abstain = "There isn't enough recent data to read your readiness yet."
+readiness_stale_abstain = """I haven't seen any recent training data, so I can't read your \
+readiness right now — if you've been training, it's worth checking that your data sync is \
+still connected."""
+readiness_hrv_unavailable = "I don't have a recent HRV reading, so this is from your form."
+readiness_stale_data = "I haven't seen new training data in a few days, so this may lag where you are."
 
 [agent.coach.languages.de]
 compose_directive = """Antworte vollständig auf Deutsch — jeder Satz deiner Antwort, auch \
@@ -350,12 +366,34 @@ Einschränkungen und Hinweise auf fehlende Daten. Sprich die Athletin oder den A
 persönlich mit "du" an und bleib warm und konkret."""
 limitation = """Mir fehlen noch genug gesicherte Daten, um das verlaesslich zu beantworten. \
 Synchronisiere deine Quellen und ich schaue noch einmal."""
+readiness_state_go = "Du bist frisch und bereit für einen harten Tag."
+readiness_state_maintain = "Du bist in einer stabilen Phase — bleib bei dem, was geplant ist."
+readiness_state_ease = "Du trägst etwas Müdigkeit mit dir, nimm es heute also etwas lockerer."
+readiness_state_rest = "Du steckst gerade tief in der Müdigkeit, heute ist daher Ruhe angesagt."
+readiness_abstain = "Es gibt noch nicht genug aktuelle Daten, um deine Bereitschaft zu lesen."
+readiness_stale_abstain = """Ich habe keine aktuellen Trainingsdaten gesehen, daher kann ich \
+deine Bereitschaft gerade nicht einschätzen — wenn du trainiert hast, prüfe bitte, ob deine \
+Datensynchronisierung noch verbunden ist."""
+readiness_hrv_unavailable = "Mir fehlt ein aktueller HRV-Wert, das hier kommt also aus deiner Form."
+readiness_stale_data = """Ich habe seit ein paar Tagen keine neuen Trainingsdaten gesehen, das \
+hinkt also vielleicht hinterher."""
 
 [agent.coach.languages.ru]
 compose_directive = """Отвечай полностью по-русски — каждое предложение ответа, включая \
 оговорки и замечания о недостающих данных. Обращайся к спортсмену на "ты", тепло и конкретно."""
 limitation = """Пока недостаточно подтверждённых данных, чтобы ответить надёжно. \
 Синхронизируй источники, и я посмотрю снова."""
+readiness_state_go = "Ты свежий и готов к тяжёлому дню."
+readiness_state_maintain = "Ты в стабильной форме — придерживайся того, что запланировано."
+readiness_state_ease = "Ты несёшь немного усталости, так что сегодня сбавь обороты."
+readiness_state_rest = "Ты сейчас глубоко в усталости, так что сегодня день для отдыха."
+readiness_abstain = "Пока недостаточно свежих данных, чтобы оценить твою готовность."
+readiness_stale_abstain = """Я не вижу свежих тренировочных данных, поэтому не могу сейчас \
+оценить твою готовность — если ты тренировался, стоит проверить, что синхронизация данных \
+всё ещё подключена."""
+readiness_hrv_unavailable = "У меня нет свежего показателя ВСР, так что это по твоей форме."
+readiness_stale_data = """Я несколько дней не видел новых тренировочных данных, так что это \
+может отставать от твоего текущего состояния."""
 
 [agent.coach.prompts]
 # The externalized system/agent prompt FRAGMENTS (SKILL-R1/-R3, CFG-R3): EVERY system prompt the
@@ -511,6 +549,72 @@ cost_per_1k_tokens_usd = 0.0002
 "4-week load" = "monthly_load_target"
 "four-week load" = "monthly_load_target"
 "28-day load" = "monthly_load_target"
+
+[agent.workout_aliases]
+# Multilingual canonical workout-NAME equivalence (#17 / GROUND-R2, mirroring [agent.metric_aliases]).
+# A PLAN deliverable prescribes workout names in the run's LANGUAGE (a ru plan writes Russian names),
+# so binding the canonical concept to the ENGLISH spelling scrubbed every localized NAME claim →
+# DEGRADED. This table maps a localized (or English) surface name → the canonical workout id (the
+# SAME id CANONICAL_WORKOUT_NAMES yields: the normalized English name), so grounding resolves the
+# concept by a STABLE id while the surface form varies by language (the ICU/Fluent message-ID
+# principle). It is DATA, not code (CFG-R1a) — add a language/synonym here, never in the engine.
+# Keys are case/whitespace-folded before lookup; values MUST be one of the canonical English names
+# in CANONICAL_WORKOUT_NAMES (grounding_evidence.py). A name not in this table AND not itself a
+# canonical English name resolves to None and is scrubbed (fail-closed, GROUND-R3). The English
+# canonical names need no entry here (the frozenset FLOOR still resolves them); these are the
+# non-English surface forms (DE/RU) plus a few common English synonyms.
+# --- German ---
+"ruhetag" = "rest day"
+"erholungsfahrt" = "recovery ride"
+"erholungsausfahrt" = "recovery ride"
+"lockere ausfahrt" = "recovery ride"
+"regenerationsfahrt" = "recovery ride"
+"erholungseinheit" = "recovery spin"
+"grundlagenausfahrt" = "endurance ride"
+"grundlagenfahrt" = "endurance ride"
+"ausdauerfahrt" = "endurance ride"
+"lange ausfahrt" = "long ride"
+"lange fahrt" = "long ride"
+"tempo-intervalle" = "tempo intervals"
+"tempointervalle" = "tempo intervals"
+"sweet-spot-intervalle" = "sweet spot intervals"
+"sweetspot-intervalle" = "sweet spot intervals"
+"schwellenintervalle" = "threshold intervals"
+"schwellen-intervalle" = "threshold intervals"
+"vo2max-intervalle" = "vo2max intervals"
+"vo2-max-intervalle" = "vo2max intervals"
+"anaerobe intervalle" = "anaerobic intervals"
+"sprint-intervalle" = "sprint intervals"
+"sprintintervalle" = "sprint intervals"
+# --- Russian ---
+"день отдыха" = "rest day"
+"выходной" = "rest day"
+"восстановительная езда" = "recovery ride"
+"восстановительная поездка" = "recovery ride"
+"восстановительная тренировка" = "recovery spin"
+"восстановительное вращение" = "recovery spin"
+"лёгкая езда" = "recovery ride"
+"легкая езда" = "recovery ride"
+"выносливая езда" = "endurance ride"
+"базовая езда" = "endurance ride"
+"длинная езда" = "long ride"
+"длинная поездка" = "long ride"
+"темповые интервалы" = "tempo intervals"
+"интервалы в темпе" = "tempo intervals"
+"интервалы свит-спот" = "sweet spot intervals"
+"свит-спот интервалы" = "sweet spot intervals"
+"пороговые интервалы" = "threshold intervals"
+"интервалы в пороговой зоне" = "threshold intervals"
+"интервалы мпк" = "vo2max intervals"
+"vo2max интервалы" = "vo2max intervals"
+"анаэробные интервалы" = "anaerobic intervals"
+"спринтерские интервалы" = "sprint intervals"
+"спринт-интервалы" = "sprint intervals"
+# --- English synonyms (the bare canonical names resolve via the frozenset floor without an entry) ---
+"easy ride" = "recovery ride"
+"recovery spin ride" = "recovery spin"
+"base ride" = "endurance ride"
+"vo2 max intervals" = "vo2max intervals"
 
 [retention]
 # 0 = retain indefinitely; >0 = per-athlete retention window in days (PRIV-R*).

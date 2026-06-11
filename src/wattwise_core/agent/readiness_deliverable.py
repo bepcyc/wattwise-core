@@ -37,6 +37,7 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from wattwise_core.agent.contracts import GroundingResult, RunStatus
+from wattwise_core.agent.locale import ReadinessCopy, _readiness_floor_copy
 from wattwise_core.agent.observations import build_observations
 from wattwise_core.agent.projection import project_observations
 from wattwise_core.agent.readiness_sufficiency import (
@@ -149,20 +150,29 @@ class StructuredNarrationError(RuntimeError):
 #: :class:`StructuredNarrationError` on a provider failure so narration fails closed.
 StructuredNarrator = Callable[[str], Awaitable[_ReadinessNarration]]
 
+# The English readiness-sentence FLOOR (#18): these module constants are now the no-bundle /
+# unsupported-locale FLOOR ONLY — they are sourced from the SAME ``locale._READINESS_FLOOR`` the
+# packs fall back to, so there is ONE English text, not two drifting copies. The DELIVERED sentence
+# is taken from the run's resolved :class:`~wattwise_core.agent.locale.ReadinessCopy` (loaded pack
+# copy, else this floor), so a localized run narrates its fail-closed sentences in the requested
+# language too (CFG-R3 / LANG-R1). The constants stay PUBLIC/importable because the eval voice
+# grader matches live narration against the EXACT English text.
+_FLOOR = _readiness_floor_copy()
+
 # Per-verdict deterministic state sentence (COACH-R7 fallback). Used when no model is
 # wired OR when the model narration fails the state-first voice gate: a warm, jargon-free,
 # number-LESS lead keyed off the canonical verdict, so the delivered lead is ALWAYS a
 # state phrase even if the model misbehaves (fail-closed voice, mirrors GROUND-R3).
 _VERDICT_STATE_SENTENCE: Mapping[ReadinessVerdict, str] = {
-    ReadinessVerdict.GO: "You're fresh and ready for a hard day.",
-    ReadinessVerdict.MAINTAIN: "You're in a steady place — keep things as planned.",
-    ReadinessVerdict.EASE: "You're carrying some fatigue, so ease off a little today.",
-    ReadinessVerdict.REST: "You're deep in fatigue right now, so today is for rest.",
+    ReadinessVerdict.GO: _FLOOR.state_go,
+    ReadinessVerdict.MAINTAIN: _FLOOR.state_maintain,
+    ReadinessVerdict.EASE: _FLOOR.state_ease,
+    ReadinessVerdict.REST: _FLOOR.state_rest,
 }
 
 #: The truthful abstain lead when form itself is unavailable (GROUND-R6): no verdict, no
 #: number, an honest state sentence rather than a guessed readiness call.
-_ABSTAIN_SENTENCE = "There isn't enough recent data to read your readiness yet."
+_ABSTAIN_SENTENCE = _FLOOR.abstain
 
 
 #: The honest HRV-unavailable clause appended to the state sentence when the verdict came
@@ -171,7 +181,7 @@ _ABSTAIN_SENTENCE = "There isn't enough recent data to read your readiness yet."
 #: EXACT prod text to match a live narration against, rather than hand-maintaining a regex
 #: that drifts from this wording (FIX 7). ``_HRV_UNAVAILABLE_CLAUSE`` is kept as a private
 #: alias so existing internal references stay valid.
-HRV_UNAVAILABLE_CLAUSE = "I don't have a recent HRV reading, so this is from your form."
+HRV_UNAVAILABLE_CLAUSE = _FLOOR.hrv_unavailable
 _HRV_UNAVAILABLE_CLAUSE = HRV_UNAVAILABLE_CLAUSE
 
 #: Any decimal digit. COACH-R7 wants the FIRST sentence number-LIGHT, so the state-first gate
@@ -191,6 +201,7 @@ async def readiness_assessment(
     grounder: ReadinessGrounder | None,
     response_length: ResponseLength = "standard",
     sufficiency: RecordSufficiency | None = None,
+    copy: ReadinessCopy | None = None,
 ) -> Readiness:
     """Assemble the readiness/form deliverable from canonical inputs (QA-EVAL-R2.4).
 
@@ -214,12 +225,16 @@ async def readiness_assessment(
     (DEGRADED + caveat), enforce the state-first / number-cap / no-"readiness score" voice gates
     (COACH-R7 / VOICE-R7), and project.
     """
+    # The resolved localized readiness sentences (#18): the caller (the engine) passes the run's
+    # ``ReadinessCopy`` from ``locales.readiness_copy(locale)``; an isolated caller (the FakeModel
+    # suite) passes none and gets the English floor — the historical behaviour.
+    resolved = copy if copy is not None else _FLOOR
     assessment = assess_readiness(form=form, hrv_rmssd=hrv_rmssd, hrv_baseline=hrv_baseline)
     verdict = assessment.verdict
     if verdict is None:
-        return _abstain_readiness(assessment, as_of)
+        return _abstain_readiness(assessment, as_of, resolved)
     if sufficiency is not None and freshness_blocks_verdict(sufficiency, verdict):
-        return _stale_abstain_readiness(assessment, as_of, sufficiency)
+        return _stale_abstain_readiness(assessment, as_of, sufficiency, resolved)
     return await _narrate_readiness(
         athlete_id,
         verdict=verdict,
@@ -231,21 +246,24 @@ async def readiness_assessment(
         grounder=grounder,
         response_length=response_length,
         sufficiency=sufficiency,
+        copy=resolved,
     )
 
 
-def _abstain_readiness(assessment: ReadinessAssessment, as_of: str | None) -> Readiness:
+def _abstain_readiness(
+    assessment: ReadinessAssessment, as_of: str | None, copy: ReadinessCopy
+) -> Readiness:
     """Build the truthful abstain deliverable when form is unavailable (GROUND-R6).
 
-    No verdict, no number, an honest state sentence; the coverage map records the missing
-    input from the oracle so the API can render the degradation in coach voice.
+    No verdict, no number, an honest state sentence (localized via ``copy``, #18); the coverage map
+    records the missing input from the oracle so the API can render the degradation in coach voice.
     """
     return Readiness(
         verdict=None,
         status=RunStatus.DEGRADED,
         as_of=as_of,
-        summary_html=f"<p>{_ABSTAIN_SENTENCE}</p>",
-        summary_text=_ABSTAIN_SENTENCE,
+        summary_html=f"<p>{copy.abstain}</p>",
+        summary_text=copy.abstain,
         observations=(),
         citations=(),
         coverage=_coverage_map(assessment, override=None),
@@ -254,7 +272,10 @@ def _abstain_readiness(assessment: ReadinessAssessment, as_of: str | None) -> Re
 
 
 def _stale_abstain_readiness(
-    assessment: ReadinessAssessment, as_of: str | None, sufficiency: RecordSufficiency
+    assessment: ReadinessAssessment,
+    as_of: str | None,
+    sufficiency: RecordSufficiency,
+    copy: ReadinessCopy,
 ) -> Readiness:
     """Build the truthful STALE abstain when the record is too stale to read a verdict (GROUND-R6).
 
@@ -268,8 +289,8 @@ def _stale_abstain_readiness(
         verdict=None,
         status=RunStatus.DEGRADED,
         as_of=as_of,
-        summary_html=f"<p>{_STALE_ABSTAIN_SENTENCE}</p>",
-        summary_text=_STALE_ABSTAIN_SENTENCE,
+        summary_html=f"<p>{copy.stale_abstain}</p>",
+        summary_text=copy.stale_abstain,
         observations=(),
         citations=(),
         coverage=_coverage_map(assessment, override=None, sufficiency=sufficiency),
@@ -289,6 +310,7 @@ async def _narrate_readiness(
     grounder: ReadinessGrounder | None,
     response_length: ResponseLength,
     sufficiency: RecordSufficiency | None = None,
+    copy: ReadinessCopy = _FLOOR,
 ) -> Readiness:
     """Narrate, gate the verdict, ground the numbers, and project (the assessed path).
 
@@ -308,7 +330,9 @@ async def _narrate_readiness(
     # delivered narration is coherent with the canonical verdict (COACH-R3, mirrors GROUND-R3).
     lead_narration = None if override else narration
     stale = sufficiency is not None and sufficiency.stale
-    draft = _state_first_draft(lead_narration, verdict, assessment.inputs_unavailable, stale=stale)
+    draft = _state_first_draft(
+        lead_narration, verdict, assessment.inputs_unavailable, copy, stale=stale
+    )
     text, html, citations, observations = await _ground_readiness(
         athlete_id, draft, grounder, response_length
     )
@@ -381,6 +405,7 @@ def _state_first_draft(
     narration: _ReadinessNarration | None,
     verdict: ReadinessVerdict,
     inputs_unavailable: Sequence[str],
+    copy: ReadinessCopy = _FLOOR,
     *,
     stale: bool = False,
 ) -> str:
@@ -402,11 +427,14 @@ def _state_first_draft(
         or _has_digit(first_sentence(lead))
         or _mentions_readiness_score(lead)
     ):
-        lead = _VERDICT_STATE_SENTENCE[verdict]
+        # Fail closed to the LOCALIZED per-verdict state sentence (#18): the resolved ``copy``
+        # carries the run's language (loaded pack else English floor), so a localized run's
+        # deterministic lead is no longer English-by-construction.
+        lead = copy.state_for(verdict.value)
     if "hrv" in inputs_unavailable:
-        lead = f"{lead} {_HRV_UNAVAILABLE_CLAUSE}"
+        lead = f"{lead} {copy.hrv_unavailable}"
     if stale:
-        lead = f"{lead} {_STALE_DATA_CLAUSE}"
+        lead = f"{lead} {copy.stale_data}"
     return lead
 
 

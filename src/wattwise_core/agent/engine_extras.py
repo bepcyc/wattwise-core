@@ -147,6 +147,15 @@ class DeliverableEngineMixin:
                 sync_stale_after_days=READINESS_SYNC_STALE_AFTER_DAYS,
             )
             inputs = await gather_readiness_inputs(svc, athlete_id, sync_suspect=sync_suspect)
+            # Localize the readiness path end to end (#18 / LANG-R3): (1) build the narrator's
+            # system prompt through the SAME LocalePolicy.compose_system the answer/plan paths use,
+            # so the model is told to narrate in the requested language (the LANG-R3 directive the
+            # readiness path previously bypassed — textbook language confusion); (2) resolve the
+            # localized readiness sentences so the deterministic fail-closed leads (state/abstain/
+            # HRV-missing/stale) are in the requested language too, not English-by-construction.
+            narrator_system = self._coach.locales.compose_system(
+                self._coach.readiness_system, locale
+            )
             return await readiness_assessment(
                 athlete_id,
                 form=inputs.form,
@@ -154,9 +163,10 @@ class DeliverableEngineMixin:
                 hrv_rmssd=inputs.hrv_rmssd,
                 hrv_baseline=inputs.hrv_baseline,
                 sufficiency=inputs.sufficiency,
-                narrate=readiness_narrator(self._model, system=self._coach.readiness_system),
+                narrate=readiness_narrator(self._model, system=narrator_system),
                 grounder=self._coach.grounder(self._model, svc),
                 response_length=response_length,  # type: ignore[arg-type]
+                copy=self._coach.locales.readiness_copy(locale),
             )
 
     async def list_memory(

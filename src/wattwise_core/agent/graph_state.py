@@ -439,6 +439,11 @@ def terminal_status(state: AgentState, decision: GroundDecision | None, ceiling:
         return RunStatus.DEGRADED
     if open_gaps(state):
         return RunStatus.DEGRADED
+    # The detailed-length citation FLOOR breach (#17): a detailed answer that grounded canonical
+    # evidence yet cited nothing degrades rather than ships complete-looking (the ground node set
+    # this only on a PROCEED-with-evidence-but-zero-citations run).
+    if state.get("detailed_citation_floor_unmet"):
+        return RunStatus.DEGRADED
     return RunStatus.COMPLETED
 
 
@@ -447,10 +452,17 @@ def build_caveat(
 ) -> dict[str, Any] | None:
     """Build the typed OUTCOME-R4 coverage caveat for a non-completed outcome."""
     gaps = open_gaps(state)
-    if status is RunStatus.COMPLETED and not gaps:
+    floor_unmet = bool(state.get("detailed_citation_floor_unmet"))
+    if status is RunStatus.COMPLETED and not gaps and not floor_unmet:
         return None
     fidelity = "degraded" if decision is GroundDecision.ABSTAIN else "partial"
-    caveat = CoverageCaveat(missing=tuple(sorted(gaps)), fidelity=fidelity)
+    # The detailed-length citation FLOOR breach (#17) surfaces as a typed missing marker so the
+    # caveat is explicit about WHY a grounded detailed answer degraded (no citable canonical
+    # figure survived), not a silent partial.
+    missing = set(gaps)
+    if floor_unmet:
+        missing.add("detailed_citations")
+    caveat = CoverageCaveat(missing=tuple(sorted(missing)), fidelity=fidelity)
     return caveat.model_dump()
 
 

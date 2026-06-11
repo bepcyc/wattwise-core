@@ -45,6 +45,10 @@ async def reground_plan(
         model,
         svc,
         allow_names=CANONICAL_WORKOUT_NAMES,
+        # The loaded multilingual workout-name equivalence (#17): a localized edit's prescription
+        # name grounds onto its canonical id instead of scrubbing, so a non-English HITL edit no
+        # longer fails closed on every workout name (the same disease as the live plan path).
+        workout_equivalence=coach.workout_equivalence,
         equivalence=coach.equivalence,
         tolerance=coach.tolerance,
         allowed_hosts=coach.allowed_hosts,

@@ -355,6 +355,12 @@ class AgentState(TypedDict, total=False):
     coverage_caveat: dict[str, Any] | None
     interrupt_id: str | None
     cost_rollup: dict[str, Any] | None
+    # The detailed-length citation FLOOR breach (#17): set True by the ground node when a
+    # ``detailed`` answer grounded canonical evidence yet 0 citations SURVIVED (the model steered
+    # away from numbers — a documented cross-language hedging shift). It degrades the run at
+    # finalize so a detailed answer that cites nothing despite available evidence never ships
+    # complete-looking; the grounded prose still ships, only the status/caveat reflect it.
+    detailed_citation_floor_unmet: bool
 
 
 # --- model-routing seam (MODEL-R*, STRUCT-R*) ---

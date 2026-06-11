@@ -56,6 +56,53 @@ def _normalize_workout_name(name: str) -> str:
     return " ".join(name.casefold().split())
 
 
+class WorkoutEquivalence:
+    """Resolve a localized workout NAME to a canonical workout id (#17 / GROUND-R2).
+
+    The multilingual sibling of :class:`~wattwise_core.agent.metric_equivalence.MetricEquivalence`
+    for workout names. A PLAN deliverable prescribes its workout names in the run's LANGUAGE
+    (a ``ru`` plan writes "восстановительная езда", not "recovery ride"), so binding the canonical
+    concept to the ENGLISH spelling scrubbed every localized NAME claim and DEGRADED the plan (#17).
+    This layer maps a localized (or English-synonym) surface name to the STABLE canonical English
+    name, so grounding resolves the concept by a language-independent id while the surface form
+    varies by language (the ICU/Fluent message-ID principle).
+
+    The alias map is loaded CONTENT (``[agent.workout_aliases]``, CFG-R1a), NOT hardcoded here. The
+    canonical English names in ``allowed`` (``CANONICAL_WORKOUT_NAMES``) ALWAYS resolve to themselves
+    (the English FLOOR), so the English plan path is unchanged. A name that is neither a loaded alias
+    nor a canonical English name resolves to ``None`` so the grounder still fails closed (GROUND-R3),
+    and an alias whose configured value is not itself a canonical English name is rejected (a
+    misconfigured alias never invents a new canonical concept).
+    """
+
+    def __init__(self, aliases: Mapping[str, str], allowed: frozenset[str]) -> None:
+        # The canonical English names (the FLOOR), pre-folded so an English plan resolves with no
+        # alias entry; a non-English plan resolves through the folded alias map onto one of these.
+        self._allowed = frozenset(_normalize_workout_name(name) for name in allowed)
+        self._aliases: dict[str, str] = {}
+        for surface, canonical in aliases.items():
+            folded_canonical = _normalize_workout_name(canonical)
+            # A misconfigured alias pointing at a non-canonical name fails closed (GROUND-R3).
+            if folded_canonical in self._allowed:
+                self._aliases[_normalize_workout_name(surface)] = folded_canonical
+
+    def canonical_name(self, name: str) -> str | None:
+        """Return the canonical workout id for ``name`` (``workout:{canonical}``), or ``None``.
+
+        Resolution order, all against the SAME canonical English-name set (fail-closed):
+        1. the folded name is itself a canonical English name (the FLOOR — English plan unchanged);
+        2. the folded name is a loaded alias whose value is a canonical English name (#17).
+        Anything else resolves to ``None`` so the grounder scrubs the claim (GROUND-R3).
+        """
+        folded = _normalize_workout_name(name)
+        if folded in self._allowed:
+            return f"workout:{folded}"
+        mapped = self._aliases.get(folded)
+        if mapped is not None:
+            return f"workout:{mapped}"
+        return None
+
+
 class _SnapshotEvidence:
     """Sync grounding evidence: pre-resolved canonical snapshots + first-party URL gate.
 
@@ -78,10 +125,15 @@ class _SnapshotEvidence:
         snapshots: Mapping[tuple[str, str | None], float | None],
         *,
         allow_names: frozenset[str] = frozenset(),
+        workout_equivalence: WorkoutEquivalence | None = None,
     ) -> None:
         self._evidence = evidence
         self._snapshots = snapshots
         self._allow_names = allow_names
+        # The multilingual workout-name resolver (#17): when supplied it owns NAME resolution so a
+        # localized plan name grounds via the loaded alias table; when absent the deliverable keeps
+        # the historical English-only frozenset behaviour (the FakeModel suite / no-bundle seam).
+        self._workout_equivalence = workout_equivalence
 
     def metric_snapshot(self, metric: str, as_of: str | None) -> float | None:
         """The pre-resolved canonical value for ``(metric, as_of)``, or ``None`` (GROUND-R7)."""
@@ -100,10 +152,17 @@ class _SnapshotEvidence:
 
         Returns a stable canonical id (``workout:{normalized}``) when ``name`` normalizes to an
         allowed canonical training-prescription name, else ``None`` so the grounder scrubs the
-        claim (fail-closed, GROUND-R3). With an EMPTY ``allow_names`` (the free-form default) every
-        name resolves to ``None`` — preserving the Phase-1 "no canonical workout library" behaviour
-        for non-plan deliverables.
+        claim (fail-closed, GROUND-R3). With an EMPTY ``allow_names`` and no workout-equivalence
+        (the free-form default) every name resolves to ``None`` — preserving the Phase-1 "no
+        canonical workout library" behaviour for non-plan deliverables.
+
+        When a :class:`WorkoutEquivalence` is wired (the PLAN path, #17) it owns resolution: a
+        localized name grounds via the loaded ``[agent.workout_aliases]`` table onto the canonical
+        English id, so a non-English plan no longer scrubs every prescription. Without it, the
+        historical English-only frozenset lookup is used (the FakeModel / no-bundle behaviour).
         """
+        if self._workout_equivalence is not None:
+            return self._workout_equivalence.canonical_name(name)
         if not self._allow_names:
             return None
         normalized = _normalize_workout_name(name)
@@ -172,6 +231,7 @@ class ClaimGrounder:
         *,
         allow_names: frozenset[str] = frozenset(),
         equivalence: MetricEquivalence | None = None,
+        workout_equivalence: WorkoutEquivalence | None = None,
         reference_date: _dt.date | None = None,
         tolerance: _grounding.NumericTolerance | None = None,
         allowed_hosts: frozenset[str] | None = None,
@@ -181,6 +241,10 @@ class ClaimGrounder:
         self._model = model
         self._svc = svc
         self._allow_names = allow_names
+        # The multilingual workout-name resolver (#17): the PLAN grounder injects this so a
+        # localized prescription name grounds against the loaded alias table -> canonical id.
+        # None preserves the English-only ``allow_names`` frozenset behaviour for every other path.
+        self._workout_equivalence = workout_equivalence
         self._equivalence = equivalence
         self._reference_date = reference_date
         # None -> the grounder's own default band (preserves the prior behaviour for any seam
@@ -223,7 +287,12 @@ class ClaimGrounder:
             lookback_days=self._lookback_days,
         )
         snapshots = await _resolve_snapshots(evidence, claims)
-        snapshot_evidence = _SnapshotEvidence(evidence, snapshots, allow_names=self._allow_names)
+        snapshot_evidence = _SnapshotEvidence(
+            evidence,
+            snapshots,
+            allow_names=self._allow_names,
+            workout_equivalence=self._workout_equivalence,
+        )
         # Numbers the ATHLETE supplied in their own request are sayable echoes (a plan's
         # "5-7 hours a week" is the user's constraint, not a canonical-data claim): collect
         # their tokens so the grounder/sweep can verify an echo instead of scrubbing it.
@@ -247,6 +316,7 @@ class ClaimGrounder:
 __all__ = [
     "CANONICAL_WORKOUT_NAMES",
     "ClaimGrounder",
+    "WorkoutEquivalence",
     "_SnapshotEvidence",
     "_normalize_workout_name",
     "_resolve_snapshots",
