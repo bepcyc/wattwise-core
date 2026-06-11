@@ -3,21 +3,26 @@
 ``endurance-score`` is a single bounded scalar in ``[0, 100]`` summarizing current
 aerobic endurance capacity (ES-R1). It is COMPOSED, not invented (ES-R2): a pure
 function of three upstream :data:`MetricResult`\\ s — chronic training load ``CTL``
-(PMC-R1), the long-duration power durability ratio ``MMP(long)/MMP(short)`` (Section
+(PMC-R1), the FRESH-state power-curve SHAPE ratio ``MMP(long)/MMP(short)`` (Section
 7A), and aerobic decoupling (Section 9; lower drift → higher score). It introduces NO
 new physiological model, reads NO raw streams, and embeds NO hidden constants — every
 weight and normalization knob lives in external configuration (``defaults.toml``
 ``[analytics] endurance_score_*``, CFG-R1a), documented there and re-cited here:
 
-* ``f_ctl        = clamp(ctl / ES_CTL_FULL_SCALE, 0, 1)`` — monotone non-decreasing,
-* ``f_durability = clamp((ratio - floor) / (ceiling - floor), 0, 1)`` — non-decreasing,
-* ``f_decoupling = clamp(1 - drift_pct / ES_DECOUPLING_FULL_PENALTY_PCT, 0, 1)`` —
+* ``f_ctl         = clamp(ctl / ES_CTL_FULL_SCALE, 0, 1)`` — monotone non-decreasing,
+* ``f_curve_shape = clamp((ratio - floor) / (ceiling - floor), 0, 1)`` — non-decreasing,
+* ``f_decoupling  = clamp(1 - drift_pct / ES_DECOUPLING_FULL_PENALTY_PCT, 0, 1)`` —
   monotone non-INcreasing (higher drift ⇒ not-higher score, ES-R3),
 * ``score = 100 · Σ wᵢ·fᵢ / Σ wᵢ`` over the PRESENT components.
 
+The ``curve_shape`` component is the shape of the *rested* power-duration curve
+(aerobic vs. anaerobic balance) — it is NOT fatigue resistance. It was historically
+misnamed "durability"; that name now belongs exclusively to the true work-conditioned
+durability metric in :mod:`wattwise_core.analytics.durability` (issue #26).
+
 Missing-component policy (ES-R2): ``CTL`` is the non-substitutable component — when it
 is ``Unavailable`` the score is ``Unavailable(MISSING_REQUIRED_INPUT)``. When a power
-component (durability / decoupling) is ``Unavailable`` — including the
+component (curve_shape / decoupling) is ``Unavailable`` — including the
 ``NOT_APPLICABLE_FOR_SPORT`` case for a non-power sport (§7C sport-applicability) —
 the configured policy decides: ``ES_ALLOW_PARTIAL`` declares any subset containing CTL
 valid, so the score composes on the available components with the weights renormalized,
@@ -36,13 +41,13 @@ import math
 from wattwise_core.analytics.constants import (
     ES_ALLOW_PARTIAL,
     ES_CTL_FULL_SCALE,
+    ES_CURVE_SHAPE_CEILING,
+    ES_CURVE_SHAPE_FLOOR,
     ES_DECOUPLING_FULL_PENALTY_PCT,
-    ES_DURABILITY_CEILING,
-    ES_DURABILITY_FLOOR,
     ES_PARTIAL_CONFIDENCE_PENALTY,
     ES_WEIGHT_CTL,
+    ES_WEIGHT_CURVE_SHAPE,
     ES_WEIGHT_DECOUPLING,
-    ES_WEIGHT_DURABILITY,
 )
 from wattwise_core.analytics.result import (
     Computed,
@@ -67,13 +72,13 @@ def _clamp01(x: float) -> float:
 
 
 def _component_scores(
-    ctl: float, durability_ratio: float | None, decoupling_pct: float | None
+    ctl: float, curve_shape_ratio: float | None, decoupling_pct: float | None
 ) -> dict[str, float]:
     """The documented per-component ``[0,1]`` normalizations (ES-R1, config-driven)."""
     scores = {"ctl": _clamp01(ctl / ES_CTL_FULL_SCALE)}
-    if durability_ratio is not None:
-        band = ES_DURABILITY_CEILING - ES_DURABILITY_FLOOR
-        scores["durability"] = _clamp01((durability_ratio - ES_DURABILITY_FLOOR) / band)
+    if curve_shape_ratio is not None:
+        band = ES_CURVE_SHAPE_CEILING - ES_CURVE_SHAPE_FLOOR
+        scores["curve_shape"] = _clamp01((curve_shape_ratio - ES_CURVE_SHAPE_FLOOR) / band)
     if decoupling_pct is not None:
         scores["decoupling"] = _clamp01(1.0 - decoupling_pct / ES_DECOUPLING_FULL_PENALTY_PCT)
     return scores
@@ -81,7 +86,7 @@ def _component_scores(
 
 _WEIGHTS: dict[str, float] = {
     "ctl": ES_WEIGHT_CTL,
-    "durability": ES_WEIGHT_DURABILITY,
+    "curve_shape": ES_WEIGHT_CURVE_SHAPE,
     "decoupling": ES_WEIGHT_DECOUPLING,
 }
 
@@ -96,7 +101,7 @@ def _finite_or_none(result: MetricResult[float]) -> float | None:
 
 def endurance_score(
     ctl: MetricResult[float],
-    durability_ratio: MetricResult[float],
+    curve_shape_ratio: MetricResult[float],
     decoupling_pct: MetricResult[float],
     *,
     sport: str | None = None,
@@ -118,7 +123,7 @@ def endurance_score(
         )
     scores = _component_scores(
         ctl_value,
-        _finite_or_none(durability_ratio),
+        _finite_or_none(curve_shape_ratio),
         _finite_or_none(decoupling_pct),
     )
     missing = tuple(sorted(set(_WEIGHTS) - set(scores)))
@@ -137,6 +142,17 @@ def endurance_score(
     raw = 100.0 * sum(_WEIGHTS[name] * scores[name] for name in scores) / weight_sum
     value = min(100.0, max(0.0, raw))  # ES-R3: the bound is part of the normalization
     confidence = ES_PARTIAL_CONFIDENCE_PENALTY if missing else 1.0
+    # NOTE: these component keys ("ctl"/"curve_shape"/"decoupling") and the
+    # components_present/components_missing report are DERIVED PER REQUEST and NEVER STORED.
+    # endurance-score is computed in-flight via AnalyticsService.endurance_score() (returns a
+    # MetricResult[float]); it has no agent capability resolver (absent from
+    # agent.capabilities.RESOLVERS), so it never enters durable agent state/checkpoints, and no
+    # DB column or coach deliverable stores this QualityReport.extra (the wellness
+    # endurance_score column is an unrelated ingested source scalar). The "durability" ->
+    # "curve_shape" rename therefore needs no read-side migration shim — there are no stored
+    # records carrying the old component string. (Operator CONFIG-key compatibility, which DOES
+    # survive across boots via env/file overrides, is handled by the fail-closed rename
+    # guard in config/_renamed_keys.py.)
     quality = QualityReport(
         confidence=confidence,
         extra={
@@ -148,31 +164,33 @@ def endurance_score(
     return Computed(value=value, quality=quality, provenance=lineage)
 
 
-def durability_ratio(
+def curve_shape_ratio(
     long_mmp_w: MetricResult[float], short_mmp_w: MetricResult[float]
 ) -> MetricResult[float]:
-    """``MMP(long)/MMP(short)`` from two upstream curve points (ES-R1 durability input).
+    """``MMP(long)/MMP(short)`` from two upstream curve points (ES-R1 curve-shape input).
 
-    Composed of upstream results only; either point ``Unavailable`` propagates as
-    ``Unavailable(MISSING_REQUIRED_INPUT)`` and a non-positive short-duration power is
-    ``OUT_OF_DOMAIN`` (a ratio over it is undefined) — never a fabricated ratio.
+    The shape of the FRESH power-duration curve (aerobic vs. anaerobic balance), NOT
+    fatigue resistance. Composed of upstream results only; either point ``Unavailable``
+    propagates as ``Unavailable(MISSING_REQUIRED_INPUT)`` and a non-positive
+    short-duration power is ``OUT_OF_DOMAIN`` (a ratio over it is undefined) — never a
+    fabricated ratio.
     """
     if not is_computed(long_mmp_w) or not is_computed(short_mmp_w):
         return Unavailable(
             UnavailableReason.MISSING_REQUIRED_INPUT,
-            "durability ratio requires both MMP(long) and MMP(short) curve points",
+            "curve-shape ratio requires both MMP(long) and MMP(short) curve points",
         )
     long_w, short_w = float(long_mmp_w.value), float(short_mmp_w.value)
     if not (math.isfinite(long_w) and math.isfinite(short_w)) or short_w <= 0:
         return Unavailable(
             UnavailableReason.OUT_OF_DOMAIN,
-            "durability ratio needs finite MMP values and MMP(short) > 0",
+            "curve-shape ratio needs finite MMP values and MMP(short) > 0",
         )
     return Computed(value=long_w / short_w)
 
 
 __all__ = [
     "APPLICABLE_SPORTS",
-    "durability_ratio",
+    "curve_shape_ratio",
     "endurance_score",
 ]
