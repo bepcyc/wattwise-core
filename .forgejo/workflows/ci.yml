@@ -278,6 +278,36 @@ jobs:
       - run: just migrate
       - run: just test-e2e              # CI-R1 item 12
 
+  # Advisory PR-stage mutation testing (T-MUT, issue #35 / ADR 0006): diff-scoped,
+  # time-boxed, warm-started from the cached mutants/ dir. IDENTICAL recipe to the
+  # GitHub file (CI-R9); cache/checkout-depth steps are runner plumbing, all gate
+  # logic (diff scope, budget, in-script skip, report) lives in the recipe (CI-R0).
+  mutation-advisory:
+    name: Mutation advisory (T-MUT)
+    if: github.event_name == 'pull_request'
+    needs: [lint, type-check, fast-tests]
+    runs-on: docker
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v6
+        with: { fetch-depth: 0 }   # merge-base diff scoping needs main's history
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
+        with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
+      - run: just install
+      - uses: https://code.forgejo.org/actions/cache@v4   # mutant/verdict cache (issue #35 item 4)
+        with:
+          path: mutants
+          key: tmut-v1-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            tmut-v1-${{ hashFiles('uv.lock') }}-
+            tmut-v1-
+      - run: just test-mut-pr
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4   # CI-R6
+        if: always()
+        with: { name: mutation-pr-report, path: reports/ }
+
   image-scan-sbom:
     name: Container image scan + SBOM
     runs-on: docker

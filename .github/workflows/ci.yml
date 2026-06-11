@@ -292,6 +292,37 @@ jobs:
       - run: just migrate
       - run: just test-e2e              # CI-R1 item 12
 
+  # Advisory PR-stage mutation testing (T-MUT, issue #35 / ADR 0006): diff-scoped,
+  # time-boxed, warm-started from the cached mutants/ dir. continue-on-error keeps
+  # it advisory at the forge level too — it can NEVER be the long pole that blocks
+  # the merge. All gate logic (diff scope, budget, skip, report) lives in the
+  # recipe (CI-R0); the cache + fetch-depth steps below are runner plumbing.
+  mutation-advisory:
+    name: Mutation advisory (T-MUT)
+    if: github.event_name == 'pull_request'
+    needs: [lint, type-check, fast-tests]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }   # merge-base diff scoping needs main's history
+      - uses: astral-sh/setup-uv@v8.2.0
+        with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
+      - run: just install
+      - uses: actions/cache@v4     # mutant/verdict/test-stats cache (issue #35 item 4)
+        with:
+          path: mutants
+          key: tmut-v1-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            tmut-v1-${{ hashFiles('uv.lock') }}-
+            tmut-v1-
+      - run: just test-mut-pr
+      - uses: actions/upload-artifact@v4   # retained advisory report (CI-R6)
+        if: always()
+        with: { name: mutation-pr-report, path: reports/ }
+
   image-scan-sbom:
     name: Container image scan + SBOM
     needs: [lint, type-check, fast-tests]

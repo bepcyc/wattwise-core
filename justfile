@@ -179,6 +179,27 @@ cov-critical:
         --cov-fail-under=90
 
 # =====================================================================
+# 3b. Mutation testing — T-MUT (issue #35, ADR 0006)
+# =====================================================================
+
+# ADVISORY PR leg: mutate ONLY the merge-base diff, under a hard wall-clock
+# budget (WW_MUT_BUDGET_SECONDS, default 480s), warm-started from the CI-cached
+# mutants/ directory. Survivors NEVER fail this recipe (advisory = cannot block
+# the merge); only infrastructure failures exit non-zero. Out-of-scope PRs skip
+# in-script with an explicit report (the path filter is code, not YAML).
+# Report: reports/mutation-pr.{md,json} (CI-R6) + the CI step summary.
+test-mut-pr:
+    {{uv}} python scripts/mutation_gate.py --leg pr
+
+# ENFORCING nightly leg: the full campaign (incremental on the nightly cache),
+# enforcing the WW_MUT_FLOOR mutation-score floor (percent) over the
+# correctness-critical packages (analytics + ingestion adapters — the same
+# scope as the 95% coverage floor). The floor is a RATCHET: starts at 0
+# (report-only) until the first nightly baseline, then only goes up.
+test-mut:
+    {{uv}} python scripts/mutation_gate.py --leg full
+
+# =====================================================================
 # 4. Agent eval + injection tiers (CI-R1 items 6, 7)
 # =====================================================================
 
