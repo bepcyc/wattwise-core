@@ -148,7 +148,7 @@ exclude_also = [
   "\\.\\.\\.",
 ]
 
-# Per-package ≥ 95% line+branch FLOOR for the two correctness-critical packages
+# Per-package ≥ 90% line+branch FLOOR for the two correctness-critical packages
 # (DOD-R1): the analytics metrics engine and the ingestion adapters. This is
 # ENFORCED by the `just cov-critical` recipe, which scopes `--cov` to exactly
 # `wattwise_core.analytics` + `wattwise_core.ingestion.adapters` and fails under

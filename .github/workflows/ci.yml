@@ -109,7 +109,7 @@ jobs:
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
-      - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥95%)
+      - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥90%)
       - uses: actions/upload-artifact@v4   # retained artifact (CI-R6)
         if: always()
         with: { name: coverage-report, path: reports/coverage.xml }
