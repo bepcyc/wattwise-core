@@ -15,6 +15,7 @@ import datetime as _dt
 import json
 import math
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any, Final
 
 from wattwise_core.domain.enums import (
@@ -184,7 +185,16 @@ def activity_payload(
         "avg_speed_mps": _num(s.get("avg_speed") or s.get("enhanced_avg_speed")),
         "elevation_gain_m": _num(s.get("total_ascent")),
         "avg_temp_c": _num(s.get("avg_temperature")),
-        "perceived_exertion": rpe_value(s.get("perceived_exertion")),
+        # Garmin FIT records perceived exertion as the ``workout_rpe`` session field
+        # (uint8, scale=1, percent-of-scale = RPE x 10); the SDK never auto-divides it.
+        # A non-Garmin uploader may instead carry a pre-normalized CR-10 ``perceived_exertion``
+        # key. Decode each under its own encoding so the percent value is never read as CR-10
+        # (SRPE-R2): ``workout_rpe`` wins when present (it is the authoritative FIT field).
+        "perceived_exertion": (
+            rpe_value(s.get("workout_rpe"), RpeEncoding.PERCENT)
+            if s.get("workout_rpe") is not None
+            else rpe_value(s.get("perceived_exertion"), RpeEncoding.CR10)
+        ),
         "feel": feel_value(s.get("feel")),
         "device_class": _device_class(streams),
         "has_power": StreamChannelName.POWER_W.value in streams
@@ -282,33 +292,75 @@ def _int(value: Any) -> int | None:
     return None if num is None else int(num)
 
 
-# Athlete-reported exertion scale bounds (SRPE-R1). The canonical scale is CR-10
-# (0..10); sources that encode the same report as a percent of scale (Garmin FIT
-# writes the 1..10 self-evaluation as 10..100) are normalized by /10 — a unit
-# conversion (MAP-R3), not a clamp. CR-10 cannot exceed 10, so the two encodings
-# never overlap above 10; anything outside [0, 100] is a typed gap (MAP-R5).
+# Athlete-reported exertion scale bounds (SRPE-R1; SRPE-R2 source-tagged decode). The
+# canonical scale is CR-10 (0..10). The two ingest sources encode it differently and the
+# encoding CANNOT be inferred from the value alone, so the decode is source-tagged:
+#   * intervals.icu ``icu_rpe`` is native CR-10 (RpeEncoding.CR10).
+#   * Garmin FIT records perceived exertion as the ``workout_rpe`` session field, a
+#     uint8 with scale=1/offset=0 (no SDK auto-scaling): the 1..10 self-evaluation is
+#     written percent-of-scale as 10..100, i.e. RPE x 10 (RpeEncoding.PERCENT).
+# Above 10 the encodings never overlap, but AT/BELOW 10 a percent-source value (e.g. 10
+# = CR-10 1.0, minimum effort) is indistinguishable from a native CR-10 reading (10 =
+# maximum effort). Since the FIT unit metadata does NOT pin the encoding, a percent-source
+# value in the ambiguous (0, 10] band fails CLOSED to a typed gap (MAP-R5): a self-report
+# that cannot be decoded unambiguously must never be guessed, because a misread would
+# fabricate a hard (max-effort) session from a minimum-effort one. Anything outside the
+# source's valid range is likewise a typed gap; reports are never clamped into validity.
 _RPE_CR10_MAX = 10.0
+_RPE_PERCENT_MIN = 10.0
 _RPE_PERCENT_MAX = 100.0
 _FEEL_MIN = 1
 _FEEL_MAX = 5
 
 
-def rpe_value(value: Any) -> float | None:
-    """Normalize a source perceived-exertion report to the canonical CR-10 scale (MAP-R3).
+class RpeEncoding(StrEnum):
+    """How a source encodes the athlete-reported exertion report (SRPE-R2).
 
-    Values already in ``[0, 10]`` pass through (intervals.icu ``icu_rpe``, manual CR-10);
-    values in ``(10, 100]`` are the percent-of-scale FIT encoding and divide by 10. An
-    out-of-range or non-numeric value is a typed gap ``None`` (MAP-R5) — the report is
-    never clamped into validity, because a clamped exertion is a fabricated one.
+    ``CR10`` — the value is already the canonical CR-10 score (intervals.icu ``icu_rpe``).
+    ``PERCENT`` — the value is percent-of-scale, RPE x 10 (Garmin FIT ``workout_rpe``).
+    """
+
+    CR10 = "cr10"
+    PERCENT = "percent"
+
+
+def _rpe_from_percent(num: float) -> float | None:
+    """Decode a Garmin-FIT percent-of-scale exertion value to CR-10 (SRPE-R2).
+
+    An exact ``0`` is an unambiguous rest report (CR-10 0.0); ``[10, 100]`` divides by 10;
+    a value in the ambiguous ``(0, 10)`` band fails CLOSED to ``None`` (indistinguishable
+    from a native CR-10 reading — a misread would fabricate a maximum-effort session); a
+    value above 100 is out of range.
+    """
+    if num == 0.0:
+        return 0.0
+    if _RPE_PERCENT_MIN <= num <= _RPE_PERCENT_MAX:
+        return num / 10.0
+    return None
+
+
+def rpe_value(value: Any, encoding: RpeEncoding = RpeEncoding.CR10) -> float | None:
+    """Decode a source perceived-exertion report to the canonical CR-10 scale (MAP-R3; SRPE-R2).
+
+    The decode is source-tagged because the encoding cannot be read off the value alone:
+
+    * ``RpeEncoding.CR10`` (intervals.icu, manual): a value already on CR-10 ``[0, 10]``
+      passes through verbatim; anything outside that range is a typed gap ``None``.
+    * ``RpeEncoding.PERCENT`` (Garmin FIT ``workout_rpe``): a value in ``[10, 100]`` is the
+      percent-of-scale encoding and divides by 10; an exact ``0`` is an unambiguous rest
+      report (CR-10 0.0); a value in the ambiguous ``(0, 10)`` band fails CLOSED to ``None``
+      (it cannot be told apart from a native CR-10 reading and a misread would fabricate a
+      maximum-effort session from a minimum-effort one).
+
+    An out-of-range, ambiguous, or non-numeric report is a typed gap ``None`` (MAP-R5) — the
+    report is never clamped into validity, because a clamped exertion is a fabricated one.
     """
     num = _num(value)
     if num is None or num < 0.0:
         return None
-    if num <= _RPE_CR10_MAX:
-        return num
-    if num <= _RPE_PERCENT_MAX:
-        return num / 10.0
-    return None
+    if encoding is RpeEncoding.PERCENT:
+        return _rpe_from_percent(num)
+    return num if num <= _RPE_CR10_MAX else None
 
 
 def feel_value(value: Any) -> int | None:
@@ -333,12 +385,15 @@ def as_dt(value: Any) -> _dt.datetime | None:
 
 
 __all__ = [
+    "RpeEncoding",
     "activity_payload",
     "as_dt",
     "build_laps",
     "build_streams",
+    "feel_value",
     "has_free_text",
     "has_per_sample_stream",
+    "rpe_value",
     "sport_code",
     "stable_hash",
     "start_time",

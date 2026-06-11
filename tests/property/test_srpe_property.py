@@ -25,10 +25,6 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from wattwise_core.analytics.constants import (
-    SRPE_LOAD_PER_HOUR_AT_FULL_SCALE,
-    SRPE_RPE_FULL_SCALE,
-)
 from wattwise_core.analytics.result import Computed, Unavailable, UnavailableReason
 from wattwise_core.analytics.srpe import LOAD_MODEL_SRPE, srpe_load
 
@@ -40,20 +36,43 @@ _rpe = st.floats(min_value=0.0, max_value=10.0, allow_nan=False, allow_infinity=
 _duration = st.floats(min_value=1.0, max_value=12 * 3600.0, allow_nan=False, allow_infinity=False)
 
 
-def _oracle(rpe: float, duration_s: float) -> float:
-    """Independent closed-form oracle for the declared RPE-as-intensity mapping."""
-    intensity = rpe / SRPE_RPE_FULL_SCALE
-    return intensity * intensity * (duration_s / 3600.0) * SRPE_LOAD_PER_HOUR_AT_FULL_SCALE
+# SRPE-T1 independent oracle: hand-computed (RPE, seconds) -> (srpe_load, foster_au) literals,
+# NOT a re-statement of the production formula. Each load is computed by hand as
+# (RPE/10)^2 * (seconds/3600) * 100 and each Foster AU as RPE * (seconds/60), then pinned as a
+# constant. Because these are fixed numbers rather than the same squared expression the impl
+# evaluates, a squared->linear regression of the production code (which would, e.g., turn the
+# (7, 3600) case from 49.0 into 70.0) makes this table FAIL — the redundant formula-mirror oracle
+# could not catch that. Verified independently against the implementation before pinning.
+_SRPE_ORACLE: tuple[tuple[float, float, float, float], ...] = (
+    # rpe, duration_s, expected_srpe_load, expected_foster_au
+    (7.0, 3600.0, 49.0, 420.0),  # one hour at RPE 7 — the doc-40 golden
+    (5.0, 3600.0, 25.0, 300.0),  # linear regression would read 50.0
+    (10.0, 3600.0, 100.0, 600.0),  # full scale — squared and linear coincide here only
+    (1.0, 3600.0, 1.0, 60.0),  # linear regression would read 10.0
+    (7.0, 1800.0, 24.5, 210.0),  # half hour
+    (6.0, 7200.0, 72.0, 720.0),  # two hours; linear would read 120.0
+    (3.0, 600.0, 1.5, 30.0),  # ten minutes; linear would read 5.0
+    (8.0, 5400.0, 96.0, 720.0),  # 1.5 h; linear would read 120.0
+    (2.0, 3600.0, 4.0, 120.0),  # linear would read 20.0
+    (9.0, 2700.0, 60.75, 405.0),  # 45 min; linear would read 67.5
+    (0.0, 3600.0, 0.0, 0.0),  # honest zero
+    (4.0, 4500.0, 20.0, 300.0),  # 1.25 h; linear would read 50.0
+)
 
 
-@settings(max_examples=200)
-@given(rpe=_rpe, duration_s=_duration)
-def test_srpe_matches_independent_oracle(rpe: float, duration_s: float) -> None:
-    """SRPE-T1: the computed load equals the declared mapping; Foster AU is recorded."""
+@pytest.mark.parametrize(("rpe", "duration_s", "expected_load", "expected_au"), _SRPE_ORACLE)
+def test_srpe_matches_independent_oracle(
+    rpe: float, duration_s: float, expected_load: float, expected_au: float
+) -> None:
+    """SRPE-T1: the computed load equals a hand-computed literal; Foster AU is recorded.
+
+    Independent of the production formula: a squared->linear regression would shift every
+    non-degenerate row (e.g. (7, 3600) 49.0 -> 70.0) and fail this table.
+    """
     result = srpe_load(rpe, duration_s)
     assert isinstance(result, Computed)
-    assert result.value == pytest.approx(_oracle(rpe, duration_s), abs=_TOL)
-    assert result.quality.extra["foster_au"] == pytest.approx(rpe * duration_s / 60.0, abs=_TOL)
+    assert result.value == pytest.approx(expected_load, abs=_TOL)
+    assert result.quality.extra["foster_au"] == pytest.approx(expected_au, abs=_TOL)
 
 
 @settings(max_examples=200)

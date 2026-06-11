@@ -79,12 +79,19 @@ async def activity_load(svc: AnalyticsService, activity_id: str) -> _ls.LoadCont
     labeled HR load (``hr_load`` / ``hr_load_zonal``, honouring the athlete default,
     resolved into the bundle per LOAD-R4) else the session-RPE load (the
     ``summary_only`` last-resort member, SRPE-R1 — the only member a power-less,
-    HR-less strength session or swim can supply). Every below-top winner is carried
-    as a SUBSTITUTED contribution (DEGR-R2) — so a withdrawn power source never
-    presents a lower member's load as power-TSS — else ``None`` (empty class: a
-    surfaced unknown-load day, DEGR-R3). The bundle's / metric's ``load_model``
-    records which family produced it, so the load families are never silently mixed
-    (TSS-R3 / LOAD-R4).
+    HR-less strength session or swim can supply).
+
+    The fallback chain is FIDELITY-ordered and keyed on the availability of the COMPUTED
+    member, NOT on raw sensor presence (LOAD-R3): each member is tried only when the one
+    above it is not ``Computed``. So session-RPE correctly wins as the last resort INCLUDING
+    when a power channel is present but TSS is Unavailable (no FTP) and ``hr_load`` is
+    Unavailable (no HR) — an incomplete higher member never blocks the chain, it only fails
+    its own step. Every below-top winner — the HR load AND the session-RPE load, including
+    sRPE-when-power-present — is carried as a SUBSTITUTED contribution (DEGR-R2) at reduced
+    confidence, so a withdrawn/uncomputable higher source never presents a lower member's
+    load as power-TSS; an empty class yields ``None`` (a surfaced unknown-load day, DEGR-R3).
+    The bundle's / metric's ``load_model`` records which family produced it, so the load
+    families are never silently mixed (TSS-R3 / LOAD-R4).
     """
     bundle = await svc.coggan(activity_id)
     if is_computed(bundle):

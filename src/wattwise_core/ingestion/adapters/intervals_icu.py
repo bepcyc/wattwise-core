@@ -45,7 +45,7 @@ from wattwise_core.ingestion.adapters._intervals_asbo import (
     IntervalsWellnessAsbo,
 )
 from wattwise_core.ingestion.adapters._intervals_client import IntervalsIcuClient
-from wattwise_core.ingestion.adapters._map_activity import feel_value, rpe_value
+from wattwise_core.ingestion.adapters._map_activity import RpeEncoding, feel_value, rpe_value
 
 # ``ingestion.base`` is the rankless adapter CONTRACT (the SourceAdapter Protocol,
 # SourceDescriptorRef, FetchContext) that every L2 adapter is DEFINED against — the
@@ -121,7 +121,8 @@ def _activity_payload(
         "avg_speed_mps": act.average_speed,
         "elevation_gain_m": act.total_elevation_gain,
         "avg_temp_c": act.average_temp,
-        "perceived_exertion": rpe_value(act.icu_rpe),
+        # intervals.icu ``icu_rpe`` is already on the canonical CR-10 scale (SRPE-R2).
+        "perceived_exertion": rpe_value(act.icu_rpe, RpeEncoding.CR10),
         "feel": feel_value(act.feel),
         "device_class": _im.device_class(act),
         "has_power": act.device_watts is True or act.icu_average_watts is not None,

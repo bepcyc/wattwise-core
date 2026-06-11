@@ -157,6 +157,108 @@ async def _seed_powered_ride_with_rpe(session: AsyncSession) -> tuple[str, str]:
     return str(athlete.athlete_id), str(activity.activity_id)
 
 
+_HR_MAX = 190.0
+_HR_REST = 50.0
+_HR_BPM = 150.0
+
+
+async def _seed_hr_session_with_rpe(session: AsyncSession) -> tuple[str, str]:
+    """Seed a ride with an HR channel + HRmax/HRrest signature AND a perceived_exertion.
+
+    Both the ``hr_load`` (modeled) and ``srpe_load`` (summary-only) members are computable
+    for this activity, so it is the fixture that distinguishes the fallback priority: the
+    higher-fidelity HR load must win over the session-RPE load (LOAD-R3).
+    """
+    athlete = await _seed_athlete(session)
+    session.add(
+        FitnessSignature(
+            athlete_id=athlete.athlete_id,
+            signature_type="cycling",
+            effective_date=_dt.date(2026, 1, 1),
+            max_hr_bpm=_HR_MAX,
+            resting_hr_bpm=_HR_REST,
+            origin=SignatureOrigin.MEASURED,
+        )
+    )
+    activity = Activity(
+        athlete_id=athlete.athlete_id,
+        start_time=_START,
+        sport="cycling",
+        elapsed_time_s=_SECONDS,
+        moving_time_s=_SECONDS,
+        avg_hr_bpm=_HR_BPM,
+        has_hr=True,
+        perceived_exertion=_RPE,
+    )
+    session.add(activity)
+    await session.flush()
+    stream_set = ActivityStreamSet(
+        activity_id=activity.activity_id,
+        sample_basis=SampleBasis.TIME,
+        sample_rate_hz=1.0,
+        sample_count=_SECONDS,
+        t0=_START,
+    )
+    session.add(stream_set)
+    await session.flush()
+    session.add(
+        StreamChannel(
+            stream_set_id=stream_set.stream_set_id,
+            set_kind=StreamSetKind.ACTIVITY,
+            channel=StreamChannelName.HR_BPM,
+            sample_basis=SampleBasis.TIME,
+            values=[_HR_BPM] * _SECONDS,
+            coverage={},
+        )
+    )
+    await session.commit()
+    return str(athlete.athlete_id), str(activity.activity_id)
+
+
+async def _seed_powered_no_ftp_with_rpe(session: AsyncSession) -> tuple[str, str]:
+    """Seed a ride WITH a power channel but NO FTP signature and NO HR, plus an RPE report.
+
+    The power channel is present, so the power family is applicable, but TSS is Unavailable
+    (no FTP) and ``hr_load`` is Unavailable (no HR). Per the fidelity-ordered LOAD-R3 chain —
+    keyed on the availability of the COMPUTED metric, not on raw sensor presence — the
+    session-RPE load is the correct last resort even though a power channel exists.
+    """
+    athlete = await _seed_athlete(session)
+    activity = Activity(
+        athlete_id=athlete.athlete_id,
+        start_time=_START,
+        sport="cycling",
+        elapsed_time_s=_SECONDS,
+        moving_time_s=_SECONDS,
+        avg_power_w=_FTP_W,
+        has_power=True,
+        perceived_exertion=_RPE,
+    )
+    session.add(activity)
+    await session.flush()
+    stream_set = ActivityStreamSet(
+        activity_id=activity.activity_id,
+        sample_basis=SampleBasis.TIME,
+        sample_rate_hz=1.0,
+        sample_count=_SECONDS,
+        t0=_START,
+    )
+    session.add(stream_set)
+    await session.flush()
+    session.add(
+        StreamChannel(
+            stream_set_id=stream_set.stream_set_id,
+            set_kind=StreamSetKind.ACTIVITY,
+            channel=StreamChannelName.POWER_W,
+            sample_basis=SampleBasis.TIME,
+            values=[_FTP_W] * _SECONDS,
+            coverage={},
+        )
+    )
+    await session.commit()
+    return str(athlete.athlete_id), str(activity.activity_id)
+
+
 async def test_srpe_golden_value_and_label(factory: async_sessionmaker[AsyncSession]) -> None:
     """SRPE-R1 golden: RPE 7 over one hour reads 49.0 under the ``srpe_load`` label."""
     async with factory() as session:
@@ -232,6 +334,71 @@ async def test_power_member_still_wins_over_reported_rpe(
     assert cov is not None
     assert cov.fidelity is not Fidelity.SUBSTITUTED
     assert cov.substitution is None
+
+
+async def test_hr_load_wins_over_srpe_when_both_computed(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """LOAD-R3 priority (swap-detection): the modeled HR load beats the session-RPE load.
+
+    The seeded ride can compute BOTH ``hr_load`` (~108.1 from the HR stream + HRmax/HRrest)
+    and ``srpe_load`` (49.0 from the RPE report). The higher-fidelity HR load must win: the
+    day reads the HR-load value, NOT the sRPE value, and is badged SUBSTITUTED (a below-top
+    member, DEGR-R2). Transposing the ``hr_load`` and ``srpe_load`` branches in
+    ``activity_load`` would make the day read 49.0 and fail this test — the ordering is
+    non-vacuous.
+    """
+    async with factory() as session:
+        athlete_id, activity_id = await _seed_hr_session_with_rpe(session)
+    async with factory() as session:
+        service = AnalyticsService(session)
+        hr_res = await service.trimp(activity_id)
+        loads = await service.daily_load_series(athlete_id, _DAY, _DAY)
+        series = await service.pmc(athlete_id, _DAY, _DAY)
+    assert is_computed(hr_res)
+    hr_value = hr_res.value
+    # The HR load and the sRPE load are distinct, so the assertion discriminates the winner.
+    assert hr_value != pytest.approx(_SRPE_GOLDEN)
+    assert loads[_DAY] == pytest.approx(hr_value)
+    assert loads[_DAY] != pytest.approx(_SRPE_GOLDEN)  # NOT the session-RPE last resort
+    day = series[0]
+    assert is_computed(day)
+    cov = day.value.load_coverage
+    assert cov is not None
+    # hr_load is a below-top member, so the day is SUBSTITUTED at the displaced raw-stream tier.
+    assert cov.fidelity is Fidelity.SUBSTITUTED
+    assert cov.substitution is not None
+    assert cov.substitution.equivalence_class == TRAINING_LOAD_CLASS
+    assert cov.substitution.from_fidelity is Fidelity.RAW_STREAM
+    assert day.quality.confidence < 1.0
+
+
+async def test_srpe_wins_when_power_present_but_tss_and_hr_unavailable(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """LOAD-R3 (fidelity-ordered, keyed on the computed metric): sRPE is the last resort even
+    when a power channel exists but TSS (no FTP) AND hr_load (no HR) are both Unavailable.
+
+    The fallback is ordered by the availability of the COMPUTED member, not by raw sensor
+    presence: a ride with a power stream but no FTP and no HR yields the session-RPE load,
+    badged SUBSTITUTED at reduced confidence (DEGR-R2) — never silently presented as power-TSS.
+    """
+    async with factory() as session:
+        athlete_id, _ = await _seed_powered_no_ftp_with_rpe(session)
+    async with factory() as session:
+        service = AnalyticsService(session)
+        loads = await service.daily_load_series(athlete_id, _DAY, _DAY)
+        series = await service.pmc(athlete_id, _DAY, _DAY)
+    assert loads[_DAY] == pytest.approx(_SRPE_GOLDEN)  # the session-RPE last resort
+    day = series[0]
+    assert is_computed(day)
+    cov = day.value.load_coverage
+    assert cov is not None
+    assert cov.fidelity is Fidelity.SUBSTITUTED
+    assert cov.substitution is not None
+    assert cov.substitution.equivalence_class == TRAINING_LOAD_CLASS
+    assert cov.substitution.from_fidelity is Fidelity.RAW_STREAM
+    assert day.quality.confidence < 1.0
 
 
 async def test_srpe_duration_falls_back_to_elapsed(
