@@ -151,7 +151,7 @@ def endurance_score(
     # endurance_score column is an unrelated ingested source scalar). The "durability" ->
     # "curve_shape" rename therefore needs no read-side migration shim — there are no stored
     # records carrying the old component string. (Operator CONFIG-key compatibility, which DOES
-    # have a persistence surface via env/file overrides, is handled by the fail-closed rename
+    # survive across boots via env/file overrides, is handled by the fail-closed rename
     # guard in config/_renamed_keys.py.)
     quality = QualityReport(
         confidence=confidence,
