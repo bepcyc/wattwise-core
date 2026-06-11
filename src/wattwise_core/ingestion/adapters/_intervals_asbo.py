@@ -51,6 +51,8 @@ class IntervalsActivityAsbo(BaseModel):
     trainer: bool | None = None
     has_heartrate: bool | None = None
     icu_lap_count: int | None = None
+    icu_rpe: float | None = None
+    feel: int | None = None
 
 
 class IntervalsStreamAsbo(BaseModel):

@@ -2,15 +2,16 @@
 
 The canonical ``training_load`` channel is resolved through an ORDERED equivalence class
 (DM-SUB-R1 worked example) via the LOAD-R3 fallback: power-based TSS is the top member
-(``raw_stream``); the HR-derived Banister load (TRIMP) is the lowest ``modeled`` member.
+(``raw_stream``); below it sit the HR-derived Banister load (TRIMP, ``modeled``) and the
+session-RPE load (Foster, ``summary_only`` — the last resort, SRPE-R1).
 
-When the top source is withdrawn and the load is recomputed from the HR member, the value
+When the top source is withdrawn and the load is recomputed from a lower member, the value
 is a SUBSTITUTION: its coverage MUST carry :data:`Fidelity.SUBSTITUTED` with
 ``substitution:{class:training_load, from_fidelity:raw_stream}`` (DEGR-R2 / DM-SUB-R4) — the
-in-class downgrade token, NEVER the displaced member's own ``modeled`` tier — so a client
-badges reduced precision rather than reading an HR load as full-fidelity power-TSS. This
-module owns those small, pure carriers; the per-activity resolution (LOAD-R3 fallback) lives
-in :mod:`wattwise_core.analytics.service`, the PMC surfacing in
+in-class downgrade token, NEVER the displaced member's own tier — so a client badges
+reduced precision rather than reading an HR or session-RPE load as full-fidelity
+power-TSS. This module owns those small, pure carriers; the per-activity resolution
+(LOAD-R3 fallback) lives in :mod:`wattwise_core.analytics.service`, the PMC surfacing in
 :mod:`wattwise_core.analytics.pmc`.
 """
 
@@ -36,7 +37,8 @@ class LoadContribution:
 
     ``coverage.fidelity`` is :data:`Fidelity.RAW_STREAM` for the top (power-TSS) member, or
     :data:`Fidelity.SUBSTITUTED` (with a populated ``substitution``) when the load came from
-    the lower-fidelity HR member because the power source was withdrawn (DEGR-R2).
+    a lower-fidelity member (HR TRIMP or session-RPE) because the power source was
+    withdrawn or never present (DEGR-R2).
     """
 
     value: float
@@ -44,8 +46,9 @@ class LoadContribution:
 
 
 # The TOP member of the ``training_load`` class is power-TSS at raw_stream; the HR member is
-# modeled. When the HR member wins because the power source is absent (withdrawn), the load is
-# SUBSTITUTED and carries the displaced top tier in ``from_fidelity`` (DEGR-R2 / DM-SUB-R4).
+# modeled and the session-RPE member is summary_only. When a lower member wins because the
+# power source is absent (withdrawn or never recorded), the load is SUBSTITUTED and carries
+# the displaced top tier in ``from_fidelity`` (DEGR-R2 / DM-SUB-R4).
 LOAD_TOP_COVERAGE = Coverage(present=True, fidelity=Fidelity.RAW_STREAM)
 LOAD_SUBSTITUTED_COVERAGE = Coverage(
     present=True,
