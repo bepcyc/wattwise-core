@@ -184,6 +184,8 @@ def activity_payload(
         "avg_speed_mps": _num(s.get("avg_speed") or s.get("enhanced_avg_speed")),
         "elevation_gain_m": _num(s.get("total_ascent")),
         "avg_temp_c": _num(s.get("avg_temperature")),
+        "perceived_exertion": rpe_value(s.get("perceived_exertion")),
+        "feel": feel_value(s.get("feel")),
         "device_class": _device_class(streams),
         "has_power": StreamChannelName.POWER_W.value in streams
         or _num(s.get("avg_power")) is not None,
@@ -278,6 +280,48 @@ def _finite_latlng(latlng: tuple[float, float] | None) -> list[float] | None:
 def _int(value: Any) -> int | None:
     num = _num(value)
     return None if num is None else int(num)
+
+
+# Athlete-reported exertion scale bounds (SRPE-R1). The canonical scale is CR-10
+# (0..10); sources that encode the same report as a percent of scale (Garmin FIT
+# writes the 1..10 self-evaluation as 10..100) are normalized by /10 — a unit
+# conversion (MAP-R3), not a clamp. CR-10 cannot exceed 10, so the two encodings
+# never overlap above 10; anything outside [0, 100] is a typed gap (MAP-R5).
+_RPE_CR10_MAX = 10.0
+_RPE_PERCENT_MAX = 100.0
+_FEEL_MIN = 1
+_FEEL_MAX = 5
+
+
+def rpe_value(value: Any) -> float | None:
+    """Normalize a source perceived-exertion report to the canonical CR-10 scale (MAP-R3).
+
+    Values already in ``[0, 10]`` pass through (intervals.icu ``icu_rpe``, manual CR-10);
+    values in ``(10, 100]`` are the percent-of-scale FIT encoding and divide by 10. An
+    out-of-range or non-numeric value is a typed gap ``None`` (MAP-R5) — the report is
+    never clamped into validity, because a clamped exertion is a fabricated one.
+    """
+    num = _num(value)
+    if num is None or num < 0.0:
+        return None
+    if num <= _RPE_CR10_MAX:
+        return num
+    if num <= _RPE_PERCENT_MAX:
+        return num / 10.0
+    return None
+
+
+def feel_value(value: Any) -> int | None:
+    """Validate a source feel report against the 1..5 ordinal (1 = strong, 5 = weak).
+
+    A non-integral, out-of-range, or non-numeric value is a typed gap ``None`` (MAP-R5);
+    the ordinal is stored verbatim, never rescaled or clamped.
+    """
+    num = _num(value)
+    if num is None or num != int(num):
+        return None
+    token = int(num)
+    return token if _FEEL_MIN <= token <= _FEEL_MAX else None
 
 
 def as_dt(value: Any) -> _dt.datetime | None:

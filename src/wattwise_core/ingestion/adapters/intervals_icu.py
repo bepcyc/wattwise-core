@@ -45,6 +45,7 @@ from wattwise_core.ingestion.adapters._intervals_asbo import (
     IntervalsWellnessAsbo,
 )
 from wattwise_core.ingestion.adapters._intervals_client import IntervalsIcuClient
+from wattwise_core.ingestion.adapters._map_activity import feel_value, rpe_value
 
 # ``ingestion.base`` is the rankless adapter CONTRACT (the SourceAdapter Protocol,
 # SourceDescriptorRef, FetchContext) that every L2 adapter is DEFINED against — the
@@ -120,6 +121,8 @@ def _activity_payload(
         "avg_speed_mps": act.average_speed,
         "elevation_gain_m": act.total_elevation_gain,
         "avg_temp_c": act.average_temp,
+        "perceived_exertion": rpe_value(act.icu_rpe),
+        "feel": feel_value(act.feel),
         "device_class": _im.device_class(act),
         "has_power": act.device_watts is True or act.icu_average_watts is not None,
         "has_hr": bool(act.has_heartrate) or act.average_heartrate is not None,
@@ -162,7 +165,7 @@ class IntervalsIcuAdapter:
     auth_archetype: ClassVar[AuthArchetype] = AuthArchetype.API_KEY
     kind: ClassVar[SourceKind] = SourceKind.OAUTH_API
     adapter_version: ClassVar[str] = "1"
-    mapping_version: ClassVar[str] = "1"
+    mapping_version: ClassVar[str] = "2"
     #: The static machine-readable capability declaration (ADP-R1), validated at
     #: registration (ADP-R2/ONB-R2). The declared GBO types gate the engine's upsert
     #: refusal (ADP-R3); the rate-limit VALUES live in config (CFG-R1a) — the
