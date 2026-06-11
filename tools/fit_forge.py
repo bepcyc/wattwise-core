@@ -221,15 +221,16 @@ _ACTIVITY = _MesgType(
 )
 
 
-def _sample(index: int) -> tuple[int, int, int, int]:
+def _sample(index: int, base_power_w: int) -> tuple[int, int, int, int]:
     """Deterministic (power_w, hr_bpm, cadence_rpm, speed_mms) for sample ``index``.
 
-    A fixed tempo ride with a gentle 60-sample undulation — enough variation to look
-    like telemetry, zero randomness so the forged bytes are reproducible.
+    A fixed tempo ride with a gentle 60-sample undulation around ``base_power_w`` —
+    enough variation to look like telemetry, zero randomness so the forged bytes are
+    reproducible.
     """
     wave = index % 60
     bump = wave if wave < 30 else 60 - wave  # triangle 0..30..0
-    power = 185 + bump  # 185..215 W
+    power = base_power_w + bump  # base..base+30 W
     hr = 135 + bump // 3  # 135..145 bpm
     cadence = 88 + bump // 10  # 88..91 rpm
     speed = 8200 + bump * 10  # 8.2..8.5 m/s in mm/s
@@ -242,6 +243,7 @@ def forge_ride(
     duration_s: int = 1200,
     sample_interval_s: int = 1,
     serial_number: int = 77_000_001,
+    base_power_w: int = 185,
 ) -> bytes:
     """Forge one valid FIT cycling activity starting at ``start`` (aware UTC).
 
@@ -271,7 +273,7 @@ def forge_ride(
     lat0 = int(45.0 * _DEG_TO_SEMICIRCLE)
     lon0 = int(7.0 * _DEG_TO_SEMICIRCLE)
     for i in range(n_samples):
-        power, hr, cadence, speed_mms = _sample(i)
+        power, hr, cadence, speed_mms = _sample(i, base_power_w)
         powers.append(power)
         hrs.append(hr)
         cadences.append(cadence)
