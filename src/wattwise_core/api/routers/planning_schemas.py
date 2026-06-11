@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import AgentAnswer as _AgentAnswer
 from wattwise_core.agent.deliverables import Plan as PlanDeliverable
+from wattwise_core.api.routers.agent_request import catalog_locale, scan_header_locale
 from wattwise_core.api.routers.agent_schemas import (
     AgentAskResponse,
     DegradedOut,
@@ -86,15 +87,17 @@ def resolve_locale(
     Body ``language`` -> ``Accept-Language`` -> the PERSISTED setting (the language
     subtag of ``athlete.primary_locale``, loaded server-side) -> the engine ``en``
     baseline — identical to the agent path so the plan surface honors the stored
-    default (API-R37) without a per-call override mutating it.
+    default (API-R37) without a per-call override mutating it. The header rung preserves
+    the FULL well-formed BCP-47 tag (LANG-R1/-R3) so the directive answers in the exact
+    variant; the model-free ``PHASE_GATED_BY_LOCALE`` gloss reduces it to its primary
+    subtag at lookup time (:func:`catalog_locale`). The persisted rung stays restricted to
+    the locales with model-free copy (bare ``en``/``de``/``ru``, unchanged).
     """
     if body.language is not None:
         return body.language
-    if accept_language:
-        for part in accept_language.split(","):
-            tag = part.split(";", 1)[0].strip().lower()[:2]
-            if tag in PHASE_GATED_BY_LOCALE:
-                return tag
+    header = scan_header_locale(accept_language)
+    if header is not None:
+        return header
     if persisted in PHASE_GATED_BY_LOCALE:
         return persisted
     return "en"
@@ -108,7 +111,7 @@ def phase_gated_response(locale: str, thread_id: str | None, trace_id: str) -> A
     ``degraded`` answer (no internals leaked, VOICE-R2/-R3) — NEVER a fabricated plan, never a raw
     error. Same :class:`AgentAskResponse` union the live path returns, with the typed caveat.
     """
-    text = PHASE_GATED_BY_LOCALE.get(locale, PHASE_GATED_BY_LOCALE["en"])
+    text = PHASE_GATED_BY_LOCALE[catalog_locale(locale)]
     return AgentAskResponse(
         status="degraded",
         thread_id=thread_id or "unconfigured",
