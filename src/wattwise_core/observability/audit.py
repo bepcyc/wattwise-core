@@ -31,12 +31,18 @@ import json
 import threading
 from typing import Any
 
-from wattwise_core.observability.logging import get_logger
+from wattwise_core.observability.logging import get_audit_logger
 
 #: The constant stream discriminator carried on every audit event (LOG-R6.2).
 AUDIT_STREAM = "audit"
 
-_logger = get_logger("wattwise_core.audit")
+#: The DEDICATED audit-stream logger (LOG-R6.2): its pipeline applies the central PII
+#: allowlist to the event PAYLOAD but ships the four structural chain-descriptor keys
+#: (stream/audit_seq/prev_hash/entry_hash) VERBATIM, so the EMITTED line — not just the
+#: in-process record — round-trips through :func:`verify_chain`. Emitting through the
+#: shared ``get_logger`` instead would mask those four keys (allowlist drop + high-entropy
+#: value scrub), leaving the shipped chain unverifiable.
+_logger = get_audit_logger()
 
 #: The chain genesis: the first event's ``prev_hash`` (a fixed, documented sentinel).
 _GENESIS = "0" * 64
@@ -97,8 +103,10 @@ def audit_event(event: str, **fields: Any) -> dict[str, Any]:
 
     Computes the hash-chain triplet (``audit_seq``/``prev_hash``/``entry_hash``) under a
     process lock so concurrent emitters cannot fork the chain, then emits through the
-    central structured logger — which applies the mandatory allowlist redaction
-    (LOG-R5/PRIV-R5) before the event leaves the process. Returns the chained record
+    DEDICATED audit-stream logger — which applies the mandatory allowlist redaction
+    (LOG-R5/PRIV-R5) to the event PAYLOAD but ships the four structural chain-descriptor
+    keys verbatim, so the EMITTED line round-trips through :func:`verify_chain`
+    (LOG-R6.2 shipped-line verifiability). Returns the chained record
     (useful to tests and to callers that persist a receipt). Never raises into the
     caller's request path: a logging error must not turn a successful operation into a
     500 (the platform's stream monitor owns emit-failure alerting).
@@ -120,8 +128,21 @@ def record_erasure_hook(athlete_id: str) -> dict[str, Any]:
     return audit_event("log_pii_erasure_hook", athlete_id=athlete_id)
 
 
-#: The chain-envelope keys a record carries OUTSIDE its event payload.
-_ENVELOPE_KEYS = frozenset({"stream", "audit_seq", "prev_hash", "entry_hash"})
+#: The chain-envelope keys a record carries OUTSIDE its event payload: the three
+#: hash-linkage descriptors (used directly for verification) plus the ``stream``
+#: discriminator (a hash input via the canonical form, never a payload field).
+_CHAIN_ENVELOPE_KEYS = frozenset({"stream", "audit_seq", "prev_hash", "entry_hash"})
+
+#: The structlog RENDER-envelope keys the dedicated audit logger adds to the EMITTED
+#: line (LOG-R2): a UTC ``timestamp``, the log ``level``, and (if ever bound) the
+#: ``logger`` name. They are renderer additions, NOT part of the hashed audit payload,
+#: so :func:`verify_chain` ignores them — this is what lets it run on a line parsed
+#: straight back from the shipped JSON (the LOG-R6.2 shipped-line verifiability
+#: invariant) without the caller having to pre-strip the renderer's own fields.
+_RENDER_ENVELOPE_KEYS = frozenset({"timestamp", "level", "logger", "logger_name"})
+
+#: Everything excluded from the recomputed payload: chain descriptors + render envelope.
+_ENVELOPE_KEYS = _CHAIN_ENVELOPE_KEYS | _RENDER_ENVELOPE_KEYS
 
 
 def verify_chain(records: list[dict[str, Any]]) -> bool:
@@ -134,6 +155,11 @@ def verify_chain(records: list[dict[str, Any]]) -> bool:
     stream-swapped record fails even when its payload is untouched. An empty run
     verifies trivially; the first record anchors the run (its ``prev_hash`` is the
     genesis sentinel for a full-process run, or the preceding segment's head).
+
+    Verifies equally over an in-process ``record`` and over a line parsed straight
+    back from the SHIPPED JSON: the dedicated audit logger ships the four chain keys
+    verbatim, and the structlog render-envelope additions (``timestamp``/``level``)
+    are ignored here (:data:`_RENDER_ENVELOPE_KEYS`) since they are not hashed.
     """
     prev_hash: str | None = None
     prev_seq: int | None = None

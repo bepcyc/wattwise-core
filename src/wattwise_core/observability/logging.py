@@ -211,6 +211,49 @@ def redact_processor(_logger: WrappedLogger, _method_name: str, event_dict: Even
     return {key: _redact_one(key, value) for key, value in event_dict.items()}
 
 
+# --- audit-stream structural-key exemption (LOG-R6.2) ------------------------
+
+# The tamper-evident audit stream's hash-chain DESCRIPTOR keys. These are structural
+# chain metadata — NOT athlete content, PII, secrets, or health data:
+#   - ``stream``     : the constant "audit" discriminator the log shipper routes on
+#                      (LOG-R6 / LOG-R9 — mask it and the audit stream can no longer be
+#                      fanned to its longer-retention sink);
+#   - ``audit_seq``  : the monotonic per-process sequence number (a small int);
+#   - ``prev_hash`` / ``entry_hash`` : 64-char SHA-256 hex chain links.
+# They MUST leave the process VERBATIM so an independent auditor can re-derive the chain
+# from the SHIPPED records alone (the LOG-R6.2 verifiability invariant). The central
+# allowlist redactor cannot carry them: ``stream`` is an unknown key, ``audit_seq`` is a
+# non-string under no numeric-allowlist, and ``prev_hash``/``entry_hash`` are precisely
+# the "long opaque high-entropy blob" shape the layer-2 value scrub destroys EVEN when
+# allowlisted (a chain integrity token is, by construction, indistinguishable from
+# envelope/token wire material). So they are exempted ONLY on the dedicated audit stream,
+# ONLY for these four keys — every OTHER field of an audit event (its payload, incl.
+# ``athlete_id``) STILL flows through the central PII allowlist unchanged.
+_AUDIT_CHAIN_KEYS: frozenset[str] = frozenset({"stream", "audit_seq", "prev_hash", "entry_hash"})
+
+
+def audit_redact_processor(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
+    """Emit-boundary redactor for the tamper-evident AUDIT stream (LOG-R6.2 / LOG-R5).
+
+    Same PII guarantee as the central redactor for the event PAYLOAD — every field
+    that is NOT a chain descriptor is run through :func:`redact_processor`, so an
+    ``athlete_id`` stays opaque and any non-allowlisted/PII key is still masked. The
+    four structural chain-descriptor keys (:data:`_AUDIT_CHAIN_KEYS`) are split out
+    BEFORE redaction and re-attached VERBATIM afterwards, so ``stream`` / ``audit_seq``
+    / ``prev_hash`` / ``entry_hash`` ship intact and the chain is verifiable from the
+    emitted line alone — they carry no athlete PII, they are the verifier's contract.
+    """
+    chain = {key: value for key, value in event_dict.items() if key in _AUDIT_CHAIN_KEYS}
+    payload = {key: value for key, value in event_dict.items() if key not in _AUDIT_CHAIN_KEYS}
+    redacted = redact_processor(logger, method_name, payload)
+    # Chain descriptors re-attached LAST: exempt from the allowlist drop AND the
+    # layer-2 high-entropy value scrub, never from PII redaction (they are not PII).
+    redacted.update(chain)
+    return redacted
+
+
 # --- configuration -----------------------------------------------------------
 
 _DEFAULT_LEVEL = logging.INFO
@@ -266,3 +309,35 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
         configure_logging()
     logger: structlog.stdlib.BoundLogger = structlog.get_logger(name)
     return logger
+
+
+def get_audit_logger() -> Any:
+    """Return the DEDICATED tamper-evident audit-stream logger (LOG-R6.2).
+
+    A standalone structlog pipeline — NOT the central :func:`get_logger` — so its
+    processor chain ends in :func:`audit_redact_processor` instead of the central
+    :func:`redact_processor`. The two pipelines share the SAME PII allowlist for the
+    event payload (``athlete_id`` stays opaque, unknown/PII keys masked); they differ
+    ONLY in that the four structural chain-descriptor keys ship verbatim here so the
+    emitted line round-trips through ``verify_chain`` (the LOG-R6.2 shipped-line
+    verifiability invariant).
+
+    Built from :func:`structlog.wrap_logger` over a :class:`structlog.PrintLogger` to
+    stdout (LOG-R1 — stdout only, no file handlers), bound to its own chain. It does
+    NOT route through the root ``logging`` logger, so it cannot pick up the central
+    chain (the per-category-logger ``propagate=False`` precedent from the stdlib
+    logging cookbook). :func:`configure_logging` is invoked first so the level/handler
+    invariants (LOG-R1) are established.
+    """
+    if not _state["configured"]:
+        configure_logging()
+    return structlog.wrap_logger(
+        structlog.PrintLogger(file=sys.stdout),
+        processors=[
+            structlog.contextvars.merge_contextvars,  # LOG-R3 correlation context
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),  # LOG-R2 UTC ISO-8601
+            audit_redact_processor,  # LOG-R5/R6.2 — payload PII redacted, chain keys exempt
+            structlog.processors.JSONRenderer(),  # LOG-R2 — one JSON object per line
+        ],
+    )
