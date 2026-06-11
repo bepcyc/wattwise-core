@@ -45,7 +45,9 @@ Activity scalars: [elapsed_time_s](#elapsed-time-elapsed_time_s) ·
 [max_power_w](#maximum-power-max_power_w) · [avg_hr_bpm](#average-heart-rate-avg_hr_bpm) ·
 [max_hr_bpm](#maximum-heart-rate-max_hr_bpm) · [avg_cadence_rpm](#average-cadence-avg_cadence_rpm) ·
 [avg_speed_mps](#average-speed-avg_speed_mps) · [elevation_gain_m](#elevation-gain-elevation_gain_m) ·
-[avg_temp_c](#average-temperature-avg_temp_c) · [training_effect_aerobic](#aerobic-training-effect-training_effect_aerobic) ·
+[avg_temp_c](#average-temperature-avg_temp_c) ·
+[perceived_exertion](#session-rpe-perceived_exertion) · [feel](#session-feel-feel) ·
+[training_effect_aerobic](#aerobic-training-effect-training_effect_aerobic) ·
 [anaerobic_effect](#anaerobic-training-effect-anaerobic_effect) ·
 [vo2max_estimate](#per-activity-vo2max-estimate-vo2max_estimate) ·
 [training_load_source](#source-reported-session-load-training_load_source) ·
@@ -113,7 +115,8 @@ Streams: [power_w](#power-stream-power_w) · [hr_bpm](#heart-rate-stream-hr_bpm)
 
 Load family: [tss](#training-stress-score-tss) · [hr_load](#hr-based-load-hr_load) ·
 [hr_load_zonal](#zone-weighted-hr-load-hr_load_zonal) ·
-[load_model](#load-model-label-load_model) · [tss_per_hour](#load-density-tss_per_hour)
+[load_model](#load-model-label-load_model) · [tss_per_hour](#load-density-tss_per_hour) ·
+[srpe_load](#session-rpe-load-srpe_load)
 
 Performance Management Chart: [ctl](#chronic-training-load-ctl) · [atl](#acute-training-load-atl) ·
 [tsb](#training-stress-balance-tsb) · [form](#form-form) ·
@@ -133,13 +136,6 @@ Efficiency family: [efficiency_factor](#efficiency-factor-efficiency_factor) ·
 Heart-rate family: [trimp](#trimp-trimp) · [hrv_rmssd_ms (computed)](#computed-rmssd-hrv_rmssd_ms)
 
 Composites: [endurance_score](#endurance-score-endurance_score)
-
-### Arriving in an upcoming release
-
-These keys are part of the canonical model but are **not collected or computed by current
-builds** — they land with an upcoming release. They are listed separately so nothing here is
-mistaken for a value you can read today: [perceived_exertion](#session-rpe-perceived_exertion) ·
-[feel](#session-feel-feel) · [srpe_load](#session-rpe-load-srpe_load)
 
 ---
 
@@ -517,6 +513,58 @@ readings.
 fitness loss if temperature is ignored.
 
 **Caveats.** Device-mounted sensors read warmer than true ambient when in sunlight.
+
+### Session RPE (`perceived_exertion`)
+
+**Units:** CR-10 scale, 0-10 (fractional allowed).
+
+Your rating of how hard the whole session felt, on the Borg CR-10 scale.
+
+**Capture rule.** Captured at ingest from a device session self-evaluation, a connected
+platform's RPE field, or first-party entry. The two sources encode the scale differently:
+a connected-platform value already on 0-10 is taken as-is, while a device's
+percent-of-scale field (10-100) is divided by ten. An exact `0` is kept as an honest rest
+report. Malformed or out-of-range values, and the ambiguous low device band that cannot be
+told apart from a native 0-10 reading, resolve to a typed gap — never clamped, never
+guessed (a misread there would fabricate a maximal-effort session from a minimal one).
+
+**Inputs & when unavailable.** Present only when you (or a source) recorded it; a gap
+otherwise.
+
+**Typical values.** 0 = rest, around 3-4 = easy, 5-6 = moderate, 7-8 = hard, 10 = maximal
+(Borg CR-10 convention, Foster's session-RPE literature).
+
+**How it moves state.** When present with a valid duration, it produces `srpe_load`, the
+lowest-fidelity training-load member, which lets sensor-less sessions (strength, many
+swims) register on the Performance Management Chart instead of reading as rest.
+
+**Reading trends.** Consistent RPE at a given workout type is normal; a creeping RPE at the
+same power or pace can signal accumulating fatigue.
+
+**Caveats.** Subjective and timing-sensitive (rate it shortly after the session). It is the
+least precise load input and always carries a substituted, reduced-confidence flag when it
+wins the load selection.
+
+### Session feel (`feel`)
+
+**Units:** ordinal 1-5.
+
+Your subjective sense of how good you felt, on a 1-5 scale.
+
+**Capture rule.** Captured as an ordinal where 1 = strong and 5 = weak (the common
+connected-platform convention). A self-report, advisory only.
+
+**Inputs & when unavailable.** Present only when recorded.
+
+**Typical values.** 1-5 on the stated convention.
+
+**How it moves state.** None directly — it is advisory context for the coach. It is never
+an input to a canonical derived metric.
+
+**Reading trends.** A run of "weak" ratings alongside flat or declining performance can
+prompt a closer look at recovery.
+
+**Caveats.** Note the scale direction (low is good). Purely subjective.
 
 ### Aerobic training effect (`training_effect_aerobic`)
 
@@ -2401,8 +2449,7 @@ request or as your chosen default, never auto-selected ahead of `hr_load`.
 
 ### Load-model label (`load_model`)
 
-**Units:** label (`power_tss`, `hr_load`, `hr_load_zonal`; `srpe_load` is added with the
-upcoming session-RPE release described at the end of this reference).
+**Units:** label (one of `power_tss`, `hr_load`, `hr_load_zonal`, `srpe_load`).
 
 The honest record of which load model produced a given load value.
 
@@ -2446,6 +2493,36 @@ itself a Performance Management Chart input.
 easy one.
 
 **Caveats.** Inherits TSS's dependence on a correct FTP.
+
+### Session-RPE load (`srpe_load`)
+
+**Units:** load points (commensurate with TSS).
+
+A load derived from your session RPE, so sensor-less sessions still register instead of
+reading as rest.
+
+**Formula.** `srpe_load = (RPE/10)^2 * hours * 100`, the intensity-squared,
+TSS-commensurate mapping, so a maximal (CR-10 of 10) hour equals 100 points. Foster's
+classical linear figure (`RPE * minutes`) is carried alongside as provenance only.
+(Computed by the analytics engine, after Foster's session-RPE method.)
+
+**Inputs & when unavailable.** Needs a valid session RPE (0 up to 10) and a positive
+duration. A reported `0` over a valid duration is an honest zero load — the athlete said
+"rest-easy", which is a real report, not an absence. Unavailable otherwise; a malformed or
+out-of-range RPE, or a non-positive duration, is a gap, never a guessed value.
+
+**Typical values.** A CR-10 of 7 for one hour is about 49 points; a maximal hour is 100
+(by the formula). Orientation only.
+
+**How it moves state.** It is the lowest-fidelity training-load member. It wins the load
+selection only when no power or heart-rate load can be computed, and it always carries a
+substituted, reduced-confidence flag.
+
+**Reading trends.** Lets strength and many swim sessions appear on the Performance
+Management Chart; read its contribution as approximate.
+
+**Caveats.** Subjective input, lowest precision. One activity contributes exactly one load
+member, so logging RPE alongside power never double-counts.
 
 ## Performance Management Chart
 
@@ -3014,89 +3091,3 @@ and lower decoupling. It moves monotonically in each component in the documented
 **Caveats.** Distinct from any source-reported endurance score. As a composite it inherits
 the caveats of its inputs; when computed on a partial component set, its confidence is
 reduced and reported.
-
----
-
-# Arriving in an upcoming release
-
-The entries below describe fields that are part of the canonical model and are documented
-here in full because the description is accurate for the incoming feature. **Current builds
-do not yet collect or compute them** — they land with an upcoming session-RPE release. They
-are kept out of the implemented index and sections above so that nothing here is mistaken
-for a value you can read today.
-
-### Session RPE (`perceived_exertion`)
-
-**Units:** CR-10 scale, 0-10 (fractional allowed).
-
-Your rating of how hard the whole session felt, on the Borg CR-10 scale.
-
-**Capture rule.** Captured at ingest from a device session self-evaluation, a connected
-platform's RPE field, or first-party entry. Malformed, out-of-range, or
-encoding-ambiguous values resolve to a typed gap — never clamped, never guessed.
-
-**Inputs & when unavailable.** Present only when you (or a source) recorded it; a gap
-otherwise.
-
-**Typical values.** 0 = rest, around 3-4 = easy, 5-6 = moderate, 7-8 = hard, 10 = maximal
-(Borg CR-10 convention, Foster's session-RPE literature).
-
-**How it moves state.** When present with a valid duration, it produces `srpe_load`, the
-lowest-fidelity training-load member, which lets sensor-less sessions (strength, many
-swims) register on the Performance Management Chart instead of reading as rest.
-
-**Reading trends.** Consistent RPE at a given workout type is normal; a creeping RPE at the
-same power or pace can signal accumulating fatigue.
-
-**Caveats.** Subjective and timing-sensitive (rate it shortly after the session). It is the
-least precise load input and always carries a substituted, reduced-confidence flag when it
-wins the load selection.
-
-### Session feel (`feel`)
-
-**Units:** ordinal 1-5.
-
-Your subjective sense of how good you felt, on a 1-5 scale.
-
-**Capture rule.** Captured as an ordinal where 1 = strong and 5 = weak (the common
-connected-platform convention). A self-report, advisory only.
-
-**Inputs & when unavailable.** Present only when recorded.
-
-**Typical values.** 1-5 on the stated convention.
-
-**How it moves state.** None directly — it is advisory context for the coach. It is never
-an input to a canonical derived metric.
-
-**Reading trends.** A run of "weak" ratings alongside flat or declining performance can
-prompt a closer look at recovery.
-
-**Caveats.** Note the scale direction (low is good). Purely subjective.
-
-### Session-RPE load (`srpe_load`)
-
-**Units:** load points (commensurate with TSS).
-
-A load derived from your session RPE, so sensor-less sessions still register instead of
-reading as rest.
-
-**Formula.** `srpe_load = (RPE/10)^2 * hours * 100`, the intensity-squared,
-TSS-commensurate mapping, so a maximal (CR-10 of 10) hour equals 100 points. Foster's
-classical linear figure (`RPE * minutes`) is carried alongside as provenance only.
-(Computed by the analytics engine, after Foster's session-RPE method.)
-
-**Inputs & when unavailable.** Needs a valid session RPE (greater than 0, up to 10) and a
-positive duration. Unavailable otherwise; a malformed RPE is a gap, never a guessed value.
-
-**Typical values.** A CR-10 of 7 for one hour is about 49 points; a maximal hour is 100
-(by the formula). Orientation only.
-
-**How it moves state.** It is the lowest-fidelity training-load member. It wins the load
-selection only when no power or heart-rate load can be computed, and it always carries a
-substituted, reduced-confidence flag.
-
-**Reading trends.** Lets strength and many swim sessions appear on the Performance
-Management Chart; read its contribution as approximate.
-
-**Caveats.** Subjective input, lowest precision. One activity contributes exactly one load
-member, so logging RPE alongside power never double-counts.

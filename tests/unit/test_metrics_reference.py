@@ -86,6 +86,7 @@ _DOCUMENTED_NON_INVENTORY: frozenset[str] = frozenset(
         "work_above_cp_j",  # computed cumulative intensity-weighted work above CP (power analytics)
         "durability_decrement",  # computed fresh-vs-fatigued power decrement (durability analytics)
         "trimp",  # computed heart-rate training impulse (HR analytics)
+        "srpe_load",  # computed session-RPE load (last-resort training-load member; load family)
     }
 )
 
@@ -262,23 +263,46 @@ def test_no_phantom_implemented_entry() -> None:
     )
 
 
-def test_upcoming_region_is_parsed_and_fenced() -> None:
-    """The upcoming region exists, is non-empty, and holds exactly the known incoming keys.
+def test_upcoming_region_parser_tolerates_absent_section() -> None:
+    """The parser must not REQUIRE a permanent upcoming region — an absent/empty one is fine.
 
-    This anchors the section-marker contract the reverse gate relies on: the parser actually
-    recognises the 'arriving in an upcoming release' region, and the three not-yet-live
-    self-report / RPE-load keys live there (NOT in the implemented index), so they are
-    exempt from the phantom check rather than failing it.
+    The 'arriving in an upcoming release' region is purely optional scaffolding: it exists
+    only while some field is documented ahead of shipping, and is removed once the last such
+    field lands on main (as the session-RPE fields have). This test anchors that contract —
+    the partition parser stays well-defined when no upcoming heading is present (the upcoming
+    set is simply empty) and never demands the section persist as dead, empty structure.
     """
     implemented, upcoming = _heading_keys_by_section()
-    assert {"perceived_exertion", "feel", "srpe_load"} <= upcoming, (
-        "expected the not-yet-live keys to be documented under the upcoming-release region; "
-        f"found upcoming keys: {sorted(upcoming)}"
+    # Whatever the doc currently holds, the partition must be coherent: an upcoming region is
+    # allowed but not mandatory, and the two sets never overlap (a key is implemented xor
+    # upcoming, never both).
+    assert not (implemented & upcoming), (
+        "a key must not be documented as both implemented and upcoming: "
+        f"{sorted(implemented & upcoming)}"
     )
-    leaked_into_implemented = {"perceived_exertion", "feel", "srpe_load"} & implemented
-    assert not leaked_into_implemented, (
-        "not-yet-live keys must NOT appear as implemented-section headings: "
-        f"{sorted(leaked_into_implemented)}"
+    # The parser must produce a usable (possibly empty) upcoming set without error — i.e. an
+    # absent upcoming section is a valid, supported state, not a parse failure.
+    assert isinstance(upcoming, set)
+
+
+def test_session_rpe_fields_are_documented_as_live() -> None:
+    """The promoted session-RPE fields are documented as IMPLEMENTED, not as upcoming.
+
+    ``perceived_exertion`` and ``feel`` are canonical ``activity`` columns and ``srpe_load``
+    is the last-resort training-load member — all live on main. They MUST now carry
+    implemented-section entries (so the forward completeness + reverse phantom gates cover
+    them as real values) and MUST NOT sit under an upcoming-release region.
+    """
+    implemented, upcoming = _heading_keys_by_section()
+    promoted = {"perceived_exertion", "feel", "srpe_load"}
+    missing = sorted(promoted - implemented)
+    assert not missing, (
+        f"promoted session-RPE fields must be documented as implemented entries: missing {missing}"
+    )
+    still_upcoming = sorted(promoted & upcoming)
+    assert not still_upcoming, (
+        "promoted session-RPE fields must NOT remain under the upcoming-release region: "
+        f"{still_upcoming}"
     )
 
 
