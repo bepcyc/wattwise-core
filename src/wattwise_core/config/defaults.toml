@@ -557,6 +557,10 @@ prompt_fragments = ["shared_preamble", "readiness_system", "claim_system"]
 median_cost_usd = 0.05
 p95_latency_ms = 30000.0
 cost_per_1k_tokens_usd = 0.0002
+# QA-EVAL-R12(b): the max fraction of LIVE-mode cases allowed to land INFRA_ERROR
+# (provider unavailability / timeout / rate-limit) before the live run alerts and
+# blocks promotion until a clean run is obtained. Never counted as a quality FAIL.
+max_infra_error_rate = 0.1
 
 [agent.metric_aliases]
 # Metric-equivalence classes (§16 / SKILL-R1): natural athlete/coach phrasings a real model

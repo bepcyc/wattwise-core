@@ -48,11 +48,21 @@ SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
 boot_env() { env WATTWISE_ENCRYPTION_ROOT_KEY="$ROOT_KEY" WATTWISE_TOKEN_SIGNING_KEY="$SIGNING_KEY" "$@"; }
 
 # ----------------------------------------------------------------- FAST STAGE
-log "Lint (just lint + fmt-check)";            just lint && just fmt-check
+# NOTE: legs are SEPARATE statements, never `a && b` chains — under `set -e` a failure
+# in any non-final segment of an AND-list does NOT abort the script (bash exempts && / ||
+# list members), which once let a red lint leg fall through to a green banner.
+log "Lint (just lint + fmt-check)";            just lint
+just fmt-check
 log "Type check (just type)";                  just type
 log "Conventional commits (just lint-commits)"; just lint-commits || fail "lint-commits"
 log "Pre-commit config validity";              uv run pre-commit validate-config
-log "Fast tiers";                              just test-unit && just test-property && just test-golden && just test-contract && just test-fuzz && just test-logging
+log "Fast tiers"
+just test-unit
+just test-property
+just test-golden
+just test-contract
+just test-fuzz
+just test-logging
 log "Coverage gate (just cov)";                just cov
 log "Agent eval gate (just eval)";             just eval
 log "Injection gate (just test-inject)";       just test-inject

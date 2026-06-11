@@ -83,10 +83,22 @@ _NO_SIGNAL = {5: "no tests", 33: "no tests", 34: "skipped", 2: "interrupted"}
 _MUTANTS_DIR = Path("mutants")
 _REPORT_DIR = Path("reports")
 
-# The enforced-floor scope of the full leg: the same two correctness-critical
-# packages that carry the 95% coverage floor (DOD-R1). Keep in sync with
-# `just cov-critical`.
-_CRITICAL_GLOBS = ("src/wattwise_core/analytics/*", "src/wattwise_core/ingestion/adapters/*")
+# Committed ratchet baseline (TIER-R6): per-package mutation-score FLOORS live in DATA
+# (mutation-floors.toml at the repo root), never hardcoded here (CFG-R1a). Keys are dotted
+# package prefixes (e.g. "wattwise_core.analytics"); values are fractions in [0, 1]. The
+# floors are the enforced scope of the full leg — the same correctness-critical packages
+# that carry the coverage floor (DOD-R1). They only ever RATCHET UP; the nightly enforcing
+# leg fails if any package drops below its committed floor (tests/unit/test_mutation_floors.py
+# guards the ratchet-up-only invariant).
+_FLOORS_PATH = _REPO_ROOT / "mutation-floors.toml"
+
+
+def load_floors(path: Path = _FLOORS_PATH) -> dict[str, float]:
+    """Read the committed per-package ratchet floors (fractions in [0, 1]) from data."""
+    with path.open("rb") as f:
+        floors = tomllib.load(f).get("floors", {})
+    return {pkg: float(score) for pkg, score in floors.items()}
+
 
 # "nothing matches" marker mutmut prints when patterns select zero mutants
 # (e.g. the PR only touched constants — files with no mutatable functions).
@@ -465,23 +477,77 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.leg == "full":
-        floor = float(os.environ.get("WW_MUT_FLOOR", "0"))
-        critical = [p for p in scope_paths if any(fnmatch.fnmatch(p, g) for g in _CRITICAL_GLOBS)]
-        crit_counts, _, crit_total = _collect_verdicts(critical)
-        crit_score = _score(crit_counts)
-        print(
-            f"mutation-gate: critical-package score "
-            f"{'n/a' if crit_score is None else f'{crit_score:.1f}%'} "
-            f"over {crit_total} mutants (floor {floor:.1f}%)."
-        )
-        if floor > 0 and crit_score is not None and crit_score < floor:
-            print(
-                f"mutation-gate: FAIL — critical-package mutation score {crit_score:.1f}% "
-                f"is below the {floor:.1f}% floor (the ratchet only goes up).",
-                file=sys.stderr,
-            )
-            return 1
+        return _enforce_floors(scope_paths)
 
+    return 0
+
+
+def _floor_package(path: str, packages: list[str]) -> str | None:
+    """Map a scope file path (src/wattwise_core/analytics/forms.py) to its floor package
+    (wattwise_core.analytics), choosing the LONGEST matching prefix so a nested floored
+    package (…ingestion.adapters) wins over a broader one if both were ever declared."""
+    dotted = path.removesuffix(".py").replace(os.sep, ".").removeprefix("src.")
+    dotted = dotted.removesuffix(".__init__")
+    matches = [pkg for pkg in packages if dotted == pkg or dotted.startswith(pkg + ".")]
+    return max(matches, key=len) if matches else None
+
+
+def _enforce_floors(scope_paths: list[str]) -> int:
+    """Nightly enforcing leg: gate each floored package's measured mutation score against
+    its committed ratchet floor (mutation-floors.toml). The ratchet only goes up; a drop
+    below floor fails the build. Floors are DATA (CFG-R1a), fractions in [0, 1]; the gate
+    reports in percent. A package absent from the floors file is reported, never enforced.
+
+    WW_MUT_FLOOR (percent), if set > 0, is an extra GLOBAL minimum applied to the union of
+    all floored packages — a coarse ratchet kept for backward compatibility with the
+    pre-per-package contract; the per-package floors are the primary gate.
+    """
+    floors = load_floors()
+    packages = list(floors)
+    by_package: dict[str, list[str]] = {pkg: [] for pkg in packages}
+    for path in scope_paths:
+        pkg = _floor_package(path, packages)
+        if pkg is not None:
+            by_package[pkg].append(path)
+
+    below_floor = False
+    union_paths: list[str] = []
+    for pkg in packages:
+        floor = floors[pkg]
+        union_paths.extend(by_package[pkg])
+        counts, _, total = _collect_verdicts(by_package[pkg])
+        pct = _score(counts)  # detected/(detected+undetected) in percent, or None
+        score_frac = None if pct is None else pct / 100.0
+        shown = "n/a" if score_frac is None else f"{score_frac:.3f}"
+        verdict = "PASS"
+        if score_frac is not None and score_frac < floor:
+            verdict = "FAIL"
+            below_floor = True
+        print(
+            f"mutation-gate: [{verdict}] {pkg}: score {shown} "
+            f"(floor {floor:.2f}) over {total} mutants."
+        )
+
+    # Backward-compatible coarse global floor (percent) over the union of floored packages.
+    global_floor = float(os.environ.get("WW_MUT_FLOOR", "0"))
+    if global_floor > 0:
+        union_counts, _, union_total = _collect_verdicts(union_paths)
+        union_score = _score(union_counts)
+        print(
+            f"mutation-gate: global floored-union score "
+            f"{'n/a' if union_score is None else f'{union_score:.1f}%'} "
+            f"over {union_total} mutants (WW_MUT_FLOOR {global_floor:.1f}%)."
+        )
+        if union_score is not None and union_score < global_floor:
+            below_floor = True
+
+    if below_floor:
+        print(
+            "mutation-gate: FAIL — a package dropped below its committed ratchet floor "
+            "(mutation-floors.toml); the ratchet only goes up.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

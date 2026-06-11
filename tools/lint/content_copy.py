@@ -191,7 +191,10 @@ def _scan_registry(path: Path, catalog: dict[str, Any]) -> list[Violation]:
 # field (QUAL-R13(a): the standard "does NOT govern internal logs, machine codes,
 # or developer-facing strings"), so the scan is restricted to the API layer below
 # to avoid flagging internal reason text — a false positive we explicitly reject.
-_USERFACING_KWARGS = frozenset({"detail", "title", "user_message", "athlete_message"})
+# ``message`` covers the RFC-9457 ``errors[].message`` field (the per-field
+# validation copy a human reads) — previously excluded, which let the real
+# problem-builder copy bypass the catalog scan (QUAL-R13(c) gap).
+_USERFACING_KWARGS = frozenset({"detail", "title", "message", "user_message", "athlete_message"})
 _APP_SEGMENT = "wattwise_core"
 # Only these engine subpackages emit athlete-facing API copy through these kwargs.
 _USERFACING_LAYERS = frozenset({"api"})

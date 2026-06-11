@@ -193,7 +193,7 @@ def _time_domain_from_series(
 
 def _time_domain_from_summary(
     *,
-    summary_rmssd_ms: float,
+    summary_rmssd_ms: float | None,
     summary_sdnn_ms: float | None,
     summary_pnn50_pct: float | None,
     summary_mean_nn_ms: float | None,
@@ -201,17 +201,32 @@ def _time_domain_from_summary(
 ) -> MetricResult[TimeDomainHrv]:
     """Path 2: device-computed summary scalars -> surface at ``summary_only`` fidelity.
 
-    NO artifact correction and NO fabricated intervals (HRV-R0). RMSSD is the
-    canonical summary scalar and must be finite & non-negative, else ``OUT_OF_DOMAIN``;
-    absent secondary scalars are surfaced as NaN (not zero / placeholder).
+    NO artifact correction and NO fabricated intervals (HRV-R0). WHICHEVER summary variant
+    the source supplied per ``hrv_method`` (``hrv_rmssd_ms``, ``hrv_sdnn_ms``, or
+    ``hrv_pnn50_pct``) is surfaced in its OWN statistic/unit — an SDNN-only or pNN50-only
+    summary is a valid ``summary_only`` tier, never forced unavailable (ANL-T-R1.8).
+    Every SUPPLIED scalar must be finite & non-negative, else ``OUT_OF_DOMAIN``; absent
+    scalars are surfaced as NaN (not zero / placeholder).
     """
-    rmssd = float(summary_rmssd_ms)
+    supplied = {
+        "hrv_rmssd_ms": summary_rmssd_ms,
+        "hrv_sdnn_ms": summary_sdnn_ms,
+        "hrv_pnn50_pct": summary_pnn50_pct,
+    }
+    channels = tuple(name for name, value in supplied.items() if value is not None)
+    if not channels:  # defensive: time_domain_hrv only enters Path 2 with >=1 scalar
+        return Unavailable(
+            UnavailableReason.MISSING_REQUIRED_INPUT, "no hrv summary scalar supplied"
+        )
+    for name, value in supplied.items():
+        if value is not None and (not math.isfinite(float(value)) or float(value) < 0.0):
+            return Unavailable(
+                UnavailableReason.OUT_OF_DOMAIN, f"summary {name} must be finite and >= 0"
+            )
+    rmssd = float(summary_rmssd_ms) if summary_rmssd_ms is not None else math.nan
     sdnn = float(summary_sdnn_ms) if summary_sdnn_ms is not None else math.nan
     pnn50 = float(summary_pnn50_pct) if summary_pnn50_pct is not None else math.nan
     mean_nn = float(summary_mean_nn_ms) if summary_mean_nn_ms is not None else math.nan
-    # RMSSD is the canonical summary scalar; it must be finite & non-negative.
-    if not math.isfinite(rmssd) or rmssd < 0.0:
-        return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "summary rmssd must be finite and >= 0")
     td = TimeDomainHrv(rmssd_ms=rmssd, sdnn_ms=sdnn, pnn50_pct=pnn50, mean_nn_ms=mean_nn)
     quality = QualityReport(
         coverage_fraction=1.0,
@@ -223,7 +238,7 @@ def _time_domain_from_summary(
     )
     lineage = InputLineage(
         sport=sport,
-        channels=("hrv_rmssd_ms",),
+        channels=channels,
         reference_params={"fidelity": HrvFidelity.SUMMARY_ONLY.value},
     )
     return Computed(value=td, quality=quality, provenance=lineage)
@@ -261,7 +276,10 @@ def time_domain_hrv(
         )
 
     # --- Path 2: summary-only scalars -> surface, NO correction/freq-domain ---
-    if summary_rmssd_ms is not None:
+    # ANY supplied variant (RMSSD, SDNN, or pNN50) enters the summary tier (ANL-T-R1.8):
+    # an SDNN-only or pNN50-only summary is surfaced in its own statistic, never forced
+    # to MISSING_REQUIRED_INPUT just because RMSSD is absent.
+    if any(s is not None for s in (summary_rmssd_ms, summary_sdnn_ms, summary_pnn50_pct)):
         return _time_domain_from_summary(
             summary_rmssd_ms=summary_rmssd_ms,
             summary_sdnn_ms=summary_sdnn_ms,

@@ -55,6 +55,7 @@ from wattwise_core.api.connection_catalog import (
     OSS_CATALOG,
     CatalogEntry,
 )
+from wattwise_core.api.copy import message as _copy
 from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus
@@ -348,7 +349,7 @@ async def _run_probe(probe: CredentialProbe, source: str, secret: str) -> None:
             errors=[
                 FieldError(
                     code="invalid_credential",
-                    message="That key didn't work — double-check it and try again.",
+                    message=_copy("connection.credential_rejected"),
                     pointer="/api_key",
                 )
             ],
@@ -462,7 +463,7 @@ def _wrong_archetype(archetype: AuthArchetype) -> ProblemError:
         errors=[
             FieldError(
                 code="unsupported_archetype",
-                message="This source isn't connected with a key.",
+                message=_copy("connection.key_archetype_only"),
                 parameter="source",
             )
         ],

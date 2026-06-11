@@ -15,21 +15,21 @@ Requirement IDs: ERR-R1 (uniform problem document), ERR-R3 (closed ``type``), ER
 
 from __future__ import annotations
 
+from wattwise_core.api.copy import message as _copy
 from wattwise_core.api.errors import FieldError, ProblemError
 
 
-def parameter_invalid(
-    parameter: str, message: str = "Check that value and try again."
-) -> ProblemError:
+def parameter_invalid(parameter: str, message: str | None = None) -> ProblemError:
     """A ``422 validation-error`` for a bad query/path ``parameter`` (ERR-R6).
 
     The offending ``parameter`` locator survives into the rendered ``errors[]`` so a
     client can point at the field, unlike a framework ``HTTPException`` whose detail
     the status-only handler drops.
     """
+    text = message if message is not None else _copy("validation.check_value")
     return ProblemError(
         "validation-error",
-        errors=[FieldError(code="invalid", message=message, parameter=parameter)],
+        errors=[FieldError(code="invalid", message=text, parameter=parameter)],
     )
 
 
@@ -40,7 +40,7 @@ def range_reversed(parameter: str = "from") -> ProblemError:
         errors=[
             FieldError(
                 code="out_of_range",
-                message="The start date needs to be on or before the end date.",
+                message=_copy("validation.range_reversed"),
                 parameter=parameter,
             )
         ],

@@ -22,6 +22,8 @@ on:
     tags: ["v*"]   # the v*-tag push triggers the release job (CI-R10/CI-R12)
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "30 2 * * *"   # nightly leg (CI-R4): live eval+smoke, deep fuzz (mutation nightly: nightly.yml)
 
 env:
   UV_FROZEN: "1"
@@ -336,6 +338,32 @@ jobs:
       - run: just install-boot-check    # CI-R1 item 20
       - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         with: { name: dist, path: dist/ }
+
+  # ----------------------------------------------------------------- NIGHTLY (non-mutation)
+  nightly:
+    name: Nightly live eval + live smoke + deep fuzz (CI-R4)
+    # CI-R4: live-mode T-EVAL + live-provider smoke + deep fuzz nightly, alerting on
+    # regression (a red scheduled run is the forge's failure notification), without
+    # blocking PRs. The nightly MUTATION campaign (T-MUT enforcing leg) is owned by the
+    # dedicated nightly.yml scheduler (`just test-mut`) — kept out of here so there is
+    # exactly ONE mutation gate across the workflows (issue #35 / ADR 0006 / TIER-R6).
+    if: github.event_name == 'schedule'
+    runs-on: docker
+    env:
+      WATTWISE_LLM_API_KEY: ${{ secrets.WATTWISE_LLM_API_KEY }}
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
+        with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
+      - run: just install
+      - run: just eval-live          # QA-EVAL-R9 live mode + INFRA_ERROR gate (QA-EVAL-R12(b))
+      - run: just test-llm           # live-provider smoke (CI-R4)
+      - run: just test-fuzz-nightly  # TIER-R5 mode (b) extended campaign
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4   # CI-R6
+        if: always()
+        with: { name: nightly-reports, path: reports/ }
 
   # ----------------------------------------------------------------- RELEASE
   # FORGE_PROVIDER=forgejo selects the Forgejo release + its built-in OCI

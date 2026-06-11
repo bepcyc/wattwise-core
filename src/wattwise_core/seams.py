@@ -35,7 +35,11 @@ from typing import Protocol, runtime_checkable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from wattwise_core.agent.memory import MemoryStore
+from wattwise_core.agent.tiering import ModelRoutingPolicy
 from wattwise_core.domain.candidate import FieldCandidate
+from wattwise_core.entitlement import EntitlementResolver
+from wattwise_core.ingestion.base import FileImportAdapter, SourceAdapter
 from wattwise_core.ingestion.dedup import (
     DEFAULT_DURATION_TOL_FRAC,
     DEFAULT_DURATION_TOL_S,
@@ -183,10 +187,20 @@ class DefaultConflictResolver:
         )
 
 
+# Re-exported integration seams (doc 90 §5.1: every stable extension seam is importable
+# from `wattwise_core.seams`, so a consumer never reaches into private modules). The
+# Protocols stay DEFINED beside their implementations; this module is the one public
+# import surface. (The coach-config selector and HITL resume handler are config/
+# checkpoint surfaces without a standalone Protocol yet; they join here when typed.)
 __all__ = [
     "SYSTEM_SUBJECT",
     "ConflictResolver",
     "DefaultConflictResolver",
     "EngineSessionProvider",
+    "EntitlementResolver",
+    "FileImportAdapter",
+    "MemoryStore",
+    "ModelRoutingPolicy",
     "SessionProvider",
+    "SourceAdapter",
 ]

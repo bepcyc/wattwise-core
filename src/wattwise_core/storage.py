@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from wattwise_core.config import Settings, get_settings
+from wattwise_core.security.crypto import EnvelopeCipher, EnvelopeToken
 
 
 def content_hash(data: bytes) -> str:
@@ -74,14 +75,57 @@ class LocalObjectStore:
         self._path(object_ref).unlink(missing_ok=True)
 
 
+class EncryptedLocalObjectStore(LocalObjectStore):
+    """Local object store with envelope encryption at rest (RAW-T-R2(d) / RAW-R4).
+
+    Original recording files are special-category data: the bytes on disk are an
+    :class:`~wattwise_core.security.crypto.EnvelopeToken` wire form, never the plaintext.
+    The ``object_ref`` stays the sha256 of the PLAINTEXT (the recorded ``content_hash``
+    round-trips: ``content_hash(get(ref)) == ref`` minus suffix), so content-addressing,
+    dedup, and the erasure path are byte-for-byte identical to the plaintext store.
+    """
+
+    def __init__(self, root: Path, cipher: EnvelopeCipher) -> None:
+        super().__init__(root)
+        self._cipher = cipher
+
+    def put(self, data: bytes, *, suffix: str = "") -> str:
+        ref = content_hash(data) + suffix
+        path = self._path(ref)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(self._cipher.encrypt(data).to_wire().encode("ascii"))
+        return ref
+
+    def get(self, object_ref: str) -> bytes:
+        wire = super().get(object_ref)
+        return self._cipher.decrypt(EnvelopeToken.from_wire(wire.decode("ascii")))
+
+
 def create_object_store(settings: Settings | None = None) -> ObjectStore:
-    """Construct the configured object store (local in OSS; S3 is a commercial seam)."""
+    """Construct the configured object store (local in OSS; S3 is a commercial seam).
+
+    When the deployment carries an encryption root key (mandatory outside development),
+    originals are envelope-encrypted at rest (RAW-T-R2(d)); a keyless development run
+    falls back to the plaintext local store.
+    """
     settings = settings or get_settings()
     if settings.object_store__kind == "local":
+        root_key = settings.encryption_root_key
+        if root_key is not None:
+            return EncryptedLocalObjectStore(
+                settings.object_store__local_root, EnvelopeCipher(root_key.get_secret_value())
+            )
         return LocalObjectStore(settings.object_store__local_root)
     raise NotImplementedError(
         "the S3 object-store backend is a commercial seam; OSS ships the local store"
     )
 
 
-__all__ = ["LocalObjectStore", "ObjectStore", "content_hash", "create_object_store"]
+__all__ = [
+    "EncryptedLocalObjectStore",
+    "LocalObjectStore",
+    "ObjectStore",
+    "content_hash",
+    "create_object_store",
+]

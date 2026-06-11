@@ -185,13 +185,21 @@ async def _load_wellness_rr(
 
 async def _load_wellness_hrv_summary(
     session: AsyncSession, athlete_id: str, local_date: _dt.date
-) -> float | None:
+) -> tuple[float | None, float | None, float | None]:
+    """Load the day's typed HRV summary scalars ``(rmssd_ms, sdnn_ms, pnn50_pct)``.
+
+    Each variant is surfaced independently so an SDNN-only or pNN50-only summary still
+    reaches the ``summary_only`` HRV tier in its own statistic/unit (ANL-T-R1.8) — the
+    summary path is never gated on RMSSD presence.
+    """
     stmt = select(DailyWellness).where(
         DailyWellness.athlete_id == _uid(athlete_id),
         DailyWellness.local_date == local_date,
     )
     dw = (await session.execute(stmt)).scalar_one_or_none()
-    return None if dw is None else _f(dw.hrv_rmssd_ms)
+    if dw is None:
+        return (None, None, None)
+    return (_f(dw.hrv_rmssd_ms), _f(dw.hrv_sdnn_ms), _f(dw.hrv_pnn50_pct))
 
 
 async def _load_wellness_hrv_baseline(

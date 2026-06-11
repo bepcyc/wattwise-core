@@ -1,0 +1,37 @@
+{
+  "validation.check_value": {
+    "kind": "validation",
+    "code": "invalid",
+    "text": "Check that value and try again."
+  },
+  "validation.range_reversed": {
+    "kind": "validation",
+    "code": "out_of_range",
+    "text": "The start date needs to be on or before the end date."
+  },
+  "validation.signature_type_required": {
+    "kind": "validation",
+    "code": "signature_type_required",
+    "text": "Tell us which kind of signature this is and try again."
+  },
+  "connection.credential_rejected": {
+    "kind": "error",
+    "code": "invalid_credential",
+    "text": "That key didn't work — double-check it and try again."
+  },
+  "connection.key_archetype_only": {
+    "kind": "validation",
+    "code": "unsupported_archetype",
+    "text": "This source isn't connected with a key."
+  },
+  "sync.unknown_source": {
+    "kind": "error",
+    "code": "unknown_source",
+    "text": "You haven't connected that yet."
+  },
+  "validation.default_tier_not_allowed": {
+    "kind": "validation",
+    "code": "default_tier_not_allowed",
+    "text": "Pick a default tier that is also one of the allowed tiers."
+  }
+}

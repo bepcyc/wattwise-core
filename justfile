@@ -150,6 +150,21 @@ test-e2e:
 test-llm:
     {{uv}} pytest -m llm
 
+# Nightly fuzz campaign (TIER-R5 (b), CI-R4): the SAME fuzz corpus under the extended
+# `fuzz-nightly` hypothesis profile (orders of magnitude more examples, no deadline).
+# A coverage-guided Atheris/libFuzzer engine is not available on CPython 3.13, so the
+# nightly depth comes from the extended generative budget (accepted deviation,
+# documented); any crash found MUST be distilled into a pinned @example regression
+# before the fix merges (TIER-R5/TIER-R1).
+test-fuzz-nightly:
+    {{uv}} pytest -m fuzz --hypothesis-profile=fuzz-nightly
+
+# Nightly LIVE eval leg (QA-EVAL-R9/CI-R4): real-provider smoke + INFRA_ERROR
+# classification + the max-infra-rate promotion gate (QA-EVAL-R12(b)). Env-gated on
+# WATTWISE_LLM_API_KEY; never part of the offline gate (TIER-R1).
+eval-live:
+    {{uv}} python -m {{package}}.eval run --mode=live --scorecard=reports/eval-live-scorecard.json
+
 # =====================================================================
 # 3. Coverage gate (CI-R1 item 5)
 # =====================================================================
@@ -192,10 +207,11 @@ test-mut-pr:
     {{uv}} python scripts/mutation_gate.py --leg pr
 
 # ENFORCING nightly leg: the full campaign (incremental on the nightly cache),
-# enforcing the WW_MUT_FLOOR mutation-score floor (percent) over the
-# correctness-critical packages (analytics + ingestion adapters — the same
-# scope as the 95% coverage floor). The floor is a RATCHET: starts at 0
-# (report-only) until the first nightly baseline, then only goes up.
+# enforcing the COMMITTED per-package ratchet floors in mutation-floors.toml over the
+# correctness-critical packages (analytics + ingestion adapters — the same scope as
+# the coverage floor). Floors are DATA (CFG-R1a), only ever ratcheted up; a package
+# below its floor fails the build. WW_MUT_FLOOR (percent), if set, adds a coarse global
+# minimum over the floored union (backward-compatible with the pre-per-package contract).
 test-mut:
     {{uv}} python scripts/mutation_gate.py --leg full
 

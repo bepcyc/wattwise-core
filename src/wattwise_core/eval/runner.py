@@ -403,6 +403,7 @@ def list_suites() -> tuple[str, ...]:
         "multilingual",
         "judge",
         "readiness",
+        "load_review",
         "plan",
         "voice",
         "self_certification",

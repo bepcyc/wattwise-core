@@ -1,0 +1,35 @@
+# T-MUT mutation-score ratchet baseline (TIER-R6, CI-R4).
+#
+# Each value is a per-package mutation-score FLOOR (mutants caught / generated, where
+# "caught" = killed or timed-out). Floors are a COMMITTED RATCHET BASELINE: they record
+# the package's measured mutation score and may ONLY EVER BE RAISED, never lowered.
+#   * The NIGHTLY T-MUT leg ENFORCES these floors — a drop below floor fails the build
+#     (`just test-mut` -> scripts/mutation_gate.py --leg full).
+#   * The PR-stage T-MUT leg is ADVISORY — it reports the score + delta vs floor but
+#     never blocks (`just test-mut-pr` -> scripts/mutation_gate.py --leg pr).
+# Floors are read as data by scripts/mutation_gate.py (CFG-R1a: no hardcoded 90/85).
+#
+# RATCHET-UP-ONLY RULE: a PR may only RAISE a floor here, never lower it. The only edits
+# are upward ratchets. tests/unit/test_mutation_floors.py guards this: floors stay in
+# [0, 1], cover exactly the mutated packages, and never regress below the file's previous
+# committed git revision.
+#
+# HOW THESE VALUES WERE MEASURED (2026-06-11, mutmut over [tool.mutmut]):
+#   * adapters (wattwise_core.ingestion.adapters): full campaign, 2338/2338 mutants
+#     checked -> measured 0.7601 -> floor floor(0.7601*100)/100 = 0.76.
+#   * analytics (wattwise_core.analytics): the full campaign is expensive (numeric mutants
+#     are slow / timeout-prone); the partial campaign measured ~0.61 over 63% of mutants
+#     (2843/4498, stable across the run). The floor is set DOWN to 0.40 so the committed
+#     baseline is never above the true (full-campaign) score — the enforcing nightly leg
+#     must not false-fail on a value the partial run could not yet confirm. This matches
+#     the historically documented ~0.41 analytics baseline.
+#
+# TODO(climb): raise these floors toward the aspirational targets — analytics >= 0.90,
+# adapters >= 0.85 — by improving test coverage of the surviving mutants, then ratcheting
+# the floor up here. ANALYTICS IS FIRST (lowest floor, biggest gap). Per-package "raise
+# the floor" follow-up issues are filed by the orchestrator; each closes by editing the
+# value below upward (only ever up).
+
+[floors]
+"wattwise_core.analytics" = 0.40
+"wattwise_core.ingestion.adapters" = 0.76

@@ -91,7 +91,7 @@ dev = [
   "asyncpg>=0.30",
   "aiomysql>=0.2",
   "pytest-xdist>=3.8.0",
-  "mutmut>=3.6",
+  "mutmut>=3.6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -133,6 +133,51 @@ markers = [
   "llm: live-LLM tier (real model; skipped unless WATTWISE_LLM_API_KEY is set; never in the offline gate)",
 ]
 
+# T-MUT mutation tier (TIER-R6 / issue #35 / ADR 0006): mutmut over the correctness core —
+# the analytics package and the ASBO->GBO adapter layer. mutmut 3 mutates the src tree into
+# mutants/ and, per mutant, runs ONLY the tests its stats collection mapped to the mutated
+# function (fastest-first, -x fail-fast) — no whole-suite-per-mutant. `just test-mut-pr`
+# (advisory, diff-scoped, time-boxed) and `just test-mut` (nightly enforcing leg) both drive
+# scripts/mutation_gate.py; the per-package score floors live in mutation-floors.toml (the
+# committed ratchet baseline, read as data by the gate — CFG-R1a) and are ENFORCED nightly.
+[tool.mutmut]
+source_paths = ["src"]
+# Mutate ONLY the two correctness-critical packages — the same scope the committed
+# ratchet floors (mutation-floors.toml) are measured over and that scripts/mutation_gate.py
+# enforces on the nightly leg. Keeps the (expensive) campaign aligned with the floored set.
+only_mutate = [
+  "src/wattwise_core/analytics/*",
+  "src/wattwise_core/ingestion/adapters/*",
+]
+# The mutant-killing tiers are the offline correctness tiers (ANL-T/GOLD/CON property,
+# golden, contract, unit, fuzz) — the repo-introspection/integration legs are excluded
+# (they assert repo layout, not analytics/adapter behaviour, and cannot kill mutants).
+# No coverage instrumentation and no pytest cache writes inside the mutant loop; mutmut
+# forks its own workers, so xdist stays disabled.
+pytest_add_cli_args = [
+  "-m", "unit or property or golden or contract or fuzz",
+  "-q",
+  "--no-cov",
+  "-p", "no:cacheprovider",
+  "-p", "no:xdist",
+  # mutmut's in-process runner rebinds stdout, breaking this one stream-capture
+  # assertion (an observability-plumbing test that cannot kill an analytics/adapter
+  # mutant anyway) - deselected ONLY inside the mutation runner.
+  "--deselect", "tests/unit/test_observability_runtrace.py::test_log_line_in_run_is_reconstructable_from_the_stream",
+]
+pytest_add_cli_args_test_selection = ["tests/"]
+# mutmut runs the suite from a copy of the tree (mutants/); everything the fast tiers
+# import or read besides src+tests must be copied along (tools/ via test_lints, scripts/
+# via test_traceability+test_planted_secret, docker/ via test_container_entrypoint, alembic
+# bits via migration-shape tests). mutation-floors.toml is copied so the gate can read the
+# ratchet floors from inside the sandbox; justfile so recipe-introspection tests resolve.
+also_copy = ["tools", "scripts", "migrations", "docker", "alembic.ini", "mutation-floors.toml", "justfile"]
+do_not_mutate = [
+  # Shipped seam-contract TEST base classes (GOLD-R5 §6.3a) — assertion helpers,
+  # not product logic; mutating them only measures the helpers, not the suite.
+  "src/wattwise_core/testing/*",
+]
+
 [tool.coverage.run]
 branch = true
 source = ["wattwise_core"]
@@ -159,29 +204,6 @@ exclude_also = [
 analytics = ["src/wattwise_core/analytics"]
 ingestion_adapters = ["src/wattwise_core/ingestion/adapters"]
 
-# Mutation testing — T-MUT (issue #35, ADR 0006). mutmut 3 mutates the src tree
-# into mutants/ and, per mutant, runs ONLY the tests its stats collection mapped
-# to the mutated function (fastest-first, -x fail-fast, per-mutant CPU+wall
-# timeouts) — no whole-suite-per-mutant. The kill signal is the fast offline
-# tiers ONLY (TIER-R1): service-backed tiers never run inside the mutant loop.
-# `just test-mut-pr` (advisory, diff-scoped, time-boxed) / `just test-mut`
-# (nightly enforcing leg) drive it via scripts/mutation_gate.py.
-[tool.mutmut]
-source_paths = ["src"]
-pytest_add_cli_args_test_selection = ["tests/unit", "tests/property", "tests/golden", "tests/contract"]
-# No coverage instrumentation and no pytest cache writes inside the mutant loop;
-# mutmut forks its own workers, so xdist stays disabled.
-pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider", "-p", "no:xdist"]
-# mutmut runs the suite from a copy of the tree (mutants/); everything the fast
-# tiers import or read besides src+tests must be copied along (tools/ via
-# test_lints, scripts/ via test_traceability+test_planted_secret, docker/ via
-# test_container_entrypoint, alembic bits via migration-shape tests).
-also_copy = ["tools", "scripts", "docker", "alembic.ini", "migrations"]
-do_not_mutate = [
-  # Shipped seam-contract TEST base classes (GOLD-R5 §6.3a) — assertion helpers,
-  # not product logic; mutating them only measures the helpers, not the suite.
-  "src/wattwise_core/testing/*",
-]
 
 [tool.ruff]
 line-length = 100

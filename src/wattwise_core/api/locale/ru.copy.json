@@ -1,0 +1,37 @@
+{
+  "validation.check_value": {
+    "kind": "validation",
+    "code": "invalid",
+    "text": "Проверь значение и попробуй ещё раз."
+  },
+  "validation.range_reversed": {
+    "kind": "validation",
+    "code": "out_of_range",
+    "text": "Дата начала должна быть не позже даты окончания."
+  },
+  "validation.signature_type_required": {
+    "kind": "validation",
+    "code": "signature_type_required",
+    "text": "Укажи, какой это тип сигнатуры, и попробуй ещё раз."
+  },
+  "connection.credential_rejected": {
+    "kind": "error",
+    "code": "invalid_credential",
+    "text": "Этот ключ не подошёл — проверь его и попробуй ещё раз."
+  },
+  "connection.key_archetype_only": {
+    "kind": "validation",
+    "code": "unsupported_archetype",
+    "text": "Этот источник подключается не по ключу."
+  },
+  "sync.unknown_source": {
+    "kind": "error",
+    "code": "unknown_source",
+    "text": "Это ещё не подключено."
+  },
+  "validation.default_tier_not_allowed": {
+    "kind": "validation",
+    "code": "default_tier_not_allowed",
+    "text": "Выбери стандартный уровень из списка разрешённых уровней."
+  }
+}

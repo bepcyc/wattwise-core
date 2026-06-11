@@ -393,8 +393,13 @@ class AnalyticsService:  # noqa: size-limits
     async def hrv(self, athlete_id: str, local_date: _dt.date) -> MetricResult[_hrv.TimeDomainHrv]:
         """Compute time-domain HRV for a wellness day (HRV-R0/R3, fail-closed)."""
         rr = await _load_wellness_rr(self._session, athlete_id, local_date)
-        summary = await _load_wellness_hrv_summary(self._session, athlete_id, local_date)
-        return _hrv.time_domain_hrv(rr_intervals_ms=rr, summary_rmssd_ms=summary)
+        rmssd, sdnn, pnn50 = await _load_wellness_hrv_summary(self._session, athlete_id, local_date)
+        return _hrv.time_domain_hrv(
+            rr_intervals_ms=rr,
+            summary_rmssd_ms=rmssd,
+            summary_sdnn_ms=sdnn,
+            summary_pnn50_pct=pnn50,
+        )
 
     async def hrv_baseline(self, athlete_id: str, local_date: _dt.date) -> float | None:
         """The athlete's source-reported HRV baseline (RMSSD ms) for a day, or ``None``.

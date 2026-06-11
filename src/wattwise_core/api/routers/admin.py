@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 
 from wattwise_core.api.auth import Scope, require_scopes
+from wattwise_core.api.copy import message as _copy
 from wattwise_core.api.deps import AppSettings, DbSession, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
 from wattwise_core.api.problems import not_found
@@ -221,7 +222,7 @@ async def put_model_policy(body: ModelPolicy, request: Request) -> ModelPolicy:
             errors=[
                 FieldError(
                     code="default_tier_not_allowed",
-                    message="default_tier must be one of allowed_tiers",
+                    message=_copy("validation.default_tier_not_allowed"),
                     pointer="/default_tier",
                 )
             ],

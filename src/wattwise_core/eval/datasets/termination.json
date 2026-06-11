@@ -1,4 +1,4 @@
-{
+{"recorded_with": {"model": "deepseek/deepseek-v4-flash", "prompt_sha256": "ed02ea23a3b8bb7577dc6abaedceb6f4bd032d87163cfb2698858d017d92d592"}, 
   "dataset_version": "1.0.0",
   "suite": "termination",
   "qa_eval_suite": "R7",
