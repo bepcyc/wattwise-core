@@ -331,17 +331,21 @@ class Settings(_GroundingSettings, BaseSettings):
     # Weights are relative, non-negative; the composition renormalizes over the present
     # components, so only the SUM must be positive (validated at composition time).
     analytics__endurance_score_weight_ctl: float = Field(ge=0)
-    analytics__endurance_score_weight_durability: float = Field(ge=0)
+    analytics__endurance_score_weight_curve_shape: float = Field(ge=0)
     analytics__endurance_score_weight_decoupling: float = Field(ge=0)
     analytics__endurance_score_ctl_full_scale: float = Field(gt=0)
-    analytics__endurance_score_durability_floor: float = Field(ge=0)
-    analytics__endurance_score_durability_ceiling: float = Field(gt=0)
+    analytics__endurance_score_curve_shape_floor: float = Field(ge=0)
+    analytics__endurance_score_curve_shape_ceiling: float = Field(gt=0)
     analytics__endurance_score_decoupling_full_penalty_pct: float = Field(gt=0)
     analytics__endurance_score_allow_partial: bool
     analytics__endurance_score_partial_confidence_penalty: float = Field(gt=0, le=1)
     analytics__endurance_score_window_days: int = Field(ge=1)
     analytics__endurance_score_long_duration_s: int = Field(ge=1)
     analytics__endurance_score_short_duration_s: int = Field(ge=1)
+    # Durability / fatigue resistance (DUR-R1..R8, issue #26); the VALUES live in
+    # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraints.
+    analytics__durability_target_duration_s: int = Field(ge=1)
+    analytics__durability_wprime_multiple: float = Field(gt=0)
     # CP-R3/R4 pre-fit power-degeneracy epsilon (relative MMP power spread below which
     # the fit refuses with INSUFFICIENT_DATA before any regression); the VALUE lives in
     # defaults.toml (CFG-R1a) — this declares only the typed schema + range constraint.

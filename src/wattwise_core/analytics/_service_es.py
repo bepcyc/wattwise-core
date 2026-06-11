@@ -1,7 +1,7 @@
 """Endurance-score gather path for the analytics service (ES-R1/ES-R2, QUAL-R9 split).
 
 The service-side gather that assembles the three declared endurance-score components
-(CTL, the MMP durability ratio, the latest aerobic-decoupling drift) from the canonical
+(CTL, the MMP curve-shape ratio, the latest aerobic-decoupling drift) from the canonical
 store and hands them to the pure composition in :mod:`wattwise_core.analytics.endurance_score`.
 Split out of ``_service_loaders`` to honor the module size ceiling (QUAL-R9).
 """
@@ -37,7 +37,7 @@ async def _gather_endurance_score(
 
     Reads ONLY upstream `MetricResult`s produced by the canonical service capabilities
     (CTL from :meth:`~wattwise_core.analytics.service.AnalyticsService.pmc`, the
-    durability ratio from the sport-partitioned power curve, the most recent computed
+    curve-shape ratio from the sport-partitioned power curve, the most recent computed
     aerobic decoupling in the window) — never a raw stream (ES-R2); the numeric
     composition lives in the pure :mod:`~wattwise_core.analytics.endurance_score`.
     The power components are gathered for the athlete's canonical ``current_sport``
@@ -68,7 +68,7 @@ async def _gather_endurance_score(
     decoupling: MetricResult[float] = no_sport
     if sport is not None:
         curve = await svc.power_curve(athlete_id, from_date, as_of, sport=sport)
-        ratio = _es.durability_ratio(
+        ratio = _es.curve_shape_ratio(
             _curve_point(curve, ES_LONG_DURATION_S), _curve_point(curve, ES_SHORT_DURATION_S)
         )
         decoupling = await _latest_decoupling(svc, athlete_id, from_date, as_of)

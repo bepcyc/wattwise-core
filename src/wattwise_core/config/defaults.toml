@@ -176,18 +176,23 @@ signature_min_fit_r2 = 0.85
 # --- endurance-score (ES-R1): declared, documented weighting + normalization ---
 # The score is 100 x the weight-renormalized mean of three [0,1] component scores
 # (the engine embeds NO hidden constants — every knob lives here, CFG-R1a):
-#   f_ctl        = clamp(CTL / ctl_full_scale, 0, 1)                        (higher CTL -> higher)
-#   f_durability = clamp((ratio - floor) / (ceiling - floor), 0, 1)         (higher ratio -> higher)
-#   f_decoupling = clamp(1 - drift_pct / decoupling_full_penalty_pct, 0, 1) (higher drift -> lower)
+#   f_ctl         = clamp(CTL / ctl_full_scale, 0, 1)                        (higher CTL -> higher)
+#   f_curve_shape = clamp((ratio - floor) / (ceiling - floor), 0, 1)        (higher ratio -> higher)
+#   f_decoupling  = clamp(1 - drift_pct / decoupling_full_penalty_pct, 0, 1) (higher drift -> lower)
+# NOTE: f_curve_shape is the FRESH-state power-curve SHAPE ratio MMP(long)/MMP(short)
+# (aerobic vs. anaerobic balance), NOT fatigue resistance. True durability — power
+# retained after accumulated work — is the separate ``durability`` metric below. The
+# component was historically misnamed "durability"; it is renamed here so "durability"
+# means exactly one thing in the codebase (issue #26).
 # Weights are relative (renormalized over the present components); each >= 0, sum > 0.
 endurance_score_weight_ctl = 0.4
-endurance_score_weight_durability = 0.3
+endurance_score_weight_curve_shape = 0.3
 endurance_score_weight_decoupling = 0.3
 # CTL at (or above) which the chronic-load component saturates at 1.0.
 endurance_score_ctl_full_scale = 100.0
-# Durability ratio MMP(long_s)/MMP(short_s) normalization band: floor -> 0, ceiling -> 1.
-endurance_score_durability_floor = 0.5
-endurance_score_durability_ceiling = 1.0
+# Curve-shape ratio MMP(long_s)/MMP(short_s) normalization band: floor -> 0, ceiling -> 1.
+endurance_score_curve_shape_floor = 0.5
+endurance_score_curve_shape_ceiling = 1.0
 # Aerobic-decoupling drift (%) at (or above) which the decoupling component bottoms at 0.
 endurance_score_decoupling_full_penalty_pct = 10.0
 # ES-R2 scoring policy: when true, a subset containing CTL (the non-substitutable
@@ -197,12 +202,24 @@ endurance_score_decoupling_full_penalty_pct = 10.0
 endurance_score_allow_partial = true
 # Confidence multiplier applied when composing on a declared-valid partial subset (ES-R2b).
 endurance_score_partial_confidence_penalty = 0.7
-# Service gather window (days back from as_of) for the power-curve durability ratio and
+# Service gather window (days back from as_of) for the power-curve curve-shape ratio and
 # the most-recent aerobic-decoupling sample.
 endurance_score_window_days = 90
-# Power-curve durations for the durability ratio MMP(long)/MMP(short) (ES-R1: 20 vs 5 min).
+# Power-curve durations for the curve-shape ratio MMP(long)/MMP(short) (ES-R1: 20 vs 5 min).
 endurance_score_long_duration_s = 1200
 endurance_score_short_duration_s = 300
+# --- durability / fatigue resistance (DUR-R1..R8, issue #26) ---
+# Durability is the decrement in best target-duration power once the athlete has done
+# enough hard work to be fatigued. The probe duration (default 5 min) is the duration
+# whose fresh-vs-fatigued best power is compared (DUR-R3).
+durability_target_duration_s = 300
+# The fresh->fatigued boundary is reached after this MULTIPLE of the athlete's W' has
+# been spent as work ABOVE Critical Power (DUR-R2/R7). Anchoring to the athlete's own W'
+# (not a global kJ literal) keeps the metric comparable across athletes — a fixed kJ
+# figure is a third of one rider's ride and a monster effort for another. Default ~10x W'
+# of work-above-CP marks a genuinely deep, race-relevant fatigued state; a defensible
+# default, overridable like the readiness bands (CFG-R1a).
+durability_wprime_multiple = 10.0
 # CP-R3/R4 pre-fit degeneracy gate: when the distinct in-domain MMP powers are
 # (near-)constant — relative power spread (max - min) / max|P| strictly below this
 # epsilon — the CP/W' fit is REFUSED before any regression as
