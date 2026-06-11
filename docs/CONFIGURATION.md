@@ -33,10 +33,12 @@ and add the `WATTWISE_` prefix. For example, the `port` key in the `[api]` secti
 is used in the operator TOML file (as normal nested tables) and as the environment
 variable suffix.
 
-**Secrets never live in a file.** The database connection string, the encryption key,
-the token signing key, and the LLM key are read **only** from the environment (or a
-secret manager). They are never read from the packaged defaults or your operator file,
-and they are never baked into the image.
+**Keep secrets out of files.** Pass the database connection string, the encryption
+key, the token signing key, and the LLM key via the environment (or a secret manager).
+The packaged defaults carry no secret values and nothing is baked into the image — but
+the loader does not strip secret keys from an operator file, so a secret you put there
+WILL be honored when the matching environment variable is unset. Treat that as a
+footgun, not a feature: environment only.
 
 **Boot fails closed.** If a required secret is missing, or a value is out of range
 (say, a port above 65535), the container refuses to start and prints a clear error
@@ -120,8 +122,10 @@ exits with an error — fix the string and restart.
 
 There are two ways to get activities in.
 
-**Upload files.** Send FIT, FIT.GZ, GPX, TCX, or PWX files to the import endpoint,
-then run a sync to process them:
+**Upload files.** Send FIT, FIT.GZ, GPX, or TCX files to the import endpoint (anything
+else is refused with `415`). The upload itself already hands the file to the processor;
+the follow-up sync run picks up anything still pending and refreshes the canonical
+surfaces, so it is a safe "make sure everything landed" step, not a required activation:
 
 ```sh
 AUTH="Authorization: Bearer <your access token>"
