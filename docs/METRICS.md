@@ -54,8 +54,6 @@ Activity scalars: [elapsed_time_s](#elapsed-time-elapsed_time_s) ·
 [has_gps](#channel-presence-flags-has_power--has_hr--has_gps--has_cadence) ·
 [has_cadence](#channel-presence-flags-has_power--has_hr--has_gps--has_cadence)
 
-Self-reports: [perceived_exertion](#session-rpe-perceived_exertion) · [feel](#session-feel-feel)
-
 Daily wellness: [resting_hr_bpm](#resting-heart-rate-resting_hr_bpm) ·
 [min_hr_bpm](#daily-minimum-heart-rate-min_hr_bpm) · [max_hr_bpm](#daily-maximum-heart-rate-max_hr_bpm) ·
 [stress_avg](#average-stress-stress_avg) · [stress_max](#peak-stress-stress_max) ·
@@ -114,7 +112,7 @@ Streams: [power_w](#power-stream-power_w) · [hr_bpm](#heart-rate-stream-hr_bpm)
 ### Computed metrics
 
 Load family: [tss](#training-stress-score-tss) · [hr_load](#hr-based-load-hr_load) ·
-[hr_load_zonal](#zone-weighted-hr-load-hr_load_zonal) · [srpe_load](#session-rpe-load-srpe_load) ·
+[hr_load_zonal](#zone-weighted-hr-load-hr_load_zonal) ·
 [load_model](#load-model-label-load_model) · [tss_per_hour](#load-density-tss_per_hour)
 
 Performance Management Chart: [ctl](#chronic-training-load-ctl) · [atl](#acute-training-load-atl) ·
@@ -133,6 +131,13 @@ Efficiency family: [efficiency_factor](#efficiency-factor-efficiency_factor) ·
 Heart-rate family: [trimp](#trimp-trimp) · [hrv_rmssd_ms (computed)](#computed-rmssd-hrv_rmssd_ms)
 
 Composites: [endurance_score](#endurance-score-endurance_score)
+
+### Arriving in an upcoming release
+
+These keys are part of the canonical model but are **not collected or computed by current
+builds** — they land with an upcoming release. They are listed separately so nothing here is
+mistaken for a value you can read today: [perceived_exertion](#session-rpe-perceived_exertion) ·
+[feel](#session-feel-feel) · [srpe_load](#session-rpe-load-srpe_load)
 
 ---
 
@@ -635,63 +640,6 @@ family; `has_hr` gates the heart-rate family.
 
 **Caveats.** A flag reflects channel presence, not channel quality — a sparse or
 gap-riddled channel still sets the flag.
-
-## Self-reports
-
-These are values you enter about how a session felt. They are advisory context, captured
-fail-closed: a malformed or ambiguous entry becomes a typed gap, never a guessed number.
-
-> **Coverage note.** These self-report fields are defined in the canonical model and are
-> documented here in full for completeness. The session-RPE self-report is the input to the
-> `srpe_load` training-load member (below).
-
-### Session RPE (`perceived_exertion`)
-
-**Units:** CR-10 scale, 0-10 (fractional allowed).
-
-Your rating of how hard the whole session felt, on the Borg CR-10 scale.
-
-**Capture rule.** Captured at ingest from a device session self-evaluation, a connected
-platform's RPE field, or first-party entry. Malformed, out-of-range, or
-encoding-ambiguous values resolve to a typed gap — never clamped, never guessed.
-
-**Inputs & when unavailable.** Present only when you (or a source) recorded it; a gap
-otherwise.
-
-**Typical values.** 0 = rest, around 3-4 = easy, 5-6 = moderate, 7-8 = hard, 10 = maximal
-(Borg CR-10 convention, Foster's session-RPE literature).
-
-**How it moves state.** When present with a valid duration, it produces `srpe_load`, the
-lowest-fidelity training-load member, which lets sensor-less sessions (strength, many
-swims) register on the Performance Management Chart instead of reading as rest.
-
-**Reading trends.** Consistent RPE at a given workout type is normal; a creeping RPE at the
-same power or pace can signal accumulating fatigue.
-
-**Caveats.** Subjective and timing-sensitive (rate it shortly after the session). It is the
-least precise load input and always carries a substituted, reduced-confidence flag when it
-wins the load selection.
-
-### Session feel (`feel`)
-
-**Units:** ordinal 1-5.
-
-Your subjective sense of how good you felt, on a 1-5 scale.
-
-**Capture rule.** Captured as an ordinal where 1 = strong and 5 = weak (the common
-connected-platform convention). A self-report, advisory only.
-
-**Inputs & when unavailable.** Present only when recorded.
-
-**Typical values.** 1-5 on the stated convention.
-
-**How it moves state.** None directly — it is advisory context for the coach. It is never
-an input to a canonical derived metric.
-
-**Reading trends.** A run of "weak" ratings alongside flat or declining performance can
-prompt a closer look at recovery.
-
-**Caveats.** Note the scale direction (low is good). Purely subjective.
 
 ## Daily wellness
 
@@ -2382,7 +2330,7 @@ The power-based stress of a session, scaled so that one hour exactly at threshol
 **Formula.** `TSS = (duration_s * NP * IF) / (FTP * 3600) * 100`, equivalently
 `(duration_s * NP^2) / (FTP^2 * 3600) * 100`, where `duration_s` is the valid moving
 (exercise) duration — the seconds you were actually exercising, computed from the stream,
-not wall-clock time. (Analytics engine, TSS-R1.)
+not wall-clock time. (Computed by the analytics engine, per the Coggan TSS definition.)
 
 **Inputs & when unavailable.** Needs a power stream, an in-effect FTP, and a computable
 Normalized Power. Unavailable if any is missing (for example no FTP), or not applicable for
@@ -2409,7 +2357,7 @@ The heart-rate-based stress of a session, used when there is no power. It is the
 TRIMP value (see the TRIMP entry) surfaced as a load.
 
 **Formula.** The Banister heart-rate-reserve TRIMP (see `trimp`), reported as the session's
-load on the heart-rate path. (Analytics engine, TSS-R3, TRIMP-R1.)
+load on the heart-rate path. (Computed by the analytics engine, the Banister TRIMP surfaced as a load.)
 
 **Inputs & when unavailable.** Needs a heart-rate stream and in-effect maximum and resting
 heart rates. Unavailable without them.
@@ -2433,7 +2381,7 @@ lags fast intensity changes because heart rate does.
 A heart-rate load variant that sums time in each heart-rate zone times a per-zone weight.
 
 **Formula.** Time-in-zone times declared per-zone weights, with declared zone boundaries.
-(Analytics engine, TRIMP-R2.) It is a distinctly labelled alternative to the Banister
+(Computed by the analytics engine.) It is a distinctly labelled alternative to the Banister
 variant, never relabelled as it.
 
 **Inputs & when unavailable.** Needs a heart-rate stream and declared heart-rate zone
@@ -2449,44 +2397,17 @@ zonal model as your default; otherwise the Banister `hr_load` is used.
 **Caveats.** Comparable only within the same zone definitions. It is produced only on
 request or as your chosen default, never auto-selected ahead of `hr_load`.
 
-### Session-RPE load (`srpe_load`)
-
-**Units:** load points (commensurate with TSS).
-
-A load derived from your session RPE, so sensor-less sessions still register instead of
-reading as rest.
-
-**Formula.** `srpe_load = (RPE/10)^2 * hours * 100`, the intensity-squared,
-TSS-commensurate mapping, so a maximal (CR-10 of 10) hour equals 100 points. Foster's
-classical linear figure (`RPE * minutes`) is carried alongside as provenance only.
-(Analytics engine, SRPE-R1.)
-
-**Inputs & when unavailable.** Needs a valid session RPE (greater than 0, up to 10) and a
-positive duration. Unavailable otherwise; a malformed RPE is a gap, never a guessed value.
-
-**Typical values.** A CR-10 of 7 for one hour is about 49 points; a maximal hour is 100
-(by the formula). Orientation only.
-
-**How it moves state.** It is the lowest-fidelity training-load member. It wins the load
-selection only when no power or heart-rate load can be computed, and it always carries a
-substituted, reduced-confidence flag.
-
-**Reading trends.** Lets strength and many swim sessions appear on the Performance
-Management Chart; read its contribution as approximate.
-
-**Caveats.** Subjective input, lowest precision. One activity contributes exactly one load
-member, so logging RPE alongside power never double-counts.
-
 ### Load-model label (`load_model`)
 
-**Units:** label (`power_tss`, `hr_load`, `hr_load_zonal`, `srpe_load`).
+**Units:** label (`power_tss`, `hr_load`, `hr_load_zonal`; `srpe_load` is added with the
+upcoming session-RPE release described at the end of this reference).
 
 The honest record of which load model produced a given load value.
 
 **Formula.** Not a number — it names the selected member of the load-model set. Selection is
 automatic and fidelity-ordered: power TSS first, then Banister HR load, then session-RPE
-load, with the zonal HR variant chosen only as your default. (Analytics engine,
-LOAD-R2/R3/R4.)
+load, with the zonal HR variant chosen only as your default. (Computed by the analytics
+engine.)
 
 **Inputs & when unavailable.** Always populated whenever a load is reported, so the two load
 families are never silently mixed.
@@ -2508,7 +2429,7 @@ caution.
 How concentrated a session's stress was — load accrued per valid hour.
 
 **Formula.** `tss_per_hour = tss / (duration_valid_s / 3600)`. Computed only when TSS and a
-positive valid duration are present. (Analytics engine, LM-R1.)
+positive valid duration are present. (Computed by the analytics engine.)
 
 **Inputs & when unavailable.** Needs a computed TSS and a positive valid duration;
 unavailable otherwise.
@@ -2538,7 +2459,7 @@ Your "fitness": a slow, 42-day exponentially weighted average of daily load.
 
 **Formula.** `CTL(d) = CTL(d-1) + alpha * (L(d) - CTL(d-1))` with `alpha = 1 -
 exp(-1/42)`, over a contiguous daily grid where a true rest day contributes zero load.
-(Analytics engine, PMC-R1/R2.)
+(Computed by the analytics engine, the Banister/Coggan Performance Management Chart model.)
 
 **Inputs & when unavailable.** Built from the daily-load series, seeded from your true
 training origin. Unavailable if a mid-history window cannot be seeded honestly (it will not
@@ -2563,7 +2484,7 @@ open data gap are marked provisional and may revise.
 Your "fatigue": a fast, 7-day exponentially weighted average of daily load.
 
 **Formula.** `ATL(d) = ATL(d-1) + alpha * (L(d) - ATL(d-1))` with `alpha = 1 -
-exp(-1/7)`. (Analytics engine, PMC-R1/R2.)
+exp(-1/7)`. (Computed by the analytics engine, the Banister/Coggan Performance Management Chart model.)
 
 **Inputs & when unavailable.** Same daily-load series and seeding as CTL.
 
@@ -2583,7 +2504,7 @@ fatigue dynamics.
 Your "form": yesterday's fitness minus yesterday's fatigue.
 
 **Formula.** `TSB(d) = CTL(d-1) - ATL(d-1)` — the previous-day balance, by definition.
-(Analytics engine, PMC-R1.)
+(Computed by the analytics engine.)
 
 **Inputs & when unavailable.** Derived from CTL and ATL; unavailable when they are.
 
@@ -2607,7 +2528,7 @@ available.
 An athlete-facing name for Training Stress Balance — the same value, not a second
 computation.
 
-**Formula.** Identical to `tsb`: `CTL(d-1) - ATL(d-1)`. (Analytics engine, PMC-R1.) It is a
+**Formula.** Identical to `tsb`: `CTL(d-1) - ATL(d-1)`. (Computed by the analytics engine.) It is a
 pure alias.
 
 **Inputs & when unavailable.** Exactly as for `tsb`.
@@ -2628,7 +2549,7 @@ one.
 The weekly load that would hold your fitness steady.
 
 **Formula.** `weekly_load_target = 7 * CTL` — holding CTL steady needs an average daily load
-equal to CTL, so a week needs seven times it. (Analytics engine, derived from PMC CTL.)
+equal to CTL, so a week needs seven times it. (Computed by the analytics engine, derived from CTL.)
 
 **Inputs & when unavailable.** Needs a computable CTL; unavailable otherwise.
 
@@ -2649,7 +2570,7 @@ distribution.
 The four-week load that would hold your fitness steady.
 
 **Formula.** `monthly_load_target = 28 * CTL` — twenty-eight days at an average daily load
-equal to CTL. (Analytics engine, derived from PMC CTL.)
+equal to CTL. (Computed by the analytics engine, derived from CTL.)
 
 **Inputs & when unavailable.** Needs a computable CTL; unavailable otherwise.
 
@@ -2676,8 +2597,8 @@ higher than plain average power when the effort is spiky.
 
 **Formula.** Take a 30-second rolling average of power, raise it to the fourth power,
 average that over the analysis window, then take the fourth root:
-`NP = (mean(R(t)^4))^(1/4)` where `R(t)` is the 30-second rolling mean. (Analytics engine,
-NP-R1.)
+`NP = (mean(R(t)^4))^(1/4)` where `R(t)` is the 30-second rolling mean. (Computed by the
+analytics engine, the Coggan Normalized Power definition.)
 
 **Inputs & when unavailable.** Needs at least 30 contiguous valid seconds of power.
 Unavailable with no power channel, or with fewer than 30 contiguous valid seconds.
@@ -2700,7 +2621,7 @@ interpolation limit reset the rolling window rather than bridging it.
 
 How hard a session was relative to your threshold.
 
-**Formula.** `IF = NP / FTP`. (Analytics engine, IF-R1.) It is never computed from average
+**Formula.** `IF = NP / FTP`. (Computed by the analytics engine, the Coggan Intensity Factor.) It is never computed from average
 power as a fallback.
 
 **Inputs & when unavailable.** Needs a computed Normalized Power and an in-effect FTP.
@@ -2726,7 +2647,7 @@ The aerobic asymptote of your power-duration curve, fit from your real best effo
 
 **Formula.** A two-parameter fit of `P(t) = W'/t + CP` (equivalently the linear work-time
 form `W(t) = W' + CP * t`) to your maximal mean-power points over a valid duration range.
-(Analytics engine, CP-R1.) The fit reports goodness-of-fit and is accepted only past
+(Computed by the analytics engine, the Monod-Scherrer critical-power model.) The fit reports goodness-of-fit and is accepted only past
 declared gates.
 
 **Inputs & when unavailable.** Needs enough well-spread maximal efforts (by default at
@@ -2751,7 +2672,7 @@ high; such fits are flagged. A poor fit is reported unavailable, not clamped.
 The work-above-critical-power capacity, fit alongside critical power.
 
 **Formula.** The `W'` parameter of the same two-parameter critical-power fit
-(`W(t) = W' + CP * t`). (Analytics engine, CP-R1.)
+(`W(t) = W' + CP * t`). (Computed by the analytics engine, the same critical-power fit.)
 
 **Inputs & when unavailable.** Same fit and gates as critical power; unavailable when the
 fit fails.
@@ -2776,7 +2697,7 @@ the single source of your best efforts.
 
 **Formula.** For each duration `d`, the maximum mean power over any valid window of at least
 `d` seconds; over a date range, the per-duration maximum across activities, with lineage to
-the activity that set each peak. (Analytics engine, MMP-R1/R4.) Best efforts are read
+the activity that set each peak. (Computed by the analytics engine, the mean-maximal-power curve.) Best efforts are read
 directly off this curve.
 
 **Inputs & when unavailable.** Needs a power channel. A duration with no valid window is
@@ -2804,8 +2725,8 @@ recover it below.
 
 **Formula.** The Skiba (2012) differential model on the per-second power stream, seeded at
 W'. Above critical power it depletes by `(P - CP)` per second; below, it recovers toward W'
-with a power-dependent time constant `tau = 546 * exp(-0.01 * (CP - P)) + 316`. (Analytics
-engine, WBAL-R1.)
+with a power-dependent time constant `tau = 546 * exp(-0.01 * (CP - P)) + 316`. (Computed by
+the analytics engine, the Skiba W'balance model.)
 
 **Inputs & when unavailable.** Needs a power stream plus critical power and W'. Unavailable
 without them; not applicable for sports without power. The engine never substitutes FTP for
@@ -2836,7 +2757,7 @@ Aerobic efficiency: how much normalized power you produced per heartbeat.
 
 **Formula.** `EF = NP / avg_hr_bpm`, where average heart rate is the mean over the full
 valid-moving window. Computed only when Normalized Power is computed and average heart rate
-is positive. (Analytics engine, LM-R1.)
+is positive. (Computed by the analytics engine.)
 
 **Inputs & when unavailable.** Needs both a power and a heart-rate channel over the effort;
 unavailable otherwise.
@@ -2860,7 +2781,7 @@ How evenly an effort was paced — near 1.0 is steady, higher is surgy.
 
 **Formula.** `VI = NP / avg_power`, where average power is the mean over the full
 valid-moving window (the Coggan Variability Index). Computed only when Normalized Power is
-computed and average power is positive. (Analytics engine, LM-R1.)
+computed and average power is positive. (Computed by the analytics engine, the Coggan Variability Index.)
 
 **Inputs & when unavailable.** Needs a power channel; unavailable otherwise.
 
@@ -2877,17 +2798,19 @@ reproduced from the stream; for a summary-only average it may diverge, which is 
 
 ### Intensity class (`intensity_class`)
 
-**Units:** ordered label (`recovery`, `endurance`, `tempo`, `threshold`, `VO2`).
+**Units:** ordered label, one of the exact lowercase tokens `recovery`, `endurance`,
+`tempo`, `threshold`, `vo2`. A user interface may display these with friendlier casing
+(for example "VO2"), but the canonical stored value is always lowercase.
 
 A plain-language band for how hard a session was, derived from Intensity Factor.
 
-**Formula.** A monotone banding of Intensity Factor against default cut-points: recovery
-below 0.55, endurance 0.55-0.75, tempo 0.75-0.90, threshold 0.90-1.05, VO2 at or above
-1.05. Computed only when Intensity Factor is computed. (Analytics engine, LM-R1.)
+**Formula.** A monotone banding of Intensity Factor against default cut-points: `recovery`
+below 0.55, `endurance` 0.55-0.75, `tempo` 0.75-0.90, `threshold` 0.90-1.05, `vo2` at or
+above 1.05. Computed only when Intensity Factor is computed. (Computed by the analytics engine.)
 
 **Inputs & when unavailable.** Needs a computed Intensity Factor; unavailable otherwise.
 
-**Typical values.** One of the five labels (the boundaries are configurable defaults).
+**Typical values.** One of the five lowercase labels (the boundaries are configurable defaults).
 
 **How it moves state.** A readable summary of session intensity on the activity detail.
 
@@ -2906,8 +2829,8 @@ classic cardiac-drift measure.
 
 **Formula.** `decoupling% = ((eff_first_half - eff_second_half) / eff_first_half) * 100`,
 where each half's efficiency is mean output over mean heart rate, split at the midpoint of
-elapsed time, with coasting samples excluded and smoothed power used. (Analytics engine,
-DEC-R1/R2/R3.)
+elapsed time, with coasting samples excluded and smoothed power used. (Computed by the
+analytics engine, the aerobic-decoupling / cardiac-drift method.)
 
 **Inputs & when unavailable.** Needs synchronized output (power, or speed where power is
 absent) and heart rate over a long, steady effort (by default at least 20 minutes).
@@ -2939,7 +2862,7 @@ reserve.
 
 **Formula.** `TRIMP = sum over valid seconds of dt_min * HRR * a * exp(b * HRR)`, where
 `HRR = (HR - HR_rest) / (HR_max - HR_rest)` and `(a, b)` are the sex-specific Banister
-constants (0.64 and 1.92 for men, 0.86 and 1.67 for women). (Analytics engine, TRIMP-R1.)
+constants (0.64 and 1.92 for men, 0.86 and 1.67 for women). (Computed by the analytics engine, the Banister TRIMP.)
 
 **Inputs & when unavailable.** Needs a heart-rate stream and in-effect maximum and resting
 heart rates. Missing input reports missing-required-input; present-but-inverted values
@@ -2965,7 +2888,7 @@ Your heart-rate variability in the RMSSD statistic, computed from artifact-corre
 beat-to-beat intervals.
 
 **Formula.** `RMSSD = sqrt(mean((NN[i+1] - NN[i])^2))` over the normal-to-normal intervals,
-after mandatory artifact correction. (Analytics engine, HRV-R1/R3.) When only a source
+after mandatory artifact correction. (Computed by the analytics engine.) When only a source
 summary exists, that summary is surfaced at summary-only fidelity instead.
 
 **Inputs & when unavailable.** Needs a beat-to-beat interval stream and enough usable data
@@ -2999,7 +2922,7 @@ metrics already defined.
 **Formula.** A documented, weighted, normalized blend of chronic training load (CTL), a
 long-duration power durability ratio from the power curve, and aerobic decoupling (lower
 drift scores higher), each normalized to 0-1 and combined to a 0-100 score over the present
-components. (Analytics engine, ES-R1.) It introduces no new physiological model.
+components. (Computed by the analytics engine.) It introduces no new physiological model.
 
 **Inputs & when unavailable.** CTL is required; the power-family components may be absent.
 Unavailable when a non-substitutable component (CTL) is missing; otherwise it composes on
@@ -3018,3 +2941,89 @@ lower decoupling. It moves monotonically in each component in the documented dir
 **Caveats.** Distinct from any source-reported endurance score. As a composite it inherits
 the caveats of its inputs; when computed on a partial component set, its confidence is
 reduced and reported.
+
+---
+
+# Arriving in an upcoming release
+
+The entries below describe fields that are part of the canonical model and are documented
+here in full because the description is accurate for the incoming feature. **Current builds
+do not yet collect or compute them** — they land with an upcoming session-RPE release. They
+are kept out of the implemented index and sections above so that nothing here is mistaken
+for a value you can read today.
+
+### Session RPE (`perceived_exertion`)
+
+**Units:** CR-10 scale, 0-10 (fractional allowed).
+
+Your rating of how hard the whole session felt, on the Borg CR-10 scale.
+
+**Capture rule.** Captured at ingest from a device session self-evaluation, a connected
+platform's RPE field, or first-party entry. Malformed, out-of-range, or
+encoding-ambiguous values resolve to a typed gap — never clamped, never guessed.
+
+**Inputs & when unavailable.** Present only when you (or a source) recorded it; a gap
+otherwise.
+
+**Typical values.** 0 = rest, around 3-4 = easy, 5-6 = moderate, 7-8 = hard, 10 = maximal
+(Borg CR-10 convention, Foster's session-RPE literature).
+
+**How it moves state.** When present with a valid duration, it produces `srpe_load`, the
+lowest-fidelity training-load member, which lets sensor-less sessions (strength, many
+swims) register on the Performance Management Chart instead of reading as rest.
+
+**Reading trends.** Consistent RPE at a given workout type is normal; a creeping RPE at the
+same power or pace can signal accumulating fatigue.
+
+**Caveats.** Subjective and timing-sensitive (rate it shortly after the session). It is the
+least precise load input and always carries a substituted, reduced-confidence flag when it
+wins the load selection.
+
+### Session feel (`feel`)
+
+**Units:** ordinal 1-5.
+
+Your subjective sense of how good you felt, on a 1-5 scale.
+
+**Capture rule.** Captured as an ordinal where 1 = strong and 5 = weak (the common
+connected-platform convention). A self-report, advisory only.
+
+**Inputs & when unavailable.** Present only when recorded.
+
+**Typical values.** 1-5 on the stated convention.
+
+**How it moves state.** None directly — it is advisory context for the coach. It is never
+an input to a canonical derived metric.
+
+**Reading trends.** A run of "weak" ratings alongside flat or declining performance can
+prompt a closer look at recovery.
+
+**Caveats.** Note the scale direction (low is good). Purely subjective.
+
+### Session-RPE load (`srpe_load`)
+
+**Units:** load points (commensurate with TSS).
+
+A load derived from your session RPE, so sensor-less sessions still register instead of
+reading as rest.
+
+**Formula.** `srpe_load = (RPE/10)^2 * hours * 100`, the intensity-squared,
+TSS-commensurate mapping, so a maximal (CR-10 of 10) hour equals 100 points. Foster's
+classical linear figure (`RPE * minutes`) is carried alongside as provenance only.
+(Computed by the analytics engine, after Foster's session-RPE method.)
+
+**Inputs & when unavailable.** Needs a valid session RPE (greater than 0, up to 10) and a
+positive duration. Unavailable otherwise; a malformed RPE is a gap, never a guessed value.
+
+**Typical values.** A CR-10 of 7 for one hour is about 49 points; a maximal hour is 100
+(by the formula). Orientation only.
+
+**How it moves state.** It is the lowest-fidelity training-load member. It wins the load
+selection only when no power or heart-rate load can be computed, and it always carries a
+substituted, reduced-confidence flag.
+
+**Reading trends.** Lets strength and many swim sessions appear on the Performance
+Management Chart; read its contribution as approximate.
+
+**Caveats.** Subjective input, lowest precision. One activity contributes exactly one load
+member, so logging RPE alongside power never double-counts.
