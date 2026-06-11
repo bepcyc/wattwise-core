@@ -360,7 +360,9 @@ def durability_decrement(
 
     retained = fatigued_best / fresh_best
     decrement_pct = 100.0 * (1.0 - retained)
-    if not (math.isfinite(retained) and math.isfinite(decrement_pct)):  # ANL-R32
+    # ANL-R32 defensive guard: fresh_best > 0 is already enforced upstream, so finite
+    # inputs cannot produce a non-finite ratio here — unreachable, kept fail-closed.
+    if not (math.isfinite(retained) and math.isfinite(decrement_pct)):  # pragma: no cover
         return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "non-finite durability decrement")
 
     return _build_durability_result(

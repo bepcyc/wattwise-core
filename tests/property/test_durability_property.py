@@ -148,6 +148,42 @@ def test_fatigued_segment_too_short_is_insufficient() -> None:
     assert "fatigued" in result.detail
 
 
+@pytest.mark.property
+def test_long_but_gappy_segment_has_no_seeded_window() -> None:
+    """A segment longer than the target but too gappy for any seeded window ⇒ INSUFFICIENT (DUR-T4).
+
+    The fresh segment is long enough in samples but a gap (``NaN``) sits inside every
+    candidate target-duration window, so no fully-seeded 300 s window exists — distinct
+    from the simply-too-short case. ``_best_mean_power`` must return ``None`` (a partial,
+    gap-straddling window is never averaged), not a short-window mean.
+    """
+    # 600 fresh seconds with a NaN every 100 s (no gap-free 300 s run), then a clean
+    # fatigued block; the threshold lands at the fresh/fatigued boundary.
+    fresh = np.full(600, 320.0)
+    fresh[99::100] = np.nan  # gaps at 99,199,299,399,499,599 — no 300 s gap-free run
+    power = np.concatenate([fresh, np.full(300, 290.0)])
+    work = float(np.nansum(np.maximum(0.0, fresh - CP_W)))  # all fresh work-above-CP
+    result = durability_decrement(
+        power, CP_W, fatigue_threshold_j=work + 1.0, target_duration_s=300
+    )
+    assert isinstance(result, Unavailable)
+    assert result.reason is UnavailableReason.INSUFFICIENT_DATA
+
+
+@pytest.mark.property
+def test_zero_power_fresh_segment_is_out_of_domain() -> None:
+    """An all-zero fresh segment ⇒ OUT_OF_DOMAIN (the ratio over a zero fresh best, DUR-R3).
+
+    Above-CP work occurs only in the fatigued block, so the threshold crossing leaves the
+    fresh segment entirely at 0 W; its best 300 s power is 0, and a decrement ratio over a
+    non-positive fresh best is undefined rather than a fabricated number.
+    """
+    power = np.concatenate([np.full(600, 0.0), np.full(300, 300.0)])
+    result = durability_decrement(power, CP_W, fatigue_threshold_j=25.0, target_duration_s=300)
+    assert isinstance(result, Unavailable)
+    assert result.reason is UnavailableReason.OUT_OF_DOMAIN
+
+
 # --- DUR-T5: fail-closed gates -----------------------------------------------------
 @pytest.mark.property
 def test_non_cycling_sport_not_applicable() -> None:
