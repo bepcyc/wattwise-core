@@ -24,7 +24,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: "30 2 * * *"   # nightly leg (CI-R4): live eval+smoke, deep fuzz, T-MUT
+    - cron: "30 2 * * *"   # nightly leg (CI-R4): live eval+smoke, deep fuzz (mutation nightly: nightly.yml)
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -111,7 +111,7 @@ jobs:
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
-      - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥95%)
+      - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥90%)
       - uses: actions/upload-artifact@v4   # retained artifact (CI-R6)
         if: always()
         with: { name: coverage-report, path: reports/coverage.xml }
@@ -294,6 +294,37 @@ jobs:
       - run: just migrate
       - run: just test-e2e              # CI-R1 item 12
 
+  # Advisory PR-stage mutation testing (T-MUT, issue #35 / ADR 0006): diff-scoped,
+  # time-boxed, warm-started from the cached mutants/ dir. continue-on-error keeps
+  # it advisory at the forge level too — it can NEVER be the long pole that blocks
+  # the merge. All gate logic (diff scope, budget, skip, report) lives in the
+  # recipe (CI-R0); the cache + fetch-depth steps below are runner plumbing.
+  mutation-advisory:
+    name: Mutation advisory (T-MUT)
+    if: github.event_name == 'pull_request'
+    needs: [lint, type-check, fast-tests]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }   # merge-base diff scoping needs main's history
+      - uses: astral-sh/setup-uv@v8.2.0
+        with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
+      - run: just install
+      - uses: actions/cache@v4     # mutant/verdict/test-stats cache (issue #35 item 4)
+        with:
+          path: mutants
+          key: tmut-v1-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            tmut-v1-${{ hashFiles('uv.lock') }}-
+            tmut-v1-
+      - run: just test-mut-pr
+      - uses: actions/upload-artifact@v4   # retained advisory report (CI-R6)
+        if: always()
+        with: { name: mutation-pr-report, path: reports/ }
+
   image-scan-sbom:
     name: Container image scan + SBOM
     needs: [lint, type-check, fast-tests]
@@ -323,28 +354,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: dist, path: dist/ }
 
-  # ----------------------------------------------------------------- CONDITIONAL + NIGHTLY
-  mutation:
-    name: T-MUT (conditional, advisory)
-    # CI-R1 item 17 (TIER-R6): runs ONLY on PRs; the recipe itself decides from the
-    # diff whether the mutated packages changed (zero gate logic here, CI-R0). The PR
-    # leg is ADVISORY: test-mut-pr reports the mutation score + delta vs the committed
-    # ratchet floor (mutation-floors.toml) but NEVER blocks the build.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with: { fetch-depth: 0 }
-      - uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
-      - run: bash scripts/ci_tools.sh just
-      - run: just install
-      - run: just test-mut-pr origin/${{ github.base_ref }}
-
+  # ----------------------------------------------------------------- NIGHTLY (non-mutation)
   nightly:
-    name: Nightly live eval + live smoke + deep fuzz + T-MUT (CI-R4)
-    # CI-R4: live-mode T-EVAL + live-provider smoke nightly, alerting on regression
-    # (a red scheduled run is the forge's failure notification), without blocking PRs.
+    name: Nightly live eval + live smoke + deep fuzz (CI-R4)
+    # CI-R4: live-mode T-EVAL + live-provider smoke + deep fuzz nightly, alerting on
+    # regression (a red scheduled run is the forge's failure notification), without
+    # blocking PRs. The nightly MUTATION campaign (T-MUT enforcing leg) is owned by the
+    # dedicated nightly.yml scheduler (`just test-mut`) — kept out of here so there is
+    # exactly ONE mutation gate across the workflows (issue #35 / ADR 0006 / TIER-R6).
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     env:
@@ -359,7 +376,6 @@ jobs:
       - run: just eval-live          # QA-EVAL-R9 live mode + INFRA_ERROR gate (QA-EVAL-R12(b))
       - run: just test-llm           # live-provider smoke (CI-R4)
       - run: just test-fuzz-nightly  # TIER-R5 mode (b) extended campaign
-      - run: just test-mut-nightly   # TIER-R6 nightly mutation campaign — ENFORCES the ratchet floor
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: nightly-reports, path: reports/ }

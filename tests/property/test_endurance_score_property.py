@@ -7,7 +7,7 @@ Covers, per the per-metric property list (doc 40 §11.1):
           stream/DB imports in the module).
 * ES-T2 — monotonicity (ES-R3): perturbing one component in the documented direction
           moves the score the documented way (higher CTL ⇒ not-lower; higher
-          durability ratio ⇒ not-lower; higher decoupling drift ⇒ not-higher).
+          curve-shape ratio ⇒ not-lower; higher decoupling drift ⇒ not-higher).
 * ES-T3 — missing component: an ``Unavailable`` non-substitutable input (CTL) yields
           ``Unavailable``; a missing optional component is renormalized away, never
           silently scored as ``0`` (ANL-R4); the configured ``allow_partial = False``
@@ -73,10 +73,10 @@ def test_es_t2_monotonic_in_ctl(ctl: float, ratio: float, drift: float, delta: f
 
 @pytest.mark.property
 @given(ctl=_ctl, ratio=_ratio, drift=_drift, delta=_delta)
-def test_es_t2_monotonic_in_durability(
+def test_es_t2_monotonic_in_curve_shape(
     ctl: float, ratio: float, drift: float, delta: float
 ) -> None:
-    """ES-T2: higher durability ratio at fixed other inputs ⇒ not-lower score (ES-R3)."""
+    """ES-T2: higher curve-shape ratio at fixed other inputs ⇒ not-lower score (ES-R3)."""
     assert _score(ctl, ratio + delta, drift) >= _score(ctl, ratio, drift)
 
 
@@ -123,7 +123,7 @@ def test_es_t3_partial_never_zero_substitutes(ctl: float) -> None:
     assert isinstance(zero_substituted, Computed)
     assert partial.value > zero_substituted.value
     assert partial.quality.confidence < 1.0
-    assert partial.quality.extra["components_missing"] == ("decoupling", "durability")
+    assert partial.quality.extra["components_missing"] == ("curve_shape", "decoupling")
 
 
 @pytest.mark.property
@@ -138,7 +138,7 @@ def test_es_t3_allow_partial_false_fails_closed(monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.property
 def test_es_degenerate_weights_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A zero weight-sum over present components is OUT_OF_DOMAIN, never a 0/0 score."""
-    monkeypatch.setattr(es_mod, "_WEIGHTS", {"ctl": 0.0, "durability": 0.0, "decoupling": 0.0})
+    monkeypatch.setattr(es_mod, "_WEIGHTS", {"ctl": 0.0, "curve_shape": 0.0, "decoupling": 0.0})
     result = endurance_score(Computed(value=70.0), Computed(value=0.8), Computed(value=5.0))
     assert isinstance(result, Unavailable)
     assert result.reason is UnavailableReason.OUT_OF_DOMAIN
@@ -151,4 +151,4 @@ def test_es_non_finite_component_treated_as_absent() -> None:
         Computed(value=70.0), Computed(value=float("nan")), Computed(value=5.0)
     )
     assert isinstance(result, Computed)
-    assert result.quality.extra["components_missing"] == ("durability",)
+    assert result.quality.extra["components_missing"] == ("curve_shape",)

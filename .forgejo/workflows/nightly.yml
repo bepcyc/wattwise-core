@@ -1,0 +1,45 @@
+# wattwise-core nightly — Forgejo Actions (T-MUT enforcing leg, issue #35 / ADR 0006).
+#
+# THIN SCHEDULER ONLY (CI-R0/CI-R9): the single gate step is `just test-mut`,
+# IDENTICAL to the GitHub mirror (.github/workflows/nightly.yml) — only the
+# runner plumbing (action URLs, runs-on label) differs, as in ci.yml.
+#
+# The nightly leg owns the FULL mutation campaign (the cost the PR loop must
+# never pay): it runs incrementally on the persisted mutants/ cache and
+# enforces the WW_MUT_FLOOR score floor over the correctness-critical packages.
+# The cache saved here on main is what warm-starts every PR's advisory leg.
+
+name: nightly
+
+on:
+  schedule:
+    - cron: "23 2 * * *"   # 02:23 UTC nightly (off the busy on-the-hour spike)
+  workflow_dispatch: {}     # manual re-run / baseline refresh
+
+env:
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  mutation-nightly:
+    name: Mutation nightly (T-MUT enforcing)
+    runs-on: docker
+    timeout-minutes: 240
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v6
+        with: { fetch-depth: 0 }   # commit-time mtime restore needs history
+      - uses: https://github.com/astral-sh/setup-uv@v8.2.0
+        with: { python-version: "3.13" }
+      - run: bash scripts/ci_tools.sh just
+      - run: just install
+      - uses: https://code.forgejo.org/actions/cache@v4   # incremental campaign + PR warm-start source
+        with:
+          path: mutants
+          key: tmut-v1-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            tmut-v1-${{ hashFiles('uv.lock') }}-
+            tmut-v1-
+      - run: just test-mut
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4   # CI-R6
+        if: always()
+        with: { name: mutation-nightly-report, path: reports/ }

@@ -38,6 +38,9 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from wattwise_core.config._analytics_settings import _AnalyticsSettings
+from wattwise_core.config._renamed_keys import guard_renamed_keys
+
 _DEFAULTS_PATH = Path(__file__).with_name("defaults.toml")
 
 #: SEC-R3 signing-key entropy floor: >= 256 bits (32 bytes) of key material, mirroring the
@@ -140,7 +143,13 @@ class _GroundingSettings(BaseModel):
     these so the env mapping, dotted names, and attribute access are identical — they simply
     live here to keep the Settings class body under the QUAL-R9 size ceiling. Values in
     defaults.toml (CFG-R1a); schema/constraints only.
+
+    The removed/renamed-key boot guard (CFG-R1a) is bound here too: a ``mode="before"``
+    validator is inherited by :class:`Settings`, so it runs on the full settings load while
+    keeping the (size-capped) Settings body free of the binding line.
     """
+
+    _reject_renamed_keys = model_validator(mode="before")(guard_renamed_keys)
 
     # Binding-faithful grounding, layer 1 (issue #10, proposed GROUND-R10): the deterministic
     # claim-binding guard's rollout mode (off|shadow|enforce — validated by the closed enum at
@@ -173,7 +182,7 @@ class _GroundingSettings(BaseModel):
     agent__entailment__max_checks: int = Field(ge=1)
 
 
-class Settings(_GroundingSettings, BaseSettings):
+class Settings(_AnalyticsSettings, _GroundingSettings, BaseSettings):
     """Resolved, validated engine configuration.
 
     Fields are populated from the layered sources in :meth:`settings_customise_sources`.
@@ -331,11 +340,11 @@ class Settings(_GroundingSettings, BaseSettings):
     # Weights are relative, non-negative; the composition renormalizes over the present
     # components, so only the SUM must be positive (validated at composition time).
     analytics__endurance_score_weight_ctl: float = Field(ge=0)
-    analytics__endurance_score_weight_durability: float = Field(ge=0)
+    analytics__endurance_score_weight_curve_shape: float = Field(ge=0)
     analytics__endurance_score_weight_decoupling: float = Field(ge=0)
     analytics__endurance_score_ctl_full_scale: float = Field(gt=0)
-    analytics__endurance_score_durability_floor: float = Field(ge=0)
-    analytics__endurance_score_durability_ceiling: float = Field(gt=0)
+    analytics__endurance_score_curve_shape_floor: float = Field(ge=0)
+    analytics__endurance_score_curve_shape_ceiling: float = Field(gt=0)
     analytics__endurance_score_decoupling_full_penalty_pct: float = Field(gt=0)
     analytics__endurance_score_allow_partial: bool
     analytics__endurance_score_partial_confidence_penalty: float = Field(gt=0, le=1)

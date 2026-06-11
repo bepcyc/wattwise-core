@@ -84,11 +84,11 @@ SIGNATURE_MIN_FIT_R2: Final[float] = _analytics_default("signature_min_fit_r2")
 # the engine embeds no hidden constants (ES-R1). Weights are relative and renormalized
 # over the PRESENT components; the normalization shape is documented in defaults.toml.
 ES_WEIGHT_CTL: Final[float] = _analytics_default("endurance_score_weight_ctl")
-ES_WEIGHT_DURABILITY: Final[float] = _analytics_default("endurance_score_weight_durability")
+ES_WEIGHT_CURVE_SHAPE: Final[float] = _analytics_default("endurance_score_weight_curve_shape")
 ES_WEIGHT_DECOUPLING: Final[float] = _analytics_default("endurance_score_weight_decoupling")
 ES_CTL_FULL_SCALE: Final[float] = _analytics_default("endurance_score_ctl_full_scale")
-ES_DURABILITY_FLOOR: Final[float] = _analytics_default("endurance_score_durability_floor")
-ES_DURABILITY_CEILING: Final[float] = _analytics_default("endurance_score_durability_ceiling")
+ES_CURVE_SHAPE_FLOOR: Final[float] = _analytics_default("endurance_score_curve_shape_floor")
+ES_CURVE_SHAPE_CEILING: Final[float] = _analytics_default("endurance_score_curve_shape_ceiling")
 ES_DECOUPLING_FULL_PENALTY_PCT: Final[float] = _analytics_default(
     "endurance_score_decoupling_full_penalty_pct"
 )
@@ -101,6 +101,13 @@ ES_PARTIAL_CONFIDENCE_PENALTY: Final[float] = _analytics_default(
 ES_WINDOW_DAYS: Final[int] = int(_analytics_default("endurance_score_window_days"))
 ES_LONG_DURATION_S: Final[int] = int(_analytics_default("endurance_score_long_duration_s"))
 ES_SHORT_DURATION_S: Final[int] = int(_analytics_default("endurance_score_short_duration_s"))
+
+# --- durability / fatigue resistance (DUR-R1..R8, issue #26) ---
+# The probe duration whose fresh-vs-fatigued best power is compared (DUR-R3), and the
+# multiple of W' (spent as work above CP) that marks the fresh->fatigued boundary
+# (DUR-R2/R7). Both VALUES live in defaults.toml (CFG-R1a), never as code literals.
+DURABILITY_TARGET_DURATION_S: Final[int] = int(_analytics_default("durability_target_duration_s"))
+DURABILITY_WPRIME_MULTIPLE: Final[float] = _analytics_default("durability_wprime_multiple")
 
 # --- Normalized Power / TSS ---
 NP_ROLLING_WINDOW_S: Final = 30  # NP-R1
@@ -148,6 +155,16 @@ TRIMP_A_MALE: Final = 0.64  # TRIMP-R1
 TRIMP_B_MALE: Final = 1.92  # TRIMP-R1
 TRIMP_A_FEMALE: Final = 0.86  # TRIMP-R1
 TRIMP_B_FEMALE: Final = 1.67  # TRIMP-R1
+
+# --- session-RPE load (SRPE-R1) — the last-resort training_load class member ---
+# Foster's session-RPE scaled into the class's TSS-commensurate currency via the
+# RPE-as-intensity mapping (srpe_load = (RPE/full_scale)^2 * hours * per_hour). The
+# VALUES are NOT code literals (CFG-R1a): they load from ``[analytics]`` in the
+# packaged defaults.toml, typed + range-validated by ``Settings.analytics__srpe_*``.
+SRPE_RPE_FULL_SCALE: Final[float] = _analytics_default("srpe_rpe_full_scale")
+SRPE_LOAD_PER_HOUR_AT_FULL_SCALE: Final[float] = _analytics_default(
+    "srpe_load_per_hour_at_full_scale"
+)
 
 # --- HRV ---
 HRV_ARTIFACT_CEILING_FRAC: Final = 0.05  # HRV-R2

@@ -389,7 +389,7 @@ def _better_mmp(candidate: Computed[_mmp.MMPWindow], current: MetricResult[_mmp.
 def _curve_point(
     curve: dict[int, MetricResult[_mmp.MMPWindow]], duration_s: int
 ) -> MetricResult[float]:
-    """One MMP curve point's mean power as a scalar result (ES-R1 durability input).
+    """One MMP curve point's mean power as a scalar result (ES-R1 curve-shape input).
 
     An absent / non-``Computed`` duration is a typed ``Unavailable`` (fail-closed),
     never a fabricated point — the ES-R2 missing-component policy decides downstream.

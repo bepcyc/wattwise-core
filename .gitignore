@@ -26,6 +26,10 @@ junit*.xml
 /reports/
 /.scan/
 
+# mutmut working tree: generated mutants + verdicts + test-timing stats.
+# Persisted ONLY via the CI cache (T-MUT, issue #35 / ADR 0006), never committed.
+/mutants/
+
 # local data / scratch (the engine targets ONLY its own isolated store)
 *.sqlite
 *.sqlite3

@@ -17,7 +17,7 @@ import subprocess
 import tomllib
 
 import pytest
-from tools.mutation_gate import _FLOORS_PATH, load_floors
+from scripts.mutation_gate import _FLOORS_PATH, load_floors
 
 _REPO_ROOT = _FLOORS_PATH.parent
 

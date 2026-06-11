@@ -2,9 +2,9 @@
  {
   "adapter_version": "1",
   "confidence": 1.0,
-  "content_hash": "cc7a674c886de294158b6c1497a063275678e01af4583a6b55650e7f2a690699",
+  "content_hash": "44d00d19414e47a384115446dce1eee02faeea1c44baefd5574a40061801b6ad",
   "gbo_type": "activity",
-  "mapping_version": "1",
+  "mapping_version": "2",
   "observed_at": "2024-01-02 10:00:00+00:00",
   "payload": {
    "avg_cadence_rpm": null,
@@ -17,6 +17,7 @@
    "elapsed_time_s": null,
    "elevation_gain_m": null,
    "energy_kj": null,
+   "feel": null,
    "has_cadence": true,
    "has_gps": true,
    "has_hr": true,
@@ -37,6 +38,7 @@
    "max_hr_bpm": null,
    "max_power_w": null,
    "moving_time_s": null,
+   "perceived_exertion": null,
    "sport": "cycling",
    "start_time": "2024-01-02 10:00:00+00:00",
    "streams": {

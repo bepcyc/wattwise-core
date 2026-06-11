@@ -38,7 +38,9 @@ def test_packaged_training_load_class_loads() -> None:
         Fidelity.RAW_STREAM,
         Fidelity.PLATFORM_COMPUTED,
         Fidelity.MODELED,
+        Fidelity.SUMMARY_ONLY,
     ]
+    assert [m.metric for m in cls.members][-1] == "srpe_load"
     assert all(m.note and m.penalty for m in cls.members)
 
 

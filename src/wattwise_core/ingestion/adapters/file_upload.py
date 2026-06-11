@@ -143,7 +143,7 @@ class FileUploadAdapter:
     auth_archetype: ClassVar[AuthArchetype] = AuthArchetype.FILE_UPLOAD
     kind: ClassVar[SourceKind] = SourceKind.FILE_UPLOAD
     adapter_version: ClassVar[str] = "1"
-    mapping_version: ClassVar[str] = "1"
+    mapping_version: ClassVar[str] = "2"
     #: Static machine-readable capability declaration (ADP-R1; validated at
     #: registration, ADP-R2/ONB-R2). File import writes ONLY activities (the ADP-R3
     #: declared set the engine enforces) at full-stream granularity from the verbatim

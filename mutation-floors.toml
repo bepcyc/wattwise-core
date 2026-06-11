@@ -4,10 +4,10 @@
 # "caught" = killed or timed-out). Floors are a COMMITTED RATCHET BASELINE: they record
 # the package's measured mutation score and may ONLY EVER BE RAISED, never lowered.
 #   * The NIGHTLY T-MUT leg ENFORCES these floors — a drop below floor fails the build
-#     (`just test-mut-nightly` -> mutation_gate.py --enforce).
+#     (`just test-mut` -> scripts/mutation_gate.py --leg full).
 #   * The PR-stage T-MUT leg is ADVISORY — it reports the score + delta vs floor but
-#     never blocks (`just test-mut-pr` -> mutation_gate.py --advisory).
-# Floors are read as data by tools/mutation_gate.py (CFG-R1a: no hardcoded 90/85).
+#     never blocks (`just test-mut-pr` -> scripts/mutation_gate.py --leg pr).
+# Floors are read as data by scripts/mutation_gate.py (CFG-R1a: no hardcoded 90/85).
 #
 # RATCHET-UP-ONLY RULE: a PR may only RAISE a floor here, never lower it. The only edits
 # are upward ratchets. tests/unit/test_mutation_floors.py guards this: floors stay in
