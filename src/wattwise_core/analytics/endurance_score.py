@@ -143,7 +143,7 @@ def endurance_score(
     value = min(100.0, max(0.0, raw))  # ES-R3: the bound is part of the normalization
     confidence = ES_PARTIAL_CONFIDENCE_PENALTY if missing else 1.0
     # NOTE: these component keys ("ctl"/"curve_shape"/"decoupling") and the
-    # components_present/components_missing report are DERIVED PER REQUEST and NEVER PERSISTED.
+    # components_present/components_missing report are DERIVED PER REQUEST and NEVER STORED.
     # endurance-score is computed in-flight via AnalyticsService.endurance_score() (returns a
     # MetricResult[float]); it has no agent capability resolver (absent from
     # agent.capabilities.RESOLVERS), so it never enters durable agent state/checkpoints, and no
