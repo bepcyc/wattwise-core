@@ -48,27 +48,34 @@ for rest. A refusal you can trust beats a guess you cannot.
   Power, Intensity Factor, TSS, Critical Power and W′, W′bal, aerobic decoupling, HRV,
   TRIMP, session-RPE load, a durability measure, and more — all computed from your record.
   [docs/METRICS.md](docs/METRICS.md) explains what every number means.
-- **Works with what you already have.** Upload FIT, FIT.GZ, GPX, TCX, or PWX files
+- **Works with what you already have.** Upload FIT, FIT.GZ, GPX, or TCX files
   (including Strava bulk exports), or sync directly from intervals.icu. No new gadget to buy.
 
 ## Quick start
 
-You need [Docker](https://docs.docker.com/get-docker/) and three secrets the engine
-generates for you, plus an LLM key for the coach (any OpenAI-compatible endpoint —
+You need [Docker](https://docs.docker.com/get-docker/), two random secrets (one command
+each), and an LLM key for the coach (any OpenAI-compatible endpoint —
 [OpenRouter](https://openrouter.ai/), or a local [Ollama](https://ollama.com/) if you want
 to keep everything on your LAN). Build the image, then start it:
 
 ```sh
 docker build -t wattwise-core:local .    # or use a released image
 
+# Two secrets — keep SIGNING_KEY in your shell, it is also your login secret below
+ENCRYPTION_KEY=$(python3 -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())')
+SIGNING_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+
 docker run -d --name wattwise \
   -p 127.0.0.1:8000:8000 \
   -v wattwise_data:/var/lib/wattwise \
   -e WATTWISE_DATABASE_DSN='sqlite+aiosqlite:////var/lib/wattwise/wattwise.sqlite' \
-  -e WATTWISE_ENCRYPTION_ROOT_KEY="$(python3 -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())')" \
-  -e WATTWISE_TOKEN_SIGNING_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
+  -e WATTWISE_ENCRYPTION_ROOT_KEY="$ENCRYPTION_KEY" \
+  -e WATTWISE_TOKEN_SIGNING_KEY="$SIGNING_KEY" \
   -e WATTWISE_LLM_API_KEY='sk-...' \
   wattwise-core:local
+
+# Wait for it — first boot sets up the database, then this returns {"status":"ready", ...}
+curl --retry 15 --retry-delay 2 --retry-all-errors -fsS http://127.0.0.1:8000/readyz
 ```
 
 That is a complete setup. Your database and your uploaded files live on the `wattwise_data`
@@ -76,8 +83,8 @@ volume. On first boot the container builds its own database, so there is no extr
 step. Your data is encrypted at rest, every request needs your token, the process runs as an
 unprivileged user, and a bad configuration stops startup instead of running on quietly.
 
-Now make your first requests. The secret you set as `WATTWISE_TOKEN_SIGNING_KEY` is also the
-owner secret that mints your first access token:
+Now make your first requests. Your `SIGNING_KEY` is also the owner secret that mints your
+first access token:
 
 ```sh
 BASE=http://127.0.0.1:8000
@@ -85,11 +92,11 @@ BASE=http://127.0.0.1:8000
 # 1. Get an access token
 TOKEN=$(curl -fsS -X POST "$BASE/v1/auth/token" \
   -H 'Content-Type: application/json' \
-  -d "{\"owner_secret\":\"$WATTWISE_TOKEN_SIGNING_KEY\"}" \
+  -d "{\"owner_secret\":\"$SIGNING_KEY\"}" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
 AUTH="Authorization: Bearer $TOKEN"
 
-# 2. Upload a ride (FIT / GPX / TCX / PWX) and bring it in
+# 2. Upload a ride (FIT / FIT.GZ / GPX / TCX) and bring it in
 curl -fsS -X POST "$BASE/v1/imports" -H "$AUTH" -F file=@ride.fit
 curl -fsS -X POST "$BASE/v1/sync/run" -H "$AUTH"
 
@@ -111,9 +118,9 @@ one checked against a real running container.
 ## How it works
 
 ```
-your sources  →  one honest record  →  sports-science numbers  →  grounded coach  →  API
-(FIT/GPX/TCX/    (de-duplicated,        (PMC, CP/W', HRV,          (every claim
- PWX, intervals)  conflicts resolved)    decoupling, TRIMP...)      checked, or removed)
+your sources   →  one honest record  →  sports-science numbers  →  grounded coach  →  API
+(FIT/GPX/TCX,     (de-duplicated,        (PMC, CP/W', HRV,           (every claim
+ intervals.icu)    conflicts resolved)    decoupling, TRIMP...)       checked, or removed)
 ```
 
 ![wattwise-core high-level architecture](./assets/img/wattwise-high-level-architecture.png)
