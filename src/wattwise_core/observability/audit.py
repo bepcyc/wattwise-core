@@ -3,19 +3,23 @@
 LOG-R6 mandates three correlated but DISTINCT log streams; this module is the second:
 the tamper-evident AUDIT stream carrying authentication events, entitlement/plan
 decisions, source connect/disconnect, admin/operator actions, and data export/erasure
-(PRIV-R8/R9). Every audit event is emitted through the same central allowlist redactor
-as the application stream (LOG-R5 — the redactor runs on EVERY stream) onto
-stdout (LOG-R1: the platform ships/retains it, with the audit stream's own, longer
+(PRIV-R8/R9). Every audit event's PAYLOAD passes the same central allowlist redaction
+policy as the application stream (LOG-R5 — redaction runs on EVERY stream), applied
+BEFORE hashing and again (idempotently) by the dedicated audit pipeline at emission,
+onto stdout (LOG-R1: the platform ships/retains it, with the audit stream's own, longer
 retention window — LOG-R9), and is distinguishable by the constant ``stream="audit"``
-field so the shipper can route it to its dedicated, longer-retention sink.
+field — shipped VERBATIM by the dedicated pipeline — so the shipper can route it to its
+dedicated, longer-retention sink.
 
 Tamper evidence (LOG-R6.2) is a per-process SHA-256 hash chain: each event carries
 ``audit_seq`` (monotonic), ``prev_hash`` (the previous event's ``entry_hash``), and
 ``entry_hash`` = SHA-256 over the canonicalized event payload **including the
-``stream`` discriminator and ``audit_seq``** + ``prev_hash``. Removing, reordering,
-renumbering (``audit_seq`` tamper), stream-swapping, or editing any emitted event
-breaks verification, so the stream is verifiable append-only from the records alone
-(:func:`verify_chain`).
+``stream`` discriminator and ``audit_seq``** + ``prev_hash``. The hashed payload is the
+FINAL, redacted, correlation-context-bearing form — exactly what ships — so the chain
+is verifiable from the SHIPPED lines alone, not just from in-process records. Removing,
+reordering, renumbering (``audit_seq`` tamper), stream-swapping, or editing any emitted
+event breaks verification, so the stream is verifiable append-only from the records
+alone (:func:`verify_chain`).
 
 LOG-R8's per-athlete erasure hook is :func:`record_erasure_hook`: a PRIV-R8 erasure
 emits an audit event naming the erased athlete so the platform's log retention layer
@@ -31,7 +35,9 @@ import json
 import threading
 from typing import Any
 
-from wattwise_core.observability.logging import get_audit_logger
+import structlog
+
+from wattwise_core.observability.logging import audit_redact_processor, get_audit_logger
 
 #: The constant stream discriminator carried on every audit event (LOG-R6.2).
 AUDIT_STREAM = "audit"
@@ -101,19 +107,34 @@ _chain = _AuditChain()
 def audit_event(event: str, **fields: Any) -> dict[str, Any]:
     """Append ONE event to the tamper-evident audit stream (LOG-R6.2).
 
-    Computes the hash-chain triplet (``audit_seq``/``prev_hash``/``entry_hash``) under a
-    process lock so concurrent emitters cannot fork the chain, then emits through the
-    DEDICATED audit-stream logger — which applies the mandatory allowlist redaction
-    (LOG-R5/PRIV-R5) to the event PAYLOAD but ships the four structural chain-descriptor
-    keys verbatim, so the EMITTED line round-trips through :func:`verify_chain`
-    (LOG-R6.2 shipped-line verifiability). Returns the chained record
-    (useful to tests and to callers that persist a receipt). Never raises into the
-    caller's request path: a logging error must not turn a successful operation into a
-    500 (the platform's stream monitor owns emit-failure alerting).
+    The hash must commit to the SHIPPED bytes (LOG-R6.2 shipped-line verifiability),
+    so the payload is finalized BEFORE chaining: the bound LOG-R3 correlation context
+    (``request_id``/``trace_id``/…) is merged in, the reserved envelope keys are
+    dropped, and the central allowlist redaction (LOG-R5/PRIV-R5) is applied via
+    :func:`audit_redact_processor`. Only THEN is the hash-chain triplet
+    (``audit_seq``/``prev_hash``/``entry_hash``) computed under a process lock (so
+    concurrent emitters cannot fork the chain) and the record emitted through the
+    DEDICATED audit-stream logger, whose pipeline re-runs the same idempotent
+    redaction as defence in depth and ships the chain-descriptor keys verbatim.
+    Hash-THEN-redact is the trap this ordering avoids: a payload field masked only at
+    emission (e.g. a non-allowlisted ``rows_deleted`` int), or a correlation key
+    merged only at emission, makes the emitted line differ from the hashed payload —
+    so the shipped line could never verify. Returns the chained record in its
+    redacted, shipped form (the receipt equals the emitted line minus the render
+    envelope). Never raises into the caller's request path: a logging error must not
+    turn a successful operation into a 500 (the platform's stream monitor owns
+    emit-failure alerting).
     """
-    record = _chain.append({"event": event, **fields})
+    context = structlog.contextvars.get_contextvars()
+    raw = {**context, **fields, "event": event}
+    payload = dict(
+        audit_redact_processor(
+            None, "info", {k: v for k, v in raw.items() if k not in _ENVELOPE_KEYS}
+        )
+    )
+    record = _chain.append(payload)
     with contextlib.suppress(Exception):
-        _logger.info(event, **{k: v for k, v in record.items() if k != "event"})
+        _logger.info(str(record["event"]), **{k: v for k, v in record.items() if k != "event"})
     return record
 
 

@@ -334,7 +334,11 @@ def get_audit_logger() -> Any:
     return structlog.wrap_logger(
         structlog.PrintLogger(file=sys.stdout),
         processors=[
-            structlog.contextvars.merge_contextvars,  # LOG-R3 correlation context
+            # NO merge_contextvars here: the bound LOG-R3 correlation context is merged
+            # into the audit payload BEFORE hashing (``audit_event``), so it ships as
+            # part of the hashed record. Merging it again at emission would add
+            # UNHASHED keys to the line and break shipped-line verification for every
+            # request-scoped audit event.
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),  # LOG-R2 UTC ISO-8601
             audit_redact_processor,  # LOG-R5/R6.2 — payload PII redacted, chain keys exempt

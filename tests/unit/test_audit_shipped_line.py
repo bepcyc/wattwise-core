@@ -31,6 +31,7 @@ import json
 from typing import Any
 
 import pytest
+import structlog
 
 from wattwise_core.observability.audit import (
     audit_event,
@@ -137,3 +138,63 @@ def test_pii_in_an_audit_payload_is_still_redacted_on_the_emitted_line() -> None
     serialized = json.dumps(line)
     assert "Baker Street" not in serialized
     assert "rider@example.com" not in serialized
+    # And the shipped line STILL verifies: the hash committed to the redacted form,
+    # so masking a payload field never costs the chain its verifiability.
+    assert verify_chain(emitted) is True
+
+
+def test_shipped_line_verifies_with_bound_request_context() -> None:
+    """A request-scoped audit event ships its correlation context AND verifies (LOG-R3/R6.2).
+
+    Regression: every real API call runs with ``request_id``/``trace_id`` bound by the
+    request middleware. The context is merged into the payload BEFORE hashing — merging
+    it only at emission (a ``merge_contextvars`` processor on the audit pipeline) puts
+    UNHASHED keys on the line, and the shipped chain then fails verification for every
+    request-scoped audit event.
+    """
+    structlog.contextvars.bind_contextvars(request_id="req-123", trace_id="trace-9")
+    try:
+        emitted = _emit_and_capture(
+            [
+                ("auth_token_issued", {"athlete_id": "a-1"}),
+                ("data_export_started", {"athlete_id": "a-1"}),
+            ]
+        )
+    finally:
+        structlog.contextvars.clear_contextvars()
+    # The correlation context is ON the shipped line (LOG-R3) ...
+    assert emitted[0]["request_id"] == "req-123"
+    assert emitted[1]["trace_id"] == "trace-9"
+    # ... and, being hashed, it is tamper-evident and the line still verifies.
+    assert verify_chain(emitted) is True
+    relinked = [dict(line) for line in emitted]
+    relinked[1]["request_id"] = "req-999"
+    assert verify_chain(relinked) is False
+
+
+def test_shipped_line_verifies_when_a_payload_field_is_redacted() -> None:
+    """The hash commits to the SHIPPED (redacted) bytes, not the raw payload (LOG-R6.2).
+
+    Regression: real call sites emit non-allowlisted payload fields (e.g.
+    ``erasure_completed`` carries ``rows_deleted``, an int outside the numeric
+    allowlist). Those ship masked — and because redaction runs BEFORE hashing, the
+    shipped line still round-trips through ``verify_chain``. Hash-then-redact instead
+    makes every such event break the shipped chain.
+    """
+    emitted = _emit_and_capture(
+        [
+            ("erasure_completed", {"athlete_id": "a-1", "rows_deleted": 42}),
+            ("original_files_purged", {"count": 3, "retention_days": 30}),
+        ]
+    )
+    # The allowlist still governs the payload: the raw values never leave the process.
+    assert emitted[0]["rows_deleted"] == "[REDACTED]"
+    assert emitted[1]["count"] == "[REDACTED]"
+    assert 42 not in emitted[0].values()
+    assert 30 not in emitted[1].values()
+    # The shipped lines verify on their own bytes.
+    assert verify_chain(emitted) is True
+    # Un-masking (editing) the stored field breaks verification — the mask is hashed.
+    broken = [dict(line) for line in emitted]
+    broken[0]["rows_deleted"] = 42
+    assert verify_chain(broken) is False
