@@ -122,7 +122,9 @@ Performance Management Chart: [ctl](#chronic-training-load-ctl) · [atl](#acute-
 
 Power family: [np](#normalized-power-np) · [if_](#intensity-factor-if_) ·
 [critical_power_w](#critical-power-critical_power_w) · [w_prime_j (computed)](#anaerobic-work-capacity-fit-w_prime_j) ·
-[power_curve](#power-curve-power_curve) · [wbal](#wbalance-wbal)
+[power_curve](#power-curve-power_curve) · [wbal](#wbalance-wbal) ·
+[work_above_cp_j](#work-above-critical-power-work_above_cp_j) ·
+[durability_decrement](#durability-decrement-durability_decrement)
 
 Efficiency family: [efficiency_factor](#efficiency-factor-efficiency_factor) ·
 [variability_index](#variability-index-variability_index) · [intensity_class](#intensity-class-intensity_class) ·
@@ -2745,6 +2747,74 @@ exhausted the reserve.
 **Caveats.** Sensitive to correct critical power and W'. The negative-allowed default and the
 optional floor are explicit, reported policies.
 
+### Work above critical power (`work_above_cp_j`)
+
+**Units:** joules.
+
+The intensity-weighted work you did above critical power across an effort — the "how much did
+this ride dig into the anaerobic reserve" signal, not just total kilojoules.
+
+**Formula.** The running sum, second by second, of power above critical power:
+`Σ max(0, P(t) - CP)` over the 1-second power stream (watts × second = joules); the metric is
+the whole-effort total. A gap second contributes exactly zero and carries the total forward
+unchanged. (Computed by the analytics engine.) Unlike raw kilojoules, this weights hard
+seconds and ignores easy ones, so it tracks anaerobic strain rather than mere volume.
+
+**Inputs & when unavailable.** Needs a true mechanical power channel and a critical power.
+Unavailable without power or without critical power; not applicable for sports without power.
+The engine never substitutes FTP for critical power silently.
+
+**Typical values.** Zero on an easy ride spent entirely below critical power; rises with time
+spent above it. Strongly individual and effort-dependent, so no universal reference applies.
+
+**How it moves state.** It is the fatigue axis behind the durability decrement: the durability
+comparison splits a ride at the point where this accumulated work crosses a personal threshold.
+
+**Reading trends.** Higher for races and hard interval sessions; near zero for recovery rides.
+Compare similar effort types against your own history.
+
+**Caveats.** Depends on a correct critical power — a stale critical power shifts every value.
+It measures work above critical power, not total mechanical work; the two are different numbers.
+
+### Durability decrement (`durability_decrement`)
+
+**Units:** percent (decline in best sustained power, fresh vs. fatigued).
+
+How much your best sustainable power for a target duration drops once you are fatigued — your
+fatigue resistance. Two riders with identical fresh fitness can differ greatly here, and the
+one who holds more power late typically wins.
+
+**Formula.** The effort is split at the second where accumulated work above critical power first
+reaches a personal threshold (a configurable multiple of your own anaerobic capacity W'). The
+best target-duration average power (default five minutes) is taken in the fresh segment before
+the split and in the fatigued segment at or after it, and the decrement is
+`100 × (1 - fatigued_best / fresh_best)`. (Computed by the analytics engine, after the
+work-conditioned fatigue-resistance literature.) A positive value means power dropped under
+fatigue (the expected direction); a negative value means you went harder late and is reported
+raw, never clamped.
+
+**Inputs & when unavailable.** Needs a power channel, a critical power, and an anaerobic
+capacity W' to anchor the personal threshold; it is a cycling-power metric and is not applicable
+for sports without power. Unavailable — rather than a falsely confident "100% retained" — when
+the fatigue threshold is never reached (the ride never produced a genuinely fatigued state) or
+either segment lacks a full target-duration effort to compare. An advisory flag is raised when
+the fresh "best" effort did not even reach critical power, since it was probably not maximal and
+the ratio should be read with care.
+
+**Typical values.** Small single-digit percentages for durable riders over a hard ride; larger
+declines indicate weaker fatigue resistance. Strongly individual; read it against your own
+history at comparable accumulated work.
+
+**How it moves state.** A standalone fatigue-resistance descriptor for long-effort and race
+analysis. It is distinct from the rested power-duration shape that feeds the endurance score.
+
+**Reading trends.** Falling decrement at similar accumulated work over a season means improving
+durability — you are holding more of your fresh power deep into hard efforts.
+
+**Caveats.** Only meaningful when the ride actually reached a fatigued state with hard efforts on
+both sides of the split; most easy rides will simply report it as unavailable. Sensitive to a
+correct critical power and W'. A negative value (going harder late) is honest, not an error.
+
 ## Efficiency family
 
 These metrics describe how smooth, how efficient, and how drift-resistant an effort was.
@@ -2919,10 +2989,13 @@ summary is the source's own number.)
 A single bounded summary of your current aerobic endurance capacity, composed only from
 metrics already defined.
 
-**Formula.** A documented, weighted, normalized blend of chronic training load (CTL), a
-long-duration power durability ratio from the power curve, and aerobic decoupling (lower
-drift scores higher), each normalized to 0-1 and combined to a 0-100 score over the present
-components. (Computed by the analytics engine.) It introduces no new physiological model.
+**Formula.** A documented, weighted, normalized blend of chronic training load (CTL), the
+shape of your rested power-duration curve (how well long-duration power holds up relative to
+shorter efforts), and aerobic decoupling (lower drift scores higher), each normalized to 0-1
+and combined to a 0-100 score over the present components. (Computed by the analytics engine.)
+It introduces no new physiological model. The rested power-duration shape used here is distinct
+from the work-conditioned `durability_decrement` metric, which measures fatigue resistance
+within a single fatiguing effort.
 
 **Inputs & when unavailable.** CTL is required; the power-family components may be absent.
 Unavailable when a non-substitutable component (CTL) is missing; otherwise it composes on
@@ -2935,8 +3008,8 @@ The mapping is a declared normalization, so no external reference range applies.
 **How it moves state.** A high-level fitness summary for the athlete view; it composes
 existing metrics rather than feeding new computation.
 
-**Reading trends.** Rises with higher chronic load, better long-duration durability, and
-lower decoupling. It moves monotonically in each component in the documented direction.
+**Reading trends.** Rises with higher chronic load, a stronger long-duration power-curve shape,
+and lower decoupling. It moves monotonically in each component in the documented direction.
 
 **Caveats.** Distinct from any source-reported endurance score. As a composite it inherits
 the caveats of its inputs; when computed on a partial component set, its confidence is

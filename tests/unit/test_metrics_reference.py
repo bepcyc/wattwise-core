@@ -83,6 +83,8 @@ _DOCUMENTED_NON_INVENTORY: frozenset[str] = frozenset(
         "decoupling",  # computed aerobic decoupling (per-activity analytics)
         "power_curve",  # computed mean-maximal-power curve (power analytics)
         "wbal",  # computed W'balance series (power analytics)
+        "work_above_cp_j",  # computed cumulative intensity-weighted work above CP (power analytics)
+        "durability_decrement",  # computed fresh-vs-fatigued power decrement (durability analytics)
         "trimp",  # computed heart-rate training impulse (HR analytics)
     }
 )
