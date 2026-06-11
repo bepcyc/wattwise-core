@@ -8,9 +8,17 @@ redactor.
 from __future__ import annotations
 
 from wattwise_core.observability.logging import (
+    audit_redact_processor,
     configure_logging,
+    get_audit_logger,
     get_logger,
     redact_processor,
 )
 
-__all__ = ["configure_logging", "get_logger", "redact_processor"]
+__all__ = [
+    "audit_redact_processor",
+    "configure_logging",
+    "get_audit_logger",
+    "get_logger",
+    "redact_processor",
+]
