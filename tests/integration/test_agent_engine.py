@@ -42,6 +42,8 @@ from wattwise_core.agent.engine import (
     _PlanSchema,
     build_agent_engine,
 )
+from wattwise_core.agent.engine_services import CoachBundle
+from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.model import FakeModel
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.config import load_settings
@@ -667,6 +669,56 @@ async def test_readiness_fresh_form_is_go() -> None:
     readiness = await engine.readiness(athlete_id=OWNER_SUBJECT)
     assert readiness.verdict is ReadinessVerdict.GO
     assert not any(ch.isdigit() for ch in first_sentence(readiness.summary_text))
+
+
+class _SystemRecordingModel(FakeModel):
+    """A FakeModel that ALSO records the system prompt each structured call received."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.systems: list[str] = []
+
+    async def structured(self, *, system: str, data: str, schema: type):  # type: ignore[override,no-untyped-def]
+        self.systems.append(system)
+        return await super().structured(system=system, data=data, schema=schema)
+
+
+async def test_readiness_narrator_system_carries_the_requested_language_directive() -> None:
+    """The readiness narrator's system prompt is composed via the any-language DIRECTIVE (#17).
+
+    A non-en/de/ru locale ("es") reaches the narrator as a config-templated directive naming that
+    exact language tag — proving the readiness path is directive-driven (the SAME ``compose_system``
+    seam the free-form answer uses), NOT served by an enumerated readiness language pack.
+    """
+    today = utcnow().date()
+    rides = [(today - _dt.timedelta(days=4 - i), 320.0) for i in range(5)]
+    database, _, _ = await _seed_store(rides)
+    model = _SystemRecordingModel(
+        scripted={
+            "_ReadinessNarration": _ReadinessNarration(
+                summary_text="Hoy toca descansar.", verdict=ReadinessVerdict.REST
+            ),
+            "_ClaimSchema": _ClaimSchema(claims=[]),
+        }
+    )
+    # A config-templated pass-through coach bundle (NO Spanish pack — only the directive template).
+    coach = CoachBundle(
+        readiness_system="readiness persona",
+        locales=LocalePolicy.from_config(
+            {"en": {"compose_directive": "Reply in English.", "limitation": "Not enough data."}},
+            "en",
+            passthrough_enabled=True,
+            passthrough_directive="Answer in the language with IETF tag '{language_tag}'.",
+        ),
+    )
+    engine = GraphAgentEngine(database, model, coach=coach)  # type: ignore[arg-type]
+    readiness = await engine.readiness(athlete_id=OWNER_SUBJECT, locale="es")
+    assert readiness.verdict is ReadinessVerdict.REST
+    assert model.systems, "the narrator must have been called with a composed system prompt"
+    narrator_system = model.systems[0]
+    assert narrator_system.startswith("readiness persona")
+    assert "'es'" in narrator_system  # the directive names the requested (unenumerated) language
+    assert "Reply in English." not in narrator_system  # not the default pack (no enumeration)
 
 
 async def test_readiness_consistency_gate_overrides_model_go_to_rest() -> None:

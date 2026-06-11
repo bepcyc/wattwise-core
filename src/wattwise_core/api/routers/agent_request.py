@@ -10,6 +10,7 @@ API-R11e), the ``Accept-Language`` -> locale resolution (API-R37), and the respo
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from wattwise_core.api.errors import FieldError, ProblemError
@@ -31,28 +32,38 @@ def validate_request(body: AgentAskRequest) -> None:
         )
 
 
-#: The languages this surface localizes athlete-facing copy into (API-R37).
+#: The locales for which this surface ships model-free fail-closed COPY (degraded reason
+#: gloss / limitation floor, API-R37). NOT an allow-list for the coach's output language —
+#: the coach answers in ANY language via the directive (LANG-R1/-R3). An unenumerated locale
+#: still drives the directive; only the model-free sentences fall back to the English floor.
 SUPPORTED_LOCALES: Final[frozenset[str]] = frozenset({"en", "de", "ru"})
+
+#: BCP-47-shaped gate for a header language tag (mirrors the body field + INJECT-R1): a primary
+#: language subtag + optional subtags only, so a malformed/garbage header tag is ignored rather
+#: than passed through to the directive.
+_HEADER_TAG_RE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")
 
 
 def scan_header_locale(accept_language: str | None) -> str | None:
-    """The first SUPPORTED ``Accept-Language`` tag (en/de/ru), else ``None`` (API-R37).
+    """The first well-formed ``Accept-Language`` language tag, else ``None`` (API-R37).
 
-    The single header-scan the locale resolvers share: it reads the first supported
-    two-letter language tag from the comma-separated header, ignoring quality weights.
-    Returning ``None`` (not ``en``) lets the caller fall through to the PERSISTED
-    setting before the engine ``en`` baseline (the API-R37 precedence chain).
+    The single header-scan the locale resolvers share. Per the any-language ruling
+    (LANG-R1/-R3) it is NOT clamped to an enumerated set: it returns the first BCP-47-shaped
+    primary language subtag from the comma-separated header (quality weights ignored), so a
+    ``fr`` / ``pt-BR`` header drives the directive in that language just like en/de/ru. A
+    malformed/garbage tag is skipped. Returning ``None`` (not ``en``) lets the caller fall
+    through to the PERSISTED setting before the engine ``en`` baseline (the API-R37 chain).
     """
     if accept_language:
         for part in accept_language.split(","):
-            tag = part.split(";", 1)[0].strip().lower()[:2]
-            if tag in SUPPORTED_LOCALES:
-                return tag
+            raw = part.split(";", 1)[0].strip().lower()
+            if _HEADER_TAG_RE.match(raw):
+                return raw.split("-", 1)[0]
     return None
 
 
 def header_locale(accept_language: str | None) -> str:
-    """The first supported ``Accept-Language`` tag (en/de/ru), else the default ``en``."""
+    """The first well-formed ``Accept-Language`` language tag, else the default ``en`` (API-R37)."""
     return scan_header_locale(accept_language) or "en"
 
 
@@ -65,7 +76,10 @@ def resolve_locale(
     setting (the language subtag of ``athlete.primary_locale``, loaded server-side and
     passed as ``persisted``) -> the engine ``en`` baseline. The persisted default is the
     one applied to every athlete-facing agent answer when no per-request value is given
-    (API-R37); a per-request value never mutates it.
+    (API-R37); a per-request value never mutates it. The resolved locale drives the
+    any-language compose DIRECTIVE (LANG-R1/-R3): ``body.language`` and the header both
+    pass through ANY well-formed BCP-47 tag (validated, never allow-listed); only the
+    persisted-fallback rung is restricted to the locales with model-free fail-closed copy.
     """
     if body.language is not None:
         return body.language

@@ -34,7 +34,7 @@ from wattwise_core.agent.engine_memory import (
 from wattwise_core.agent.engine_readiness import (
     connection_sync_suspect,
     gather_readiness_inputs,
-    readiness_narrator,
+    localized_readiness_narrator,
 )
 from wattwise_core.agent.engine_services import CoachBundle
 from wattwise_core.agent.memory import (
@@ -135,6 +135,9 @@ class DeliverableEngineMixin:
         the deterministic oracle's (canonical wins), numbers surface only as grounded citations.
         Readiness does NOT route through the durable checkpointer (a single deterministic
         assessment, not a resumable conversation), so no agent-state pool is opened here.
+
+        The narrator speaks the requested language via the any-language DIRECTIVE (issue #17,
+        LANG-R1/-R3): see :func:`localized_readiness_narrator`.
         """
         async with self._sessions.session(subject=athlete_id) as session:
             svc = AnalyticsService(session)
@@ -154,7 +157,9 @@ class DeliverableEngineMixin:
                 hrv_rmssd=inputs.hrv_rmssd,
                 hrv_baseline=inputs.hrv_baseline,
                 sufficiency=inputs.sufficiency,
-                narrate=readiness_narrator(self._model, system=self._coach.readiness_system),
+                # LANG-R1/-R3 (issue #17): the narrator's system prompt carries the run locale's
+                # any-language DIRECTIVE (compose_system) — NOT an enumerated language pack.
+                narrate=localized_readiness_narrator(self._model, self._coach, locale),
                 grounder=self._coach.grounder(self._model, svc),
                 response_length=response_length,  # type: ignore[arg-type]
             )

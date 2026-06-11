@@ -83,7 +83,20 @@ class AgentAskRequest(BaseModel):
     thread_id: str | None = None
     response_length: ResponseLength | None = None
     follow_up: FollowUp | None = None
-    language: Literal["en", "de", "ru"] | None = None
+    language: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+        max_length=35,
+        description=(
+            "Per-call language override, an IETF BCP-47 tag (e.g. 'en', 'pt-BR'). The coach "
+            "answers in ANY language the model speaks via a config-templated DIRECTIVE "
+            "(LANG-R1/-R3) — language is NEVER enumerated or allow-listed here, so this is a "
+            "validated free tag, not a closed set. A malformed tag fails closed as a 422 "
+            "(the shape gate, INJECT-R1); a well-formed tag drives the directive. Model-free "
+            "fail-closed sentences (degraded/limitation copy) keep their English floor for an "
+            "unenumerated locale by design (API-R37)."
+        ),
+    )
     stream: bool = False
 
 

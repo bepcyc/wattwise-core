@@ -262,10 +262,28 @@ def readiness_narrator(
     return narrate
 
 
+def localized_readiness_narrator(
+    model: ChatModel, coach: Any, locale: str
+) -> Callable[[str], Awaitable[_ReadinessNarration]]:
+    """The readiness narrator whose system prompt carries the run locale's directive (issue #17).
+
+    Composes the narrator's system prompt through the SAME any-language ``compose_system`` seam the
+    free-form answer's compose node uses (graph_model_nodes.compose, LANG-R1/-R3): the run locale's
+    config-templated directive — NOT an enumerated per-language pack — is layered onto the readiness
+    persona, so the model narrates the readiness verdict IN the requested language (any language the
+    model speaks; the LANG-R4 fallback is recorded). Grounding and the deterministic oracle verdict
+    stay language-neutral (LANG-R3). ``coach`` is the engine's loaded coach bundle (its ``locales``
+    policy + ``readiness_system`` persona).
+    """
+    system = coach.locales.compose_system(coach.readiness_system, locale)
+    return readiness_narrator(model, system=system)
+
+
 __all__ = [
     "ReadinessInputs",
     "connection_is_suspect",
     "connection_sync_suspect",
     "gather_readiness_inputs",
+    "localized_readiness_narrator",
     "readiness_narrator",
 ]
