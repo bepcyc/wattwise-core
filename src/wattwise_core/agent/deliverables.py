@@ -332,6 +332,12 @@ def _detailed_citation_floor(
     GROUND-R7) — de-duplicated by record id. It NEVER fabricates: with no grounded observation it
     leaves the list empty (an honestly citation-free answer stays so). It applies ONLY to a
     successful ``detailed`` turn; a degraded/abstained run or a shorter length is untouched.
+
+    SCOPE (issue #18, intentional): this is a FULLY-EMPTY backfill, not a per-citation top-up. The
+    ``or citations`` guard means a projection that already surfaced >=1 citation is left exactly as
+    projected — even a detailed answer with a single (e.g. stale) citation alongside many grounded
+    observations is NOT augmented. The floor's job is only to prevent the zero-citation detailed
+    answer that reads as ungrounded; enriching a non-empty list is out of #18 scope by design.
     """
     if response_length != "detailed" or status is not RunStatus.COMPLETED or citations:
         return citations

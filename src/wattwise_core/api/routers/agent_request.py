@@ -45,25 +45,56 @@ _HEADER_TAG_RE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")
 
 
 def scan_header_locale(accept_language: str | None) -> str | None:
-    """The first well-formed ``Accept-Language`` language tag, else ``None`` (API-R37).
+    """The highest-quality well-formed ``Accept-Language`` tag, else ``None`` (API-R37).
 
     The single header-scan the locale resolvers share. Per the any-language ruling
-    (LANG-R1/-R3) it is NOT clamped to an enumerated set: it returns the first BCP-47-shaped
-    primary language subtag from the comma-separated header (quality weights ignored), so a
-    ``fr`` / ``pt-BR`` header drives the directive in that language just like en/de/ru. A
-    malformed/garbage tag is skipped. Returning ``None`` (not ``en``) lets the caller fall
-    through to the PERSISTED setting before the engine ``en`` baseline (the API-R37 chain).
+    (LANG-R1/-R3) it is NOT clamped to an enumerated set, and it preserves the FULL well-formed
+    BCP-47 tag (script/region subtags intact): a ``zh-Hant`` / ``pt-BR`` header drives the
+    directive as ``zh-Hant`` / ``pt-BR``, exactly like the body ``language`` field — one tag, one
+    semantics across both surfaces (the directive template handles any tag). The shape gate is the
+    SAME BCP-47 pattern the body field uses (``_HEADER_TAG_RE``), so a malformed/garbage entry is
+    skipped. Quality weights ARE honoured: the highest-``q`` well-formed entry wins (ties keep the
+    earlier entry, the listed-order preference); an explicit ``q=0`` entry is dropped (RFC 9110:
+    "not acceptable"). Returning ``None`` (not ``en``) lets the caller fall through to the PERSISTED
+    setting before the engine ``en`` baseline (the API-R37 chain).
     """
-    if accept_language:
-        for part in accept_language.split(","):
-            raw = part.split(";", 1)[0].strip().lower()
-            if _HEADER_TAG_RE.match(raw):
-                return raw.split("-", 1)[0]
-    return None
+    if not accept_language:
+        return None
+    best_tag: str | None = None
+    best_q = -1.0
+    for part in accept_language.split(","):
+        fields = part.split(";")
+        raw = fields[0].strip().lower()
+        if not _HEADER_TAG_RE.match(raw):
+            continue
+        q = _parse_quality(fields[1:])
+        if q <= 0.0:
+            continue
+        if q > best_q:
+            best_q = q
+            best_tag = raw
+    return best_tag
+
+
+def _parse_quality(params: list[str]) -> float:
+    """The ``q`` weight for one ``Accept-Language`` entry (default ``1.0`` when absent/malformed).
+
+    Honours only the ``q=`` parameter (other parameters are ignored); a non-numeric or
+    out-of-range value is treated as the default ``1.0`` rather than failing the whole header.
+    """
+    for param in params:
+        key, _, value = param.partition("=")
+        if key.strip().lower() != "q":
+            continue
+        try:
+            return float(value.strip())
+        except ValueError:
+            return 1.0
+    return 1.0
 
 
 def header_locale(accept_language: str | None) -> str:
-    """The first well-formed ``Accept-Language`` language tag, else the default ``en`` (API-R37)."""
+    """The highest-quality well-formed ``Accept-Language`` tag, else default ``en`` (API-R37)."""
     return scan_header_locale(accept_language) or "en"
 
 

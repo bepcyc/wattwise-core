@@ -23,7 +23,7 @@ import math
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +45,9 @@ from wattwise_core.analytics.sufficiency import RecordSufficiency, assess_record
 from wattwise_core.domain.enums import ConnectionStatus, Fidelity
 from wattwise_core.persistence.models import Connection
 from wattwise_core.persistence.types import utcnow
+
+if TYPE_CHECKING:
+    from wattwise_core.agent.engine_services import CoachBundle
 
 # The trailing window the readiness gather scans for the latest canonical TSB (form) and
 # HRV day. The readiness JTBD is FIXED — its inputs are gathered deterministically here,
@@ -263,7 +266,7 @@ def readiness_narrator(
 
 
 def localized_readiness_narrator(
-    model: ChatModel, coach: Any, locale: str
+    model: ChatModel, coach: CoachBundle, locale: str
 ) -> Callable[[str], Awaitable[_ReadinessNarration]]:
     """The readiness narrator whose system prompt carries the run locale's directive (issue #17).
 

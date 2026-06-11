@@ -69,11 +69,41 @@ def test_request_language_override_drives_resolve_for_an_unenumerated_locale() -
 
 @pytest.mark.parametrize(
     ("header", "expected"),
-    [("fr", "fr"), ("pt-BR,en;q=0.5", "pt"), ("ja", "ja"), ("de", "de"), ("en-US", "en")],
+    [
+        ("fr", "fr"),
+        ("ja", "ja"),
+        ("de", "de"),
+        # The FULL well-formed tag survives — script/region subtags are NOT truncated, so the
+        # header path matches the body ``language`` field's semantics (one tag, one meaning).
+        ("pt-BR", "pt-br"),
+        ("zh-Hant", "zh-hant"),
+        ("en-US", "en-us"),
+        # The highest-q well-formed entry wins, keeping all its subtags (here pt-BR over en).
+        ("en;q=0.5,pt-BR;q=0.9", "pt-br"),
+        # First well-formed entry still wins when no q-values are given (listed-order preference).
+        ("pt-BR,en", "pt-br"),
+    ],
 )
 def test_header_locale_passes_through_any_well_formed_tag(header: str, expected: str) -> None:
-    """The ``Accept-Language`` scan is NOT clamped to en/de/ru; any shaped tag drives it (#17)."""
+    """The ``Accept-Language`` scan is NOT clamped to en/de/ru and keeps the FULL tag (#17).
+
+    A ``zh-Hant`` / ``pt-BR`` header drives the directive as ``zh-Hant`` / ``pt-BR`` (script and
+    region preserved), end to end, exactly like the body ``language`` field — no truncation to the
+    primary subtag. The highest-quality well-formed entry is selected (ties keep the earlier one).
+    """
     assert scan_header_locale(header) == expected
+
+
+@pytest.mark.parametrize("tag", ["pt-BR", "zh-Hant"])
+def test_full_header_tag_survives_through_resolve_locale(tag: str) -> None:
+    """A script/region header tag drives ``resolve_locale`` INTACT (header -> resolve, #17).
+
+    With no body override, the resolver returns the full lowercased header tag verbatim (the
+    chosen entry keeps all its subtags), so the same tag reaches the any-language directive that
+    the body ``language`` field would — proving the two surfaces share one semantics end to end.
+    """
+    body = AgentAskRequest(question="?")
+    assert resolve_locale(body, accept_language=tag, persisted="en") == tag.lower()
 
 
 @pytest.mark.parametrize("header", ["", "***", "1", ";q=0.9", "  "])
@@ -208,6 +238,35 @@ def test_out_of_vocabulary_structured_type_fails_closed() -> None:
     assert evidence.canonical_workout_type("not_a_real_type") is None
     result = ground("x", [_name_claim("whatever", workout_type="not_a_real_type")], evidence, [])
     assert result.claims and result.claims[0].verdict is GroundVerdict.UNGROUNDED
+
+
+def test_oov_structured_type_does_not_get_a_surface_name_second_chance() -> None:
+    """A garbage structured type fails closed EVEN when the surface name would match (BLOCKING #2).
+
+    This is the contract guard the prior OOV test missed: the claim carries a ``workout_type`` that
+    does NOT resolve, AND a surface name ("Rest day") that the legacy ``canonical_name`` path WOULD
+    ground. The structured path is authoritative — an out-of-vocabulary type must scrub (GROUND-R3),
+    never fall through to the unreliable translated-surface match. If the surface fallback fired,
+    this would wrongly ground.
+    """
+    evidence = _plan_evidence()
+    assert evidence.canonical_name("Rest day") is not None  # the surface WOULD match
+    assert evidence.canonical_workout_type("garbage_type") is None  # but the type does not
+    result = ground("x", [_name_claim("Rest day", workout_type="garbage_type")], evidence, [])
+    assert result.claims and result.claims[0].verdict is GroundVerdict.UNGROUNDED, (
+        "an OOV structured type must fail closed, not ground via the surface name"
+    )
+
+
+def test_no_structured_type_with_matching_name_grounds_via_surface_path() -> None:
+    """Control for the OOV guard: ``workout_type is None`` + a matching name grounds (#18).
+
+    The surface-name fallback is reserved STRICTLY for the no-type case; the same recognised name
+    that must NOT rescue an OOV type DOES ground when the claim carries no structured type at all.
+    """
+    evidence = _plan_evidence()
+    result = ground("x", [_name_claim("Rest day", workout_type=None)], evidence, [])
+    assert result.claims and result.claims[0].verdict is GroundVerdict.GROUNDED
 
 
 def test_structured_type_fails_closed_without_a_library() -> None:
