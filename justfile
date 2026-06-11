@@ -160,14 +160,19 @@ test-fuzz-nightly:
     {{uv}} pytest -m fuzz --hypothesis-profile=fuzz-nightly
 
 # T-MUT mutation gate (TIER-R6, CI-R1 item 17): mutmut over the analytics package and
-# the ASBO->GBO adapter layer with per-package score floors (>=90% / >=85%), enforced
-# by tools/mutation_gate.py. EXPENSIVE: nightly + analytics/adapter PRs only.
-test-mut:
-    {{uv}} python -m tools.mutation_gate run
+# the ASBO->GBO adapter layer, scored against the COMMITTED ratchet floors in
+# mutation-floors.toml (per package, only ever raised). MODE selects the gate's
+# behaviour (CFG-R1a: floors are data, never hardcoded): `--advisory` (default) reports
+# the score + delta vs floor but never blocks; `--enforce` (nightly) FAILS below floor.
+# EXPENSIVE: nightly + analytics/adapter PRs only.
+test-mut MODE="--advisory":
+    {{uv}} python -m tools.mutation_gate run {{MODE}}
 
 # PR-conditional T-MUT wrapper (CI-R1 item 17): runs the mutation gate ONLY when the
 # diff vs the base branch touches a mutated package — the decision lives HERE (CI-R0:
-# zero gate logic in workflow YAML). BASE_REF defaults to origin/main.
+# zero gate logic in workflow YAML). On PRs the gate is ADVISORY (TIER-R6): it reports
+# the mutation score + delta vs the committed floor but never blocks the build.
+# BASE_REF defaults to origin/main.
 test-mut-pr BASE_REF="origin/main":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -176,7 +181,12 @@ test-mut-pr BASE_REF="origin/main":
         echo "test-mut-pr: no analytics/adapter changes vs {{BASE_REF}}; skipping T-MUT"
         exit 0
     fi
-    just test-mut
+    just test-mut --advisory
+
+# Nightly T-MUT leg (CI-R4 / TIER-R6): ENFORCING — fails if any package dropped below
+# its committed ratchet floor (mutation-floors.toml). The decision lives HERE (CI-R0).
+test-mut-nightly:
+    just test-mut --enforce
 
 # Nightly LIVE eval leg (QA-EVAL-R9/CI-R4): real-provider smoke + INFRA_ERROR
 # classification + the max-infra-rate promotion gate (QA-EVAL-R12(b)). Env-gated on

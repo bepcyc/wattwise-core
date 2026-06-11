@@ -325,9 +325,11 @@ jobs:
 
   # ----------------------------------------------------------------- CONDITIONAL + NIGHTLY
   mutation:
-    name: T-MUT (conditional)
+    name: T-MUT (conditional, advisory)
     # CI-R1 item 17 (TIER-R6): runs ONLY on PRs; the recipe itself decides from the
-    # diff whether the mutated packages changed (zero gate logic here, CI-R0).
+    # diff whether the mutated packages changed (zero gate logic here, CI-R0). The PR
+    # leg is ADVISORY: test-mut-pr reports the mutation score + delta vs the committed
+    # ratchet floor (mutation-floors.toml) but NEVER blocks the build.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -357,7 +359,7 @@ jobs:
       - run: just eval-live          # QA-EVAL-R9 live mode + INFRA_ERROR gate (QA-EVAL-R12(b))
       - run: just test-llm           # live-provider smoke (CI-R4)
       - run: just test-fuzz-nightly  # TIER-R5 mode (b) extended campaign
-      - run: just test-mut           # TIER-R6 nightly mutation campaign
+      - run: just test-mut-nightly   # TIER-R6 nightly mutation campaign — ENFORCES the ratchet floor
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: nightly-reports, path: reports/ }

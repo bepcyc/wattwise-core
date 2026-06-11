@@ -156,7 +156,9 @@ pytest_add_cli_args = [
   "--deselect", "tests/unit/test_observability_runtrace.py::test_log_line_in_run_is_reconstructable_from_the_stream",
 ]
 pytest_add_cli_args_test_selection = ["tests/"]
-also_copy = ["tools/", "scripts/", "migrations/", "alembic.ini", "justfile"]
+# docker/ is copied so the container-entrypoint introspection test (RUN-R6) resolves
+# its docker/entrypoint.sh inside the mutants/ sandbox instead of erroring the baseline.
+also_copy = ["tools/", "scripts/", "migrations/", "docker/", "mutation-floors.toml", "alembic.ini", "justfile"]
 
 [tool.coverage.run]
 branch = true
