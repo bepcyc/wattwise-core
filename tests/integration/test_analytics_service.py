@@ -151,10 +151,10 @@ async def _set_current_sport(session: AsyncSession, athlete_id: str, sport: str 
 
 @pytest.mark.integration
 async def test_endurance_score_composes_from_canonical_store(session: AsyncSession) -> None:
-    """ES-R1/ES-R2: the score composes CTL + power-curve durability from persisted records.
+    """ES-R1/ES-R2: the score composes CTL + power-curve shape from persisted records.
 
     The seeded constant-power hour yields a computed CTL and a flat power curve, so
-    the durability ratio MMP(1200)/MMP(300) == 1.0 (present); no HR channel exists,
+    the curve-shape ratio MMP(1200)/MMP(300) == 1.0 (present); no HR channel exists,
     so decoupling is missing and the configured partial policy composes with reduced
     confidence and the components recorded in QualityReport (ES-R2b).
     """
@@ -165,7 +165,7 @@ async def test_endurance_score_composes_from_canonical_store(session: AsyncSessi
     assert is_computed(result)
     assert 0.0 <= result.value <= 100.0  # type: ignore[union-attr]
     quality = result.quality  # type: ignore[union-attr]
-    assert quality.extra["components_present"] == ("ctl", "durability")
+    assert quality.extra["components_present"] == ("ctl", "curve_shape")
     assert quality.extra["components_missing"] == ("decoupling",)
     assert quality.confidence < 1.0
     assert result.provenance.sport == "cycling"  # type: ignore[union-attr]
@@ -178,7 +178,7 @@ async def test_endurance_score_without_current_sport_degrades_to_ctl(
     """ES-R2: no canonical current_sport ⇒ power components fail closed; CTL-only partial.
 
     The power components cannot be sport-partitioned without a sport (never a
-    hardcoded one), so durability AND decoupling are missing and the declared-valid
+    hardcoded one), so curve_shape AND decoupling are missing and the declared-valid
     CTL-only subset composes with reduced confidence — never a silent 0 (ANL-R4).
     """
     aid, _ = await _seed_constant_power_ride(session, watts=250.0, seconds=3600, ftp_w=250.0)
@@ -187,7 +187,7 @@ async def test_endurance_score_without_current_sport_degrades_to_ctl(
     assert is_computed(result)
     quality = result.quality  # type: ignore[union-attr]
     assert quality.extra["components_present"] == ("ctl",)
-    assert quality.extra["components_missing"] == ("decoupling", "durability")
+    assert quality.extra["components_missing"] == ("curve_shape", "decoupling")
     assert quality.confidence < 1.0
 
 
@@ -220,7 +220,7 @@ async def _add_hr_channel(session: AsyncSession, activity_id: str, bpm: float) -
 async def test_endurance_score_all_components_present(session: AsyncSession) -> None:
     """ES-R1: with power AND HR streams all three components compose at full confidence.
 
-    The constant-power hour gives a flat curve (durability ratio 1.0) and, paired with
+    The constant-power hour gives a flat curve (curve-shape ratio 1.0) and, paired with
     a constant HR, a 0% aerobic decoupling — so no component is missing and the
     QualityReport carries full confidence (no ES-R2 degradation).
     """
@@ -233,18 +233,18 @@ async def test_endurance_score_all_components_present(session: AsyncSession) -> 
     result = await svc.endurance_score(aid, _dt.date(2026, 6, 1))
     assert is_computed(result)
     quality = result.quality  # type: ignore[union-attr]
-    assert quality.extra["components_present"] == ("ctl", "decoupling", "durability")
+    assert quality.extra["components_present"] == ("ctl", "curve_shape", "decoupling")
     assert quality.extra["components_missing"] == ()
     assert quality.confidence == 1.0
 
 
 @pytest.mark.integration
-async def test_endurance_score_short_ride_lacks_durability_point(
+async def test_endurance_score_short_ride_lacks_curve_shape_point(
     session: AsyncSession,
 ) -> None:
-    """ES-R2: a curve without the configured long-duration point ⇒ durability missing.
+    """ES-R2: a curve without the configured long-duration point ⇒ curve_shape missing.
 
-    A 600 s ride yields no MMP(1200 s) point, so the durability ratio fails closed
+    A 600 s ride yields no MMP(1200 s) point, so the curve-shape ratio fails closed
     (typed Unavailable from the curve-point read) and the partial policy composes on
     the remaining declared-valid subset — never a fabricated ratio.
     """
@@ -254,4 +254,4 @@ async def test_endurance_score_short_ride_lacks_durability_point(
     result = await svc.endurance_score(aid, _dt.date(2026, 6, 1))
     assert is_computed(result)
     missing = result.quality.extra["components_missing"]  # type: ignore[union-attr]
-    assert "durability" in missing
+    assert "curve_shape" in missing
