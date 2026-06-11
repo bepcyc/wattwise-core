@@ -114,6 +114,8 @@ serving, so you don't need a source checkout, `just`, or a manual `alembic` step
 `WATTWISE_MIGRATE_ON_START=0` to manage migrations yourself; the readiness probe at
 `/readyz` will then refuse to serve until the schema is up to date.)
 
+New to self-hosting? [docs/CONFIGURATION.md](docs/CONFIGURATION.md) walks you through every setting task by task.
+
 ```sh
 docker build -t wattwise-core:local .    # or use a released image
 
