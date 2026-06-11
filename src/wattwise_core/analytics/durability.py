@@ -204,6 +204,91 @@ def _validate_inputs(
     return np.asarray(power_1hz, dtype=np.float64)
 
 
+def _segment_bests(
+    power: FloatArray,
+    split: int,
+    target_duration_s: int,
+) -> tuple[float, float] | Unavailable:
+    """Best target-duration mean power in the fresh vs. fatigued segment (DUR-R3).
+
+    Returns the ``(fresh_best, fatigued_best)`` pair, or a typed
+    :class:`Unavailable` when either segment lacks a fully-seeded
+    ``target_duration_s`` effort (``INSUFFICIENT_DATA``) or the fresh best is
+    non-positive (``OUT_OF_DOMAIN``) — never a fabricated full-retention number.
+    """
+    fresh_best = _best_mean_power(power[:split], target_duration_s)
+    fatigued_best = _best_mean_power(power[split:], target_duration_s)
+    if fresh_best is None or fatigued_best is None:
+        which = "fresh" if fresh_best is None else "fatigued"
+        return Unavailable(
+            UnavailableReason.INSUFFICIENT_DATA,
+            f"{which} segment has no fully-seeded {target_duration_s}s effort "
+            "(segment too short or too gappy for a durability comparison)",
+        )
+    if fresh_best <= 0.0:
+        return Unavailable(
+            UnavailableReason.OUT_OF_DOMAIN,
+            "fresh best power is non-positive; durability ratio undefined",
+        )
+    return fresh_best, fatigued_best
+
+
+def _build_durability_result(
+    *,
+    power: FloatArray,
+    cp_w: float,
+    target_duration_s: int,
+    fatigue_threshold_j: float,
+    sport: str,
+    split: int,
+    total_work: float,
+    fresh_best: float,
+    fatigued_best: float,
+    retained: float,
+    decrement_pct: float,
+) -> Computed[DurabilityDecrement]:
+    """Assemble the ``Computed`` envelope (value + quality + provenance).
+
+    The DUR-R6 ``fresh_effort_below_cp`` flag — a fresh "best" below CP was almost
+    certainly not maximal, so the ratio is suspect — is surfaced (non-blocking),
+    never silently trusted.
+    """
+    fresh_below_cp = fresh_best < cp_w
+    value = DurabilityDecrement(
+        target_duration_s=target_duration_s,
+        fresh_best_power_w=fresh_best,
+        fatigued_best_power_w=fatigued_best,
+        retained_fraction=retained,
+        decrement_pct=decrement_pct,
+        fatigue_threshold_j=float(fatigue_threshold_j),
+        split_elapsed_s=split,
+        work_above_cp_total_j=total_work,
+    )
+    quality = QualityReport(
+        coverage_fraction=float(np.count_nonzero(~np.isnan(power))) / power.size,
+        sample_rate_hz=1.0,
+        gap_count=int(np.count_nonzero(np.isnan(power))),
+        confidence=1.0,
+        extra={
+            "target_duration_s": target_duration_s,
+            "fresh_window_s": int(split),
+            "fatigued_window_s": int(power.size - split),
+            "fresh_effort_below_cp": fresh_below_cp,
+            "work_above_cp_total_j": total_work,
+        },
+    )
+    provenance = InputLineage(
+        sport=sport,
+        channels=(POWER_CHANNEL,),
+        reference_params={
+            "cp_w": float(cp_w),
+            "target_duration_s": target_duration_s,
+            "fatigue_threshold_j": float(fatigue_threshold_j),
+        },
+    )
+    return Computed(value=value, quality=quality, provenance=provenance)
+
+
 def durability_decrement(
     power_1hz: FloatArray | None,
     cp_w: float,
@@ -268,63 +353,29 @@ def durability_decrement(
         )
 
     # DUR-R3: best target-duration effort in each segment.
-    fresh_best = _best_mean_power(power[:split], target_duration_s)
-    fatigued_best = _best_mean_power(power[split:], target_duration_s)
-    if fresh_best is None or fatigued_best is None:
-        which = "fresh" if fresh_best is None else "fatigued"
-        return Unavailable(
-            UnavailableReason.INSUFFICIENT_DATA,
-            f"{which} segment has no fully-seeded {target_duration_s}s effort "
-            "(segment too short or too gappy for a durability comparison)",
-        )
-    if fresh_best <= 0.0:
-        return Unavailable(
-            UnavailableReason.OUT_OF_DOMAIN,
-            "fresh best power is non-positive; durability ratio undefined",
-        )
+    bests = _segment_bests(power, split, target_duration_s)
+    if isinstance(bests, Unavailable):
+        return bests
+    fresh_best, fatigued_best = bests
 
     retained = fatigued_best / fresh_best
     decrement_pct = 100.0 * (1.0 - retained)
     if not (math.isfinite(retained) and math.isfinite(decrement_pct)):  # ANL-R32
         return Unavailable(UnavailableReason.OUT_OF_DOMAIN, "non-finite durability decrement")
 
-    # DUR-R6: a fresh "best" effort below CP was almost certainly not maximal, so the
-    # ratio is suspect — flag it (non-blocking), never silently trust it.
-    fresh_below_cp = fresh_best < cp_w
-
-    value = DurabilityDecrement(
+    return _build_durability_result(
+        power=power,
+        cp_w=cp_w,
         target_duration_s=target_duration_s,
-        fresh_best_power_w=fresh_best,
-        fatigued_best_power_w=fatigued_best,
-        retained_fraction=retained,
-        decrement_pct=decrement_pct,
-        fatigue_threshold_j=float(fatigue_threshold_j),
-        split_elapsed_s=split,
-        work_above_cp_total_j=total_work,
-    )
-    quality = QualityReport(
-        coverage_fraction=float(np.count_nonzero(~np.isnan(power))) / power.size,
-        sample_rate_hz=1.0,
-        gap_count=int(np.count_nonzero(np.isnan(power))),
-        confidence=1.0,
-        extra={
-            "target_duration_s": target_duration_s,
-            "fresh_window_s": int(split),
-            "fatigued_window_s": int(power.size - split),
-            "fresh_effort_below_cp": fresh_below_cp,
-            "work_above_cp_total_j": total_work,
-        },
-    )
-    provenance = InputLineage(
+        fatigue_threshold_j=fatigue_threshold_j,
         sport=sport,
-        channels=(POWER_CHANNEL,),
-        reference_params={
-            "cp_w": float(cp_w),
-            "target_duration_s": target_duration_s,
-            "fatigue_threshold_j": float(fatigue_threshold_j),
-        },
+        split=split,
+        total_work=total_work,
+        fresh_best=fresh_best,
+        fatigued_best=fatigued_best,
+        retained=retained,
+        decrement_pct=decrement_pct,
     )
-    return Computed(value=value, quality=quality, provenance=provenance)
 
 
 __all__ = [

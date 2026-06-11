@@ -106,9 +106,7 @@ ES_SHORT_DURATION_S: Final[int] = int(_analytics_default("endurance_score_short_
 # The probe duration whose fresh-vs-fatigued best power is compared (DUR-R3), and the
 # multiple of W' (spent as work above CP) that marks the fresh->fatigued boundary
 # (DUR-R2/R7). Both VALUES live in defaults.toml (CFG-R1a), never as code literals.
-DURABILITY_TARGET_DURATION_S: Final[int] = int(
-    _analytics_default("durability_target_duration_s")
-)
+DURABILITY_TARGET_DURATION_S: Final[int] = int(_analytics_default("durability_target_duration_s"))
 DURABILITY_WPRIME_MULTIPLE: Final[float] = _analytics_default("durability_wprime_multiple")
 
 # --- Normalized Power / TSS ---
