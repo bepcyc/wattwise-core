@@ -76,6 +76,13 @@ docker run -d --name wattwise \
   wattwise-core:local
 ```
 
+Prefer a **named volume** as above: Docker initializes named volumes with the ownership
+baked into the image, so they are writable out of the box. The container runs as an
+unprivileged fixed user (UID 10001), never root, so it cannot fix file permissions for
+you — if you bind-mount a host directory instead, set the ownership yourself:
+`sudo chown 10001:10001 <dir>` on rootful Docker, or under rootless Docker/Podman
+`podman unshare chown 10001:10001 <dir>` (the subuid that maps to 10001).
+
 The container migrates its own database on first boot, then starts serving. Check that
 it is alive and ready:
 
