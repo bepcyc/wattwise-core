@@ -439,6 +439,7 @@ async def test_reflect_emits_structured_verdict_and_routes() -> None:
 
     # the structured verdict was obtained at least once ...
     assert model.structured_calls >= 1
-    # ... and give_up_gracefully routed straight to a degraded finalize (no full budget).
+    # ... and give_up_gracefully routes through compose+ground to a degraded finalize
+    # (REFLECT-R3: a caveated graceful-decline draft, never an empty body).
     assert out["status"] is RunStatus.DEGRADED
     assert out["reflection_count"] == 1

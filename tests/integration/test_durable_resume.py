@@ -40,7 +40,6 @@ from wattwise_core.agent.checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     CheckpointError,
     CheckpointIdentityError,
-    CheckpointSchemaVersionError,
     SqlAlchemyCheckpointSaver,
 )
 from wattwise_core.agent.state_store import (
@@ -445,12 +444,11 @@ async def test_old_schema_version_checkpoint_fails_closed(
 
     # The live engine (default v2) must refuse to load that row, on BOTH the point-get and the
     # list path (the two read seams that stamp-check), rather than coerce the old blob.
+    # CKPT-R7: log a warning and start fresh (return None / empty list) rather than crashing.
     reader = _saver(factory)  # schema_version defaults to CHECKPOINT_SCHEMA_VERSION (2)
-    with pytest.raises(CheckpointSchemaVersionError):
-        await reader.aget_tuple(_config())
-    with pytest.raises(CheckpointSchemaVersionError):
-        async for _ in reader.alist(_config()):
-            pass
+    assert await reader.aget_tuple(_config()) is None
+    results = [tup async for tup in reader.alist(_config())]
+    assert results == []
 
 
 # --- 6. AgentInterrupt ledger: record + atomic guarded consume (CKPT-R9) ----------------

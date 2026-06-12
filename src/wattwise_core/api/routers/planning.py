@@ -48,6 +48,7 @@ from sqlalchemy import asc, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.agent.deliverables import Plan as PlanDeliverable
+from wattwise_core.api.deps import RateLimit
 from wattwise_core.api.errors import ProblemError, resolve_trace_id
 from wattwise_core.api.pagination import clamp_limit, decode_cursor, encode_cursor
 from wattwise_core.api.problems import not_found, range_reversed
@@ -71,7 +72,7 @@ from wattwise_core.entitlement import Entitlements
 from wattwise_core.persistence.models import Plan as PlanRow
 from wattwise_core.persistence.models import PlanDay, Workout
 
-router = APIRouter(prefix="/v1/planning", tags=["planning"])
+router = APIRouter(prefix="/v1/planning", tags=["planning"], dependencies=[RateLimit])
 
 
 # --- engine seam (injected; reached only through this Protocol, ARCH-R21) --------

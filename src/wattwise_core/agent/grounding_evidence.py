@@ -212,6 +212,11 @@ class _ExtractedClaim(BaseModel):
     enum so the plan-structure verdict is provider-enforced over the canonical vocabulary (STRUCT-R1
     /R3), not the translated surface name. It is optional (``None``) — a NUMBER/URL/STATEMENT claim
     carries none, and a NAME claim without it falls back to the legacy surface-name match.
+
+    ``prescriptive`` (GROUND-R9) distinguishes a directive statement ("do threshold work tomorrow")
+    from a descriptive one ("you did a threshold workout yesterday"). A prescriptive statement
+    with no verifiable number is classified COMPLEMENTARY and may be scrubbed, while a descriptive
+    one is published under the complementary free pass.
     """
 
     model_config = {"extra": "forbid"}
@@ -220,6 +225,7 @@ class _ExtractedClaim(BaseModel):
     metric: str | None = None
     value: float | None = None
     as_of: str | None = None
+    prescriptive: bool = False
     workout_type: CanonicalWorkoutType | None = None
 
 
@@ -302,6 +308,7 @@ class ClaimGrounder:
                     metric=c.metric,
                     value=c.value,
                     ref=c.as_of,
+                    prescriptive=c.prescriptive,
                     # The typed canonical prescription (language-independent, issue #18): carried
                     # onto the claim so the NAME verifier grounds by STRUCTURE, not surface name.
                     workout_type=c.workout_type.value if c.workout_type is not None else None,

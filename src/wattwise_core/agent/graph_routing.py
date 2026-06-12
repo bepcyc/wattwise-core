@@ -62,7 +62,8 @@ def make_route_after_reflect(ceiling: int, max_tool_iterations: int) -> Any:
         """reflect -> plan_retrieval | compose | finalize on the §6 verdict (REFLECT-R2a).
 
         ``replan`` -> plan_retrieval; ``answer_with_caveat`` -> compose;
-        ``give_up_gracefully`` -> finalize; a ceiling breach -> finalize (GRAPH-R5). A
+        ``give_up_gracefully`` -> compose (REFLECT-R3: a caveated graceful-decline draft,
+        never an empty body); a ceiling breach -> finalize (GRAPH-R5). A
         tool-iteration-bound breach STOPS re-planning and routes to ``compose`` (AGT-ENT-R4),
         so a ``replan`` verdict cannot drive the gather/tool loop past the entitlement's bound.
         """
@@ -72,7 +73,7 @@ def make_route_after_reflect(ceiling: int, max_tool_iterations: int) -> Any:
         if verdict is ReflectVerdict.ANSWER_WITH_CAVEAT:
             return "compose"
         if verdict is ReflectVerdict.GIVE_UP_GRACEFULLY:
-            return "finalize"
+            return "compose"
         if gs.over_tool_ceiling(state, max_tool_iterations):
             return "compose"
         return "plan_retrieval"

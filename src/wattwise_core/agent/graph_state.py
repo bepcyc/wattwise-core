@@ -428,16 +428,13 @@ def terminal_status(state: AgentState, decision: GroundDecision | None, ceiling:
     """
     if budget_exceeded(state):
         return RunStatus.BUDGET_EXCEEDED
-    if over_ceiling(state, ceiling):
-        return RunStatus.DEGRADED
-    if decision is GroundDecision.ABSTAIN:
-        return RunStatus.DEGRADED
-    # Reaching finalize with a non-PROCEED ground decision means a bound-exhausted
-    # recovery (regenerate/replan) that could not be re-grounded -> DEGRADED, never a
-    # complete-looking answer (GROUND-R9/REFLECT-R4).
-    if decision is not None and decision is not GroundDecision.PROCEED:
-        return RunStatus.DEGRADED
-    if open_gaps(state):
+    if (
+        over_ceiling(state, ceiling)
+        or last_reflect_verdict(state) is ReflectVerdict.GIVE_UP_GRACEFULLY
+        or decision is GroundDecision.ABSTAIN
+        or open_gaps(state)
+        or (decision is not None and decision is not GroundDecision.PROCEED)
+    ):
         return RunStatus.DEGRADED
     return RunStatus.COMPLETED
 

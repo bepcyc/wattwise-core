@@ -263,11 +263,12 @@ async def test_openai_model_compose_uses_bounded_temperature() -> None:
     assert kwargs["max_completion_tokens"] == 256
 
 
-async def test_openai_model_compose_handles_empty_content() -> None:
+async def test_openai_model_compose_raises_on_empty_content() -> None:
+    """MODEL-SEAM-1: empty compose content is a failure mode, not a valid empty draft."""
     completions = _RecordingCompletions(parse_message=_StubMessage(parsed=None), create_content="")
     model = _make_model(completions)
-    out = await model.compose(system="v", context="c")
-    assert out == ""
+    with pytest.raises(ModelResponseError, match="empty compose content"):
+        await model.compose(system="v", context="c")
 
 
 def test_openai_model_satisfies_chatmodel_protocol() -> None:
