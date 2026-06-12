@@ -456,7 +456,7 @@ deploy VERSION="":
 # Start a local dev server with autoreload (developer convenience; NOT a gate
 # and NOT a product CLI — it just wraps uvicorn against the dev DSN).
 # TODO(src/wattwise_core/api): `wattwise_core.api.app:create_app` (Dev A).
-dev: migrate
+dev: _migrate_dev
     WATTWISE_APP__ENVIRONMENT=development \
     WATTWISE_DATABASE_DSN="{{WATTWISE_DATABASE_DSN}}" \
         {{uv}} uvicorn --factory {{package}}.api.app:create_app --reload \
