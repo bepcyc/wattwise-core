@@ -121,12 +121,7 @@ jobs:
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
-      - run: just test-unit        # CI-R1 item 3
-      - run: just test-property
-      - run: just test-golden
-      - run: just test-contract
-      - run: just test-fuzz        # CI-R1 item 16
-      - run: just test-logging     # CI-R1 item 11
+      - run: just test-fast-combined   # CI-R1 items 3 + 11 + 16 (issue #67)
 
   coverage:
     name: Coverage gate
@@ -327,7 +322,6 @@ jobs:
             curl -fsS http://127.0.0.1:8000/healthz && break || sleep 1;
           done
           curl -fsS http://127.0.0.1:8000/healthz
-      - run: just test-unit && just test-property && just test-golden && just test-contract
       - run: just test-db-portable      # CI-R1 item 13
 
   e2e:

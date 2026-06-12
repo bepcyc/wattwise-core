@@ -115,6 +115,12 @@ test-golden:
 test-contract:
     {{uv}} pytest -m contract
 
+# Combined fast offline tiers in a single pytest invocation with xdist.
+# Replaces the 6 sequential calls in CI (CI-R1 item 3; issue #67).
+# The individual recipes above remain for local/targeted use.
+test-fast-combined:
+    {{uv}} pytest -n auto -m "unit or property or golden or contract or fuzz or logging"
+
 # Regenerate the committed OpenAPI reference artifact (DOC-R2).
 openapi:
     {{uv}} python -m tools.openapi_artifact
@@ -170,28 +176,20 @@ eval-live:
 # =====================================================================
 
 # Combined coverage ≥ 80% overall AND a ≥ 90% line+branch FLOOR on the two
-# correctness-critical packages — analytics + ingestion adapters (DOD-R1). The
-# global run emits XML + a retained term report (CI-R6); the scoped run enforces
-# the per-package floor. Both must pass for `cov` to go green.
-cov: cov-critical
-    {{uv}} pytest --cov={{package}} --cov-branch \
+# correctness-critical packages — analytics + ingestion adapters (DOD-R1).
+# A single instrumented run produces both the global XML report (CI-R6) and
+# the scoped floor check; `coverage report --include … --fail-under=90`
+# measures that floor against exactly the same data, undiluted, without
+# re-running the suite (see issue #67 / ADR 0007).
+cov:
+    {{uv}} pytest -n auto --cov={{package}} --cov-branch \
         --cov-report=term-missing \
         --cov-report=xml:reports/coverage.xml \
         --cov-fail-under=80
-
-# Per-package ≥ 90% line+branch FLOOR for the analytics + ingestion-adapter
-# packages (DOD-R1). Scoped `--cov` to exactly those two import roots so the
-# `--cov-fail-under=90` threshold is measured against them ALONE (not diluted by
-# the rest of the package, which the global ≥ 80% floor in `cov` covers). Branch
-# coverage is on via [tool.coverage.run]. Report retained for CI artifacts (CI-R6).
-cov-critical:
-    {{uv}} pytest \
-        --cov=wattwise_core.analytics \
-        --cov=wattwise_core.ingestion.adapters \
-        --cov-branch \
-        --cov-report=term-missing \
-        --cov-report=xml:reports/coverage-critical.xml \
-        --cov-fail-under=90
+    {{uv}} coverage report \
+        --include="*/wattwise_core/analytics/*" \
+        --include="*/wattwise_core/ingestion/adapters/*" \
+        --fail-under=90
 
 # =====================================================================
 # 3b. Mutation testing — T-MUT (issue #35, ADR 0006)
@@ -322,8 +320,13 @@ scan:
 # Both retain their reports under reports/ (CI-R6). Override WW_IMAGE to point at
 # the freshly built tag, e.g. `WW_IMAGE=wattwise-core:v1.2.3 just sbom`.
 # Build the runtime image locally so the image gate has a real target to scan.
+# WW_BUILDX_CACHE is injected by GitHub CI (issue #67):
+#   `--cache-from=type=gha --cache-to=type=gha,mode=max --load`
+# (--load because the buildx container driver builds in an isolated BuildKit —
+# without it the tag never reaches the local daemon that trivy/syft scan).
+# Empty locally and on the Forgejo mirror → plain `docker build`, no-op.
 image-build:
-    docker build -t {{image_name}}:local .
+    docker build {{env_var_or_default("WW_BUILDX_CACHE","")}} -t {{image_name}}:local .
 
 sbom: image-build
     WW_IMAGE={{image_name}}:local WW_FAIL_SEVERITY=CRITICAL WW_SCAN_TARGETS=image bash scripts/scan.sh
@@ -380,7 +383,10 @@ install-boot-check: build
 # "is my PR green?" command. The service-backed tiers (integration, db-portable,
 # e2e, image scan) run in the slow CI stage and via their own recipes — they are
 # intentionally NOT in `gate` so it stays fast and offline (CI-R3).
-gate: lint fmt-check type lint-commits test-unit test-property test-golden test-contract test-fuzz test-logging eval test-inject cov
+# The six fast offline tiers run as ONE xdist invocation (test-fast-combined,
+# issue #67) — the same marker set (unit/property/golden/contract/fuzz/logging),
+# just not 6 sequential pytest startups.
+gate: lint fmt-check type lint-commits test-fast-combined eval test-inject cov
 
 # FULL-FIDELITY local mirror of the GitHub/Forgejo CI pipeline: the same recipes, the same
 # serial order, the same service shape (throwaway PG16+MariaDB11, generated boot secrets,
