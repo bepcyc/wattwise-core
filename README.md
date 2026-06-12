@@ -78,6 +78,10 @@ docker run -d --name wattwise \
 curl --retry 15 --retry-delay 2 --retry-all-errors -fsS http://127.0.0.1:8000/readyz
 ```
 
+> **Port conflict?** If port 8000 is already in use, pick a different host port:
+> `-p 127.0.0.1:8001:8000`. If re-running after a previous test, remove the old
+> container first: `docker rm -f wattwise`.
+
 That is a complete setup. Your database and your uploaded files live on the `wattwise_data`
 volume. On first boot the container builds its own database, so there is no extra migration
 step. Your data is encrypted at rest, every request needs your token, the process runs as an
@@ -113,7 +117,8 @@ curl -N -X POST "$BASE/v1/agent/ask" \
 **Configure it.** You can change the coaching model, point at PostgreSQL or MariaDB instead
 of SQLite, tune the analytics, and more, all without touching code.
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md) covers every setting in plain language, each
-one checked against a real running container.
+one checked against a real running container. For a full PostgreSQL-backed production setup
+with isolated networking, see [`deploy/compose.yaml`](deploy/compose.yaml).
 
 ## How it works
 
