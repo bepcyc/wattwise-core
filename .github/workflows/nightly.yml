@@ -32,6 +32,13 @@ jobs:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }   # commit-time mtime restore needs history
       - uses: astral-sh/setup-uv@v8.2.0
+        id: setup_uv
+        with: { python-version: "3.13" }
+        continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
+      - if: steps.setup_uv.outcome == 'failure'
+        run: sleep 20
+      - if: steps.setup_uv.outcome == 'failure'
+        uses: astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
       - run: just install
