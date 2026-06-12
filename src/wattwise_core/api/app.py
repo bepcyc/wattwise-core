@@ -136,7 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     install_security_middleware(app, resolved)
-    app.add_middleware(JSONBodySizeLimitMiddleware)
+    app.add_middleware(JSONBodySizeLimitMiddleware, max_bytes=resolved.api__json_body_max_bytes)
     # LOG-R3: bind/clear the per-request correlation context (request_id) around every
     # request so each log line emitted while serving it carries the correlation ids.
     app.add_middleware(RequestContextMiddleware)

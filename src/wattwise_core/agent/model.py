@@ -223,7 +223,24 @@ class OpenAICompatibleModel:
                 ],
             )
             self._record_usage(span, completion, schema_id=None)
-        return completion.choices[0].message.content or ""
+        msg = completion.choices[0].message
+        content = msg.content or ""
+        # MODEL-R5a: 2026 reasoning models emit the reasoning trace BEFORE the answer in a
+        # separate channel. A non-empty reasoning trace with EMPTY content means the output
+        # budget was exhausted by reasoning — this is NOT a valid empty answer, it is a
+        # resource-exhaustion failure that MUST fail closed rather than silently store ''.
+        reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+        if not content and reasoning:
+            raise ModelResponseError(
+                "model reasoning budget exhausted: reasoning trace present but content empty; "
+                "refusing to store an empty draft (MODEL-R5a)"
+            )
+        if not content:
+            raise ModelResponseError(
+                "model returned empty compose content with no reasoning trace; "
+                "refusing to store an empty draft (MODEL-R5a)"
+            )
+        return content
 
 
 def _build_client(cfg: Settings) -> AsyncOpenAI:

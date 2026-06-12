@@ -29,7 +29,6 @@ import wattwise_core.agent.memory
 import wattwise_core.agent.ops_jobs  # noqa: F401  (registers the import/export job tables)
 from wattwise_core.agent.checkpoint import (
     CheckpointIdentityError,
-    CheckpointSchemaVersionError,
     SqlAlchemyCheckpointSaver,
 )
 from wattwise_core.agent.state_store import AgentStateBase
@@ -195,9 +194,10 @@ async def test_schema_version_mismatch_fails_closed(
     await writer.aput(_config(), _checkpoint(["v1"]), _metadata(), {})
 
     # A future engine expecting version 2 must REFUSE the v1 checkpoint, not coerce it.
+    # CKPT-R7: log a warning and start fresh (return None) rather than crashing.
     reader = _saver(session_factory, athlete_id=ATHLETE_A, schema_version=2)
-    with pytest.raises(CheckpointSchemaVersionError):
-        await reader.aget_tuple(_config())
+    result = await reader.aget_tuple(_config())
+    assert result is None
 
 
 async def test_schema_version_mismatch_fails_closed_on_list(
@@ -206,9 +206,10 @@ async def test_schema_version_mismatch_fails_closed_on_list(
     writer = _saver(session_factory, athlete_id=ATHLETE_A, schema_version=1)
     await writer.aput(_config(), _checkpoint(["v1"]), _metadata(), {})
 
+    # CKPT-R7: stale checkpoints are silently skipped; the list is empty.
     reader = _saver(session_factory, athlete_id=ATHLETE_A, schema_version=2)
-    with pytest.raises(CheckpointSchemaVersionError):
-        _ = [tup async for tup in reader.alist(_config())]
+    results = [tup async for tup in reader.alist(_config())]
+    assert results == []
 
 
 # --- idempotency dedup (CKPT-R4) -------------------------------------------------------

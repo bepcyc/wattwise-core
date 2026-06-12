@@ -41,6 +41,7 @@ from starlette.testclient import TestClient
 
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.deliverables import Citation, Observation, Plan
+from wattwise_core.api import deps as api_deps
 from wattwise_core.api.app import create_app
 from wattwise_core.api.auth import Scope, issue_access_token
 from wattwise_core.api.errors import install_error_handlers
@@ -332,6 +333,7 @@ def _build_read_app(session: AsyncSession, athlete_id: str, limiter: RateLimiter
             planning_router.current_session: lambda: session,
             planning_router.cursor_signing_key: lambda: "test-cursor-key-0123456789abcdef",
             planning_router.rate_limiter: lambda: limiter,
+            api_deps.enforce_rate_limit: lambda: None,
         }
     )
     return app

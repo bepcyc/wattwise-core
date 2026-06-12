@@ -227,7 +227,7 @@ def test_coach_bundle_from_settings_loads_all_four_prompts_and_manifest() -> Non
     )
     bundle = CoachBundle.from_settings(settings)
     assert bundle.plan_system.startswith("You are the coaching agent")
-    assert bundle.claim_system.startswith("Extract every factual")
+    assert bundle.claim_system.startswith("Extract every verifiable")
     assert bundle.reflect_system.startswith("You are the coaching agent")
     assert bundle.readiness_system.startswith("You are the coaching agent")
     assert bundle.manifest is not None

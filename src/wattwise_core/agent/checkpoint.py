@@ -16,6 +16,7 @@ The injected ``async_sessionmaker`` (DEPLOY-R4) means the saver never owns engin
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, Literal, cast
@@ -32,6 +33,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from sqlalchemy import Table, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from wattwise_core.agent import checkpoint_interrupts as ledger
@@ -45,8 +47,11 @@ from wattwise_core.agent.state_store import (
     AgentThread,
     AgentWrite,
 )
+from wattwise_core.observability.logging import get_logger
 from wattwise_core.persistence.types import uuid7
 from wattwise_core.persistence.upsert import ensure_row, upsert
+
+_logger = get_logger(__name__)
 
 # Engine-side checkpoint schema version (CKPT-R7). Bump ONLY on a breaking change to the
 # persisted state shape; a stored checkpoint with a different version fails closed on
@@ -161,16 +166,23 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
         """
         # Atomic insert-or-ignore on the thread natural key (UPS-R2): concurrent
         # ensures are resolved by the DATABASE in one statement, not by exceptions.
-        await ensure_row(
-            self._sessions,
-            cast(Table, AgentThread.__table__),
-            {
-                "thread_id": thread_id,
-                "athlete_id": self._athlete_id,
-                "conversation_id": self._conversation_id,
-            },
-            conflict_keys=["thread_id"],
-        )
+        # Mitigation: under rare PostgreSQL timing races the existing row may carry a
+        # different thread_id (e.g. an empty string when config["thread_id"] is None),
+        # so the ON CONFLICT (thread_id) clause does not catch the
+        # (athlete_id, conversation_id) unique-constraint violation. Swallowing that
+        # specific IntegrityError and proceeding to the post-insert verification is safe
+        # because _resolve_thread below fail-closed on a missing row (CKPT-R3).
+        with contextlib.suppress(IntegrityError):
+            await ensure_row(
+                self._sessions,
+                cast(Table, AgentThread.__table__),
+                {
+                    "thread_id": thread_id,
+                    "athlete_id": self._athlete_id,
+                    "conversation_id": self._conversation_id,
+                },
+                conflict_keys=["thread_id"],
+            )
         existing = await self._resolve_thread(session, thread_id)
         if existing is None:  # fail closed: the row must exist after an atomic upsert
             raise CheckpointError(
@@ -184,6 +196,22 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
             raise CheckpointSchemaVersionError(
                 "stored checkpoint schema version is incompatible; refusing to load"
             )
+
+    def _guard_schema_version(self, row: AgentCheckpoint) -> bool:
+        """Check schema version; log and return ``False`` on mismatch instead of raising."""
+        try:
+            self._check_schema_version(row)
+        except CheckpointSchemaVersionError as exc:
+            _logger.warning(
+                "checkpoint_schema_bump",
+                thread_id=row.thread_id,
+                checkpoint_id=row.checkpoint_id,
+                stored_version=row.schema_version,
+                expected_version=self._schema_version,
+                exc_info=str(exc),
+            )
+            return False
+        return True
 
     async def resolve_idempotent(self, thread_id: str) -> str | None:
         """Return the latest checkpoint id for an EXISTING in-window run, else ``None`` (CKPT-R4).
@@ -266,9 +294,8 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
             else:
                 stmt = stmt.order_by(AgentCheckpoint.created_at.desc())
             row = (await session.execute(stmt.limit(1))).scalar_one_or_none()
-            if row is None:
-                return None
-            self._check_schema_version(row)
+            if row is None or not self._guard_schema_version(row):
+                return None  # CKPT-R7: start fresh rather than coerce an incompatible schema
             writes = await self._load_writes(session, thread_id, ns, row.checkpoint_id)
             return self._to_tuple(config, row, writes)
 
@@ -318,7 +345,8 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
                 stmt = stmt.limit(limit)
             rows = list((await session.execute(stmt)).scalars().all())
             for row in rows:
-                self._check_schema_version(row)
+                if not self._guard_schema_version(row):
+                    continue  # CKPT-R7: skip stale checkpoints, start fresh from the next
                 writes = await self._load_writes(session, thread_id, ns, row.checkpoint_id)
                 yield self._to_tuple(effective, row, writes)
 

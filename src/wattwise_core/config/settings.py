@@ -210,6 +210,7 @@ class Settings(_GroundingSettings, _AnalyticsSettings, BaseSettings):
     api__port: int = Field(ge=1, le=65535)
     api__rate_limit_per_minute: int = Field(ge=1)
     api__request_max_bytes: int = Field(ge=1)
+    api__json_body_max_bytes: int = Field(ge=1)  # LIMIT-R5: JSON body cap (default 256 KiB)
 
     # --- auth: first-party token lifetimes (SEC-R2.3, CFG-R1a) ---
     # Access-token lifetime MUST be <= 60 minutes and a 0/negative/unbounded lifetime is

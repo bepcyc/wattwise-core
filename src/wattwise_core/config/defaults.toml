@@ -26,6 +26,7 @@ host = "0.0.0.0"
 port = 8000
 rate_limit_per_minute = 60
 request_max_bytes = 33554432   # 32 MiB upload ceiling for FIT/GPX/TCX imports
+json_body_max_bytes = 262144   # 256 KiB JSON body cap (LIMIT-R5)
 
 [auth]
 # SEC-R2.3: access-token lifetime (seconds). MUST be <= 3600 (60 minutes); a 0/negative
@@ -474,7 +475,14 @@ plan_system = "You are the coaching agent's retrieval planner. Choose which cano
 # each claim SELF-CONTAINED and faithful to its sentence: the metric label is copied from the
 # SENTENCE (never guessed), the as-of date is attached ONLY when the sentence states one
 # (never inferred from the data), so deterministic binding checks have an honest input.
-claim_system = "Extract every factual numeric claim in the draft as a candidate claim. For each claim copy the metric label exactly as the SENTENCE states it (the words written there, e.g. 'fitness' — never a label the sentence does not contain), copy the value, and attach the local ISO 8601 date ONLY when that sentence itself states one — never infer or normalize a date the sentence does not contain. Make every claim self-contained so it can be checked without the surrounding text, and cover every numeric span in the draft. Do NOT judge correctness — only point at candidates."
+claim_system = """Extract every verifiable claim in the draft as a candidate claim. The claim kinds are:
+
+- number: any factual numeric claim (copy the metric label exactly as the SENTENCE states it — the words written there, e.g. 'fitness' — never a label the sentence does not contain; copy the value; attach the local ISO 8601 date ONLY when that sentence itself states one — never infer or normalize a date the sentence does not contain).
+- name: any named workout, plan item, or training prescription (e.g. "threshold workout", "rest day"). When the sentence also carries a typed canonical workout_type, emit it.
+- url: any URL or link claim.
+- statement: any non-numeric, non-name factual or directional statement. Mark prescriptive=true when the statement is a directive the athlete should act on ("do threshold work tomorrow"), and prescriptive=false when it is merely descriptive ("you did a threshold workout yesterday").
+
+Make every claim self-contained so it can be checked without the surrounding text, and cover every verifiable span in the draft. Do NOT judge correctness — only point at candidates."""
 # The reflection system prompt (REFLECT-R2 / STRUCT-R1): moved VERBATIM from the former inline
 # ``_REFLECT_SYSTEM``. Constrains the model to the closed reflect verdict set; code routes on it.
 reflect_system = "You are the coaching agent's reflection step. Given the open coverage gaps and what has already been retrieved, decide the next move over the CLOSED verdict set {replan, answer_with_caveat, give_up_gracefully}. Choose replan only when adding or widening capability requests could close a gap; answer_with_caveat when a useful grounded answer is possible despite a gap; give_up_gracefully when nothing more can be retrieved. For replan, list the capability keys to add/widen."
