@@ -126,6 +126,11 @@ commit-message check):
 uv run pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
+> **Already have `core.hooksPath` configured?** `pre-commit` refuses to install when
+> `core.hooksPath` is already set. In that case either unset it first
+> (`git config --unset-all core.hooksPath`) or skip the hooks and run `just lint` +
+> `just type` manually before each push — CI is still the authoritative gate.
+
 The hooks are a convenience, **not** a substitute for CI. They never run the slow
 tiers or the image/SBOM/SCA scans. **CI remains the authoritative, blocking gate.**
 
