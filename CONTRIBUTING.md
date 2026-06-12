@@ -19,7 +19,7 @@ documented command. The only thing you supply by hand is secrets, via the
 environment (BOOT-R4) — never a committed file.
 
 ```bash
-git clone https://github.com/wattwise/wattwise-core.git
+git clone https://github.com/bepcyc/wattwise-core.git
 cd wattwise-core
 just bootstrap
 ```
