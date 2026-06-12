@@ -48,6 +48,7 @@ from wattwise_core.agent.engine_graph import (
     conversation_id_for_turn,
     resolve_existing_answer,
 )
+from wattwise_core.agent.engine_numeric_detail import NumericDetailPreferenceMixin
 from wattwise_core.agent.engine_proactive import ProactiveDeliverableMixin
 from wattwise_core.agent.engine_services import (  # noqa: F401  re-exported (historical paths)
     CANONICAL_WORKOUT_NAMES,
@@ -85,7 +86,9 @@ from wattwise_core.persistence import Database
 from wattwise_core.seams import EngineSessionProvider, SessionProvider
 
 
-class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # noqa: size-limits
+class GraphAgentEngine(  # noqa: size-limits
+    NumericDetailPreferenceMixin, DeliverableEngineMixin, ProactiveDeliverableMixin
+):
     """The deployable :class:`~wattwise_core.api.routers.agent_routes.AgentEngine`.
 
     Over the class-size guard (documented suppression, QUAL-R9): one cohesive implementation of the
@@ -239,6 +242,7 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         follow_up: dict[str, Any] | None,
         locale: str,
         entitlement: Entitlements | None = None,
+        coach_numeric_detail_level: int | None = None,
     ) -> AgentAnswer:
         """Answer a question, deduping a re-submitted turn and resuming a follow-up thread.
 
@@ -253,6 +257,9 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
         """
         length = await self.resolve_default_response_length(
             athlete_id=athlete_id, requested=response_length
+        )
+        numeric_detail_level = await self.resolve_default_numeric_detail_level(
+            athlete_id=athlete_id, requested=coach_numeric_detail_level
         )
         recalled = await self.recall_memory_for_run(athlete_id=athlete_id, query=question or "")
         state_db = await self._agent_state_db()
@@ -275,6 +282,7 @@ class GraphAgentEngine(DeliverableEngineMixin, ProactiveDeliverableMixin):  # no
                 question or "",
                 locale=locale,
                 response_length=length,  # type: ignore[arg-type]
+                coach_numeric_detail_level=numeric_detail_level,
                 thread_id=thread_id,
                 conversation_id=conversation_id,
                 follow_up=follow_up,

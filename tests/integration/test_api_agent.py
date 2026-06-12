@@ -91,6 +91,7 @@ class _FakeEngine:
         follow_up: dict[str, Any] | None,
         locale: str,
         entitlement: Any = None,  # MED-2: the route threads the per-request resolved plan
+        coach_numeric_detail_level: int | None = None,
     ) -> AgentAnswer:
         self.seen_athlete_id = athlete_id
         self.seen_entitlement = entitlement

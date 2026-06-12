@@ -191,6 +191,7 @@ async def answer_question(
     *,
     locale: str,
     response_length: ResponseLength = "standard",
+    coach_numeric_detail_level: int = 3,
     thread_id: str | None = None,
     conversation_id: str | None = None,
     follow_up: Mapping[str, Any] | None = None,
@@ -235,6 +236,7 @@ async def answer_question(
         locale=locale,
         request_text=question,
         response_length=response_length,
+        coach_numeric_detail_level=coach_numeric_detail_level,
         thread_id=thread_id,
         conversation_id=conversation_id,
         follow_up=follow_up,
@@ -244,21 +246,18 @@ async def answer_question(
     html, text, status, out_thread_id = _outputs(final)
     observations = _project_observations(_as_seq(final.get("observations")))
     citations = _project_citations(_as_seq(final.get("citations")))
-    # A reveal/drill follow-up foregrounds the verbatim grounded numbers it was asked to reveal
-    # (so the cap is lifted to the detailed ceiling); a normal turn holds the per-length cap.
-    # EITHER WAY the prose is still scrubbed of raw internal tokens and led with a state read
-    # (VOICE-R2/COACH-R7) — a reveal surfaces grounded NUMBERS, never the internal metric CODES.
-    # Every number shown is one the graph already grounded; the pass rewrites none of them.
     if kind in ("drill", "reveal_numbers"):
         revealed = _reveal_observation(observations, _follow_up_target(follow_up))
         citations = _merge_revealed_citations(citations, revealed)
-        html, text = enforce_presentation(
-            html, text, response_length="detailed", presentation=policy
-        )
-    else:
-        html, text = enforce_presentation(
-            html, text, response_length=response_length, presentation=policy
-        )
+    presentation_length = "detailed" if kind in ("drill", "reveal_numbers") else response_length
+    presentation_level = 5 if kind in ("drill", "reveal_numbers") else coach_numeric_detail_level
+    html, text = enforce_presentation(
+        html,
+        text,
+        response_length=presentation_length,
+        presentation=policy,
+        coach_numeric_detail_level=presentation_level,
+    )
     # Issue #18: a DETAILED grounded answer must surface >=1 citation when grounded evidence
     # exists — backfill from the run's grounded observations (verbatim, fabricating nothing).
     citations = _detailed_citation_floor(

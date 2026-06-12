@@ -309,6 +309,7 @@ class AgentState(TypedDict, total=False):
     idempotency_key: Annotated[str, _write_once]
     thread_id: str | None
     response_length: str | None
+    coach_numeric_detail_level: int | None
     # The athlete's ACTIVE canonical goals, read SERVER-side from the GBO store and projected into
     # the run inputs so the agent plans TOWARD them (GBO-R38 / API-R32 / API-R35): goal-aware
     # planning/load-review is owned by the agent, which reads the canonical Goal entity. Each item

@@ -68,6 +68,15 @@ INTERNAL_METRIC_TOKENS: frozenset[str] = frozenset(
 # the loaded persona config, so callers MAY override via ``number_cap``).
 _NUMBER_CAP: Mapping[ResponseLength, int] = {"short": 2, "standard": 3, "detailed": 4}
 
+# Foregrounded-number caps by response length and coach numeric-detail level. Level 3 preserves
+# the historical response-length-only caps; lower levels make the answer more human-first, while
+# higher levels permit pro-style metric density without relaxing grounding.
+_NUMERIC_DETAIL_CAPS: Mapping[ResponseLength, Mapping[int, int]] = {
+    "short": {1: 0, 2: 1, 3: 2, 4: 3, 5: 4},
+    "standard": {1: 0, 2: 1, 3: 3, 4: 5, 5: 7},
+    "detailed": {1: 1, 2: 2, 3: 4, 4: 7, 5: 10},
+}
+
 # Matches a foregrounded explicit numeric value in athlete-facing prose for the
 # deterministic number-density count (VOICE-R7 / EVAL-R5b.1). Plain integers and
 # decimals, optionally signed; standalone, so dates/words are not miscounted.
@@ -249,9 +258,14 @@ def _project_citations(raw: Sequence[Mapping[str, Any]]) -> tuple[Citation, ...]
 # --- number-density cap ---
 
 
-def number_cap(response_length: ResponseLength) -> int:
-    """Return the foregrounded-number ceiling for a response length (VOICE-R7 default)."""
-    return _NUMBER_CAP[response_length]
+def number_cap(response_length: ResponseLength, coach_numeric_detail_level: int = 3) -> int:
+    """Return the foregrounded-number ceiling for length + numeric-detail preference.
+
+    The default level ``3`` intentionally matches the historical response-length caps, so
+    existing callers keep their behavior until they pass a resolved preference.
+    """
+    level = coach_numeric_detail_level if coach_numeric_detail_level in (1, 2, 3, 4, 5) else 3
+    return _NUMERIC_DETAIL_CAPS[response_length][level]
 
 
 def _enforce_number_cap(html: str, text: str, cap: int) -> tuple[str, str]:
@@ -387,6 +401,7 @@ def enforce_presentation(
     *,
     response_length: ResponseLength,
     presentation: VoicePresentation,
+    coach_numeric_detail_level: int = 3,
 ) -> tuple[str, str]:
     """Hold the athlete-facing body to the voice contract AFTER grounding (VOICE-R2/-R7).
 
@@ -414,7 +429,7 @@ def enforce_presentation(
     text = _translate_tokens(text, presentation)
     html = _translate_tokens(html, presentation)
     text, html = _repair_lead(text, html, presentation)
-    return _enforce_number_cap(html, text, number_cap(response_length))
+    return _enforce_number_cap(html, text, number_cap(response_length, coach_numeric_detail_level))
 
 
 def _translate_tokens(body: str, presentation: VoicePresentation) -> str:

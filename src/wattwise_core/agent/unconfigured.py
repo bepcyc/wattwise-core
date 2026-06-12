@@ -29,14 +29,18 @@ from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, diagnose_co
 from wattwise_core.agent.digest_history import (
     digest_history as read_digest_history,
 )
-from wattwise_core.agent.engine_extras import _read_stored_response_length
+from wattwise_core.agent.engine_extras import (
+    _read_stored_response_length,
+)
 from wattwise_core.agent.engine_memory import (
     delete_memory,
     erase_memory,
     get_memory,
     list_memory,
 )
+from wattwise_core.agent.engine_numeric_detail import read_stored_numeric_detail_level
 from wattwise_core.agent.memory import (
+    COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX,
     RESPONSE_LENGTH_PREF_PREFIX,
     OssMemoryStore,
     RecalledItem,
@@ -122,6 +126,7 @@ class UnconfiguredAgentEngine:
         follow_up: dict[str, Any] | None,
         locale: str,
         entitlement: Entitlements | None = None,
+        coach_numeric_detail_level: int | None = None,
     ) -> AgentAnswer:
         # ``entitlement`` (MED-2) is accepted for seam-parity with the live engine but unused here:
         # the no-LLM fallback runs no graph, so there are no bounds to read — it always degrades.
@@ -267,6 +272,22 @@ class UnconfiguredAgentEngine:
                 athlete_id=athlete_id,
                 marker=RESPONSE_LENGTH_PREF_PREFIX,
                 content=f"{RESPONSE_LENGTH_PREF_PREFIX}{value}",
+            )
+
+    async def get_numeric_detail_level_preference(self, *, athlete_id: str) -> int:
+        """Read the persisted coach numeric-detail default, else balanced ``3`` — NON-LLM."""
+        state_db = await self._agent_state_db()
+        return await read_stored_numeric_detail_level(state_db, athlete_id=athlete_id)
+
+    async def set_numeric_detail_level_preference(self, *, athlete_id: str, value: int) -> None:
+        """Persist the coach numeric-detail default into the AGENT-STATE store — NON-LLM."""
+        state_db = await self._agent_state_db()
+        async with state_db.session() as session:
+            store = OssMemoryStore(session)
+            await store.upsert_preference(
+                athlete_id=athlete_id,
+                marker=COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX,
+                content=f"{COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX}{value}",
             )
 
 

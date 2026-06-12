@@ -112,6 +112,7 @@ class AgentEngine(Protocol):
         follow_up: dict[str, Any] | None,
         locale: str,
         entitlement: Entitlements | None = None,
+        coach_numeric_detail_level: int | None = None,
     ) -> AgentAnswer: ...
 
     async def readiness(
@@ -237,6 +238,7 @@ async def _run_engine(
         question=body.question,
         thread_id=body.thread_id,
         response_length=resolve_response_length(body),
+        coach_numeric_detail_level=body.coach_numeric_detail_level,
         follow_up=body.follow_up.model_dump() if body.follow_up else None,
         locale=locale,
         entitlement=entitlement,
