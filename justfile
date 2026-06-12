@@ -255,8 +255,9 @@ test-inject:
 # (DELIV-R4), so the ASGI factory is the single boot surface.
 # TODO(src/wattwise_core/api): `wattwise_core.api.app:create_app` owned by the
 # API sibling (Dev A). Until it lands this recipe fails at the uvicorn step.
-bootstrap: install migrate
-    @echo "bootstrap: starting wattwise-core against ${WATTWISE_DATABASE_DSN%%:*}... DSN (BOOT-R1)"
+bootstrap: install _migrate_dev
+    @echo "bootstrap: starting wattwise-core against {{WATTWISE_DATABASE_DSN}} (BOOT-R1)"
+    WATTWISE_APP__ENVIRONMENT=development \
     WATTWISE_DATABASE_DSN="{{WATTWISE_DATABASE_DSN}}" \
         {{uv}} uvicorn --factory {{package}}.api.app:create_app \
         --host 127.0.0.1 --port "${WATTWISE_API__PORT:-8000}"
@@ -266,6 +267,12 @@ bootstrap: install migrate
 # TODO(migrations): Alembic env + revisions owned by the persistence sibling
 # (Dev B); `alembic.ini` + `migrations/`.
 migrate:
+    WATTWISE_DATABASE_DSN="{{WATTWISE_DATABASE_DSN}}" {{uv}} alembic upgrade head
+
+# Bootstrap-only migration in development mode (no secrets required).
+# Public `migrate` is also used by CI/deploy where production secrets are present.
+_migrate_dev:
+    WATTWISE_APP__ENVIRONMENT=development \
     WATTWISE_DATABASE_DSN="{{WATTWISE_DATABASE_DSN}}" {{uv}} alembic upgrade head
 
 # Run the portability-marked integration suite across all three backends
