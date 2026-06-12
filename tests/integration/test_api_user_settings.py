@@ -208,6 +208,55 @@ async def test_response_length_carries_no_model_machinery(seeded: Env) -> None:
         assert field not in flat, f"model-selection token {field!r} leaked (API-R38)"
 
 
+async def test_numeric_detail_defaults_to_balanced(seeded: Env) -> None:
+    """An unset coach numeric-detail preference reads the balanced default ``3``."""
+    resp = await seeded.client.get("/v1/user-settings/coach-numeric-detail-level")
+    assert resp.status_code == 200
+    assert resp.json()["coach_numeric_detail_level"] == 3
+
+
+async def test_set_and_get_numeric_detail_level(seeded: Env) -> None:
+    """PUT numeric-detail persists; a fresh GET reflects the stored value."""
+    put = await seeded.client.put(
+        "/v1/user-settings/coach-numeric-detail-level",
+        json={"coach_numeric_detail_level": 5},
+    )
+    assert put.status_code == 200
+    assert put.json()["coach_numeric_detail_level"] == 5
+    again = await seeded.client.get("/v1/user-settings/coach-numeric-detail-level")
+    assert again.json()["coach_numeric_detail_level"] == 5
+    persisted = await seeded.engine.get_numeric_detail_level_preference(
+        athlete_id=seeded.athlete_id
+    )
+    assert persisted == 5
+
+
+async def test_numeric_detail_level_is_upserted_not_duplicated(seeded: Env) -> None:
+    """Re-PUT updates one agent-state preference row, never duplicating it."""
+    for value in (1, 5, 3):
+        put = await seeded.client.put(
+            "/v1/user-settings/coach-numeric-detail-level",
+            json={"coach_numeric_detail_level": value},
+        )
+        assert put.status_code == 200
+    rows = await seeded.engine.list_memory(athlete_id=seeded.athlete_id)
+    pref_rows = [r for r in rows if r.content.startswith("coach_numeric_detail_level=")]
+    assert len(pref_rows) == 1
+    assert pref_rows[0].content == "coach_numeric_detail_level=3"
+    got = await seeded.client.get("/v1/user-settings/coach-numeric-detail-level")
+    assert got.json()["coach_numeric_detail_level"] == 3
+
+
+async def test_unsupported_numeric_detail_level_is_422(seeded: Env) -> None:
+    """Out-of-range numeric-detail levels are rejected by the schema."""
+    resp = await seeded.client.put(
+        "/v1/user-settings/coach-numeric-detail-level",
+        json={"coach_numeric_detail_level": 6},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["type"].endswith("/validation-error")
+
+
 # --- §8.10 language --------------------------------------------------------------
 
 

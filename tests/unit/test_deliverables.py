@@ -348,11 +348,49 @@ async def test_answer_question_scrubs_tokens_and_repairs_report_lead() -> None:
     )
 
 
+async def test_answer_question_applies_numeric_detail_level_to_grounded_prose() -> None:
+    """Numeric detail controls foregrounded density after grounding, not status/citations."""
+    terminal: AgentState = {
+        "status": RunStatus.COMPLETED,
+        "idempotency_key": "thread-density",
+        "grounded_html": "<p>You are carrying fatigue: fitness 62, fatigue 70, form -8.</p>",
+        "grounded_text": "You are carrying fatigue: fitness 62, fatigue 70, form -8.",
+        "citations": [
+            {"record_id": "ctl", "metric": "ctl", "value": 62.0, "as_of": "2026-06-08"},
+            {"record_id": "atl", "metric": "atl", "value": 70.0, "as_of": "2026-06-08"},
+            {"record_id": "tsb", "metric": "tsb", "value": -8.0, "as_of": "2026-06-08"},
+        ],
+    }
+    low = await answer_question(
+        FakeGraph(terminal),
+        "athlete-9",
+        "How am I doing?",
+        locale="en",
+        response_length="standard",
+        coach_numeric_detail_level=1,
+    )
+    pro = await answer_question(
+        FakeGraph(terminal),
+        "athlete-9",
+        "How am I doing?",
+        locale="en",
+        response_length="standard",
+        coach_numeric_detail_level=5,
+    )
+    assert low.status is RunStatus.COMPLETED
+    assert count_foregrounded_numbers(low.answer_text) == 0
+    assert count_foregrounded_numbers(pro.answer_text) == 3
+    assert low.citations == pro.citations
+
+
 def test_number_density_cap_defaults_per_length() -> None:
     """The number ceiling rises with verbosity: short <= standard <= detailed (VOICE-R8)."""
     assert number_cap("short") == 2
     assert number_cap("standard") == 3
     assert number_cap("detailed") == 4
+    assert number_cap("standard", 1) == 0
+    assert number_cap("standard", 5) == 7
+    assert number_cap("detailed", 5) == 10
 
 
 def test_first_sentence_strips_markup_and_splits() -> None:

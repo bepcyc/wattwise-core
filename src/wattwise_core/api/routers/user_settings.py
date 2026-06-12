@@ -97,6 +97,10 @@ class ResponseLengthStore(Protocol):
 
     async def set_response_length_preference(self, *, athlete_id: str, value: str) -> None: ...
 
+    async def get_numeric_detail_level_preference(self, *, athlete_id: str) -> int: ...
+
+    async def set_numeric_detail_level_preference(self, *, athlete_id: str, value: int) -> None: ...
+
 
 def response_length_store() -> ResponseLengthStore:
     """The agent-state response-length store seam; the app factory overrides it (fail-closed)."""
@@ -158,6 +162,18 @@ class ResponseLengthSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     response_length: ResponseLength
+
+
+class CoachNumericDetailSettings(BaseModel):
+    """The athlete's persisted coach numeric-detail preference.
+
+    Controls how many already-grounded numbers are foregrounded in prose. It does not control
+    model tier, retrieval budget, or grounding strictness.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    coach_numeric_detail_level: int = Field(ge=1, le=5)
 
 
 class DefaultLoadModelSettings(BaseModel):
@@ -391,6 +407,37 @@ async def put_response_length(
     return ResponseLengthSettings(response_length=body.response_length)
 
 
+@router.get(
+    "/coach-numeric-detail-level",
+    response_model=CoachNumericDetailSettings,
+    operation_id="getUserCoachNumericDetailLevel",
+    dependencies=[_Read],
+)
+async def get_coach_numeric_detail_level(
+    store: LengthStore, athlete_id: AthleteId
+) -> CoachNumericDetailSettings:
+    """Read the owner's persisted coach numeric-detail level; defaults to balanced ``3``."""
+    value = await store.get_numeric_detail_level_preference(athlete_id=athlete_id)
+    level = value if 1 <= value <= 5 else 3
+    return CoachNumericDetailSettings(coach_numeric_detail_level=level)
+
+
+@router.put(
+    "/coach-numeric-detail-level",
+    response_model=CoachNumericDetailSettings,
+    operation_id="putUserCoachNumericDetailLevel",
+    dependencies=[_Write],
+)
+async def put_coach_numeric_detail_level(
+    body: CoachNumericDetailSettings, store: LengthStore, athlete_id: AthleteId
+) -> CoachNumericDetailSettings:
+    """Persist the owner's coach numeric-detail default into the AGENT-STATE store."""
+    await store.set_numeric_detail_level_preference(
+        athlete_id=athlete_id, value=body.coach_numeric_detail_level
+    )
+    return CoachNumericDetailSettings(coach_numeric_detail_level=body.coach_numeric_detail_level)
+
+
 # --- §8.10 default training-load model ------------------------------------------
 
 
@@ -433,6 +480,7 @@ async def put_default_load_model(
 
 
 __all__ = [
+    "CoachNumericDetailSettings",
     "DefaultLoadModelSettings",
     "LanguageSettings",
     "ResponseLengthSettings",

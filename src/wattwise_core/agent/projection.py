@@ -131,6 +131,7 @@ def build_inputs(
     locale: str,
     request_text: str | None,
     response_length: ResponseLength = "standard",
+    coach_numeric_detail_level: int = 3,
     conversation_id: str | None = None,
     thread_id: str | None = None,
     follow_up: Mapping[str, Any] | None = None,
@@ -185,6 +186,7 @@ def build_inputs(
         "thread_id": thread_id,
         "idempotency_key": thread_id,
         "response_length": response_length,
+        "coach_numeric_detail_level": coach_numeric_detail_level,
         "turn_id": uuid.uuid4().hex,
     }
     if briefing_screen is not None:

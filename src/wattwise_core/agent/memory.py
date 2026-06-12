@@ -67,6 +67,14 @@ RESPONSE_LENGTH_PREF_PREFIX = "response_length="
 #: The closed VOICE-R8 verbosity set; run/GET fall back to ``standard`` for an unset/unknown value.
 RESPONSE_LENGTHS: tuple[str, ...] = ("short", "standard", "detailed")
 
+#: The marker prefix of the single ``PREFERENCE``-kind memory item holding the athlete's persisted
+#: coach numeric-detail preference. Content shape: ``coach_numeric_detail_level=<1..5>``.
+COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX = "coach_numeric_detail_level="
+
+#: Closed 1..5 coach numeric-detail scale. ``3`` is the balanced default.
+COACH_NUMERIC_DETAIL_LEVELS: tuple[int, ...] = (1, 2, 3, 4, 5)
+DEFAULT_COACH_NUMERIC_DETAIL_LEVEL = 3
+
 
 def response_length_from_items(items: Sequence[RecalledItem]) -> str:
     """The persisted verbosity default carried by ``items``, else ``standard`` (VOICE-R8 §382).
@@ -83,6 +91,27 @@ def response_length_from_items(items: Sequence[RecalledItem]) -> str:
             stored = item.content[len(RESPONSE_LENGTH_PREF_PREFIX) :].strip()
             return stored if stored in RESPONSE_LENGTHS else "standard"
     return "standard"
+
+
+def coach_numeric_detail_level_from_items(items: Sequence[RecalledItem]) -> int:
+    """The persisted numeric-detail preference carried by ``items``, else balanced ``3``.
+
+    This controls PRESENTATION density only. Unknown/corrupt values fall back closed to the
+    balanced default rather than changing grounding or retrieval behavior.
+    """
+    for item in items:
+        if item.kind is MemoryItemKind.PREFERENCE and item.content.startswith(
+            COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX
+        ):
+            stored = item.content[len(COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX) :].strip()
+            try:
+                value = int(stored)
+            except ValueError:
+                return DEFAULT_COACH_NUMERIC_DETAIL_LEVEL
+            if value in COACH_NUMERIC_DETAIL_LEVELS:
+                return value
+            return DEFAULT_COACH_NUMERIC_DETAIL_LEVEL
+    return DEFAULT_COACH_NUMERIC_DETAIL_LEVEL
 
 
 class UntrustedMemoryWriteError(RuntimeError):
@@ -333,6 +362,9 @@ def _recency_key(recorded_at: _dt.datetime) -> float:
 
 
 __all__ = [
+    "COACH_NUMERIC_DETAIL_LEVELS",
+    "COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX",
+    "DEFAULT_COACH_NUMERIC_DETAIL_LEVEL",
     "RESPONSE_LENGTHS",
     "RESPONSE_LENGTH_PREF_PREFIX",
     "MemoryItem",
@@ -341,5 +373,6 @@ __all__ = [
     "OssMemoryStore",
     "RecalledItem",
     "UntrustedMemoryWriteError",
+    "coach_numeric_detail_level_from_items",
     "response_length_from_items",
 ]

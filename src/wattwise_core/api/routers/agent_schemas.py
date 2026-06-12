@@ -83,6 +83,7 @@ class AgentAskRequest(BaseModel):
     question: str | None = Field(default=None, min_length=1, max_length=2000)
     thread_id: str | None = None
     response_length: ResponseLength | None = None
+    coach_numeric_detail_level: int | None = Field(default=None, ge=1, le=5)
     follow_up: FollowUp | None = None
     language: str | None = Field(
         default=None,

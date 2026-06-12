@@ -38,6 +38,7 @@ from wattwise_core.agent.engine_readiness import (
 )
 from wattwise_core.agent.engine_services import CoachBundle
 from wattwise_core.agent.memory import (
+    COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX,
     RESPONSE_LENGTH_PREF_PREFIX,
     RESPONSE_LENGTHS,
     MemoryItemKind,
@@ -237,6 +238,7 @@ class DeliverableEngineMixin:
             # The persisted verbosity-preference marker is an internal run-default knob, not athlete
             # personalization prose — keep it OUT of the recalled context the model sees (VOICE-R2).
             if not item.content.startswith(RESPONSE_LENGTH_PREF_PREFIX)
+            and not item.content.startswith(COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX)
         ]
 
     async def record_run_episode(self: _EngineSeams, *, athlete_id: str, content: str) -> None:

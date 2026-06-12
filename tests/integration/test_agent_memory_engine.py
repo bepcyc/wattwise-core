@@ -257,6 +257,20 @@ async def _seed_response_length_pref(
         )
 
 
+async def _seed_numeric_detail_pref(
+    state_db: AgentStateDatabase, *, athlete_id: str, value: int
+) -> None:
+    """Persist a numeric-detail PREFERENCE in the AGENT-STATE store."""
+    async with state_db.session() as session:
+        store = OssMemoryStore(session)
+        await store.write_episode(
+            athlete_id=athlete_id,
+            kind=MemoryItemKind.PREFERENCE,
+            content=f"coach_numeric_detail_level={value}",
+            trusted=True,
+        )
+
+
 async def test_persisted_verbosity_default_applied_when_no_per_request_length(
     canonical: _DatabaseStub, state_db: AgentStateDatabase
 ) -> None:
@@ -302,3 +316,42 @@ async def test_no_persisted_preference_falls_back_to_standard(
     engine = _engine(canonical, state_db)
     resolved = await engine.resolve_default_response_length(athlete_id=ATHLETE_A, requested=None)
     assert resolved == "standard"
+
+
+async def test_persisted_numeric_detail_default_applied_when_no_per_request_value(
+    canonical: _DatabaseStub, state_db: AgentStateDatabase
+) -> None:
+    """The numeric-detail preference is an agent-state run default, not canonical master data."""
+    await _seed_numeric_detail_pref(state_db, athlete_id=ATHLETE_A, value=5)
+    engine = _engine(canonical, state_db)
+    resolved = await engine.resolve_default_numeric_detail_level(
+        athlete_id=ATHLETE_A, requested=None
+    )
+    assert resolved == 5
+
+
+async def test_per_request_numeric_detail_overrides_persisted_default_without_mutating_it(
+    canonical: _DatabaseStub, state_db: AgentStateDatabase
+) -> None:
+    """A per-request numeric-detail value wins once and leaves the stored default unchanged."""
+    await _seed_numeric_detail_pref(state_db, athlete_id=ATHLETE_A, value=5)
+    engine = _engine(canonical, state_db)
+    overridden = await engine.resolve_default_numeric_detail_level(
+        athlete_id=ATHLETE_A, requested=1
+    )
+    assert overridden == 1
+    still_default = await engine.resolve_default_numeric_detail_level(
+        athlete_id=ATHLETE_A, requested=None
+    )
+    assert still_default == 5
+
+
+async def test_no_numeric_detail_preference_falls_back_to_balanced(
+    canonical: _DatabaseStub, state_db: AgentStateDatabase
+) -> None:
+    """With no stored numeric-detail value, the default is balanced level ``3``."""
+    engine = _engine(canonical, state_db)
+    resolved = await engine.resolve_default_numeric_detail_level(
+        athlete_id=ATHLETE_A, requested=None
+    )
+    assert resolved == 3
