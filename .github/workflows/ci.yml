@@ -47,13 +47,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just lint            # CI-R1 item 1 + item 14 (lint-ast/content/novendor-sql/arch)
@@ -66,13 +74,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just type            # CI-R1 item 2 (mypy --strict)
@@ -85,13 +101,21 @@ jobs:
         with: { fetch-depth: 0 }  # need the full PR commit range
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just lint-commits     # CI-R1 item 15
@@ -103,13 +127,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: uv run pre-commit validate-config   # CI-R1 item 19 (CI-R11)
@@ -121,21 +153,32 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
-      - run: just test-unit        # CI-R1 item 3
-      - run: just test-property
-      - run: just test-golden
-      - run: just test-contract
-      - run: just test-fuzz        # CI-R1 item 16 (bounded PR-gate mode)
-      - run: just test-logging     # CI-R1 item 11
+      - uses: actions/cache@v4
+        with:
+          path: .hypothesis
+          # run_id in the key -> never an exact hit -> the refreshed example DB
+          # is saved after EVERY run; restore-keys picks up the latest prior one.
+          key: hypothesis-${{ github.run_id }}
+          restore-keys: |
+            hypothesis-
+      - run: just test-fast-combined   # CI-R1 items 3 + 11 + 16 (issue #67)
 
   coverage:
     name: Coverage gate
@@ -144,13 +187,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥90%)
@@ -165,13 +216,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just eval             # CI-R1 item 6 (recorded-response mode)
@@ -186,13 +245,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just test-inject      # CI-R1 item 7
@@ -205,13 +272,30 @@ jobs:
         with: { fetch-depth: 0 }   # secret scan over diff + history delta
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ steps.date.outputs.date }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
       - run: bash scripts/ci_tools.sh just gitleaks trivy
       - run: just install
       - run: just scan             # CI-R1 items 8 + 9 (secret scan + lockfile SCA)
@@ -223,13 +307,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just test-forge-portable   # CI-R1 item 18 (CI-R9/DELIV-R8)
@@ -257,13 +349,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
@@ -311,13 +411,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       # Bootstrap-acceptance (BOOT-R1, E4-T3): clean checkout -> migrate ->
@@ -341,7 +449,6 @@ jobs:
             curl -fsS http://127.0.0.1:8000/healthz && break || sleep 1;
           done
           curl -fsS http://127.0.0.1:8000/healthz
-      - run: just test-unit && just test-property && just test-golden && just test-contract
       - run: just test-db-portable      # CI-R1 item 13 (BOOT-R1/R2/R3)
 
   e2e:
@@ -365,13 +472,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
@@ -402,13 +517,21 @@ jobs:
         with: { fetch-depth: 0 }   # merge-base diff scoping needs main's history
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - uses: actions/cache@v4     # mutant/verdict/test-stats cache (issue #35 item 4)
@@ -431,16 +554,43 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ steps.date.outputs.date }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true   # make `docker build` use the buildx container driver (gha cache export needs it)
+      - name: Expose Actions cache runtime to run steps (type=gha cache auth)
+        uses: crazy-max/ghaction-github-runtime@v3
       - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
       - run: just sbom                  # CI-R1 item 10 (CONT-R1: builds the image, no Critical + SBOM)
+        env:
+          # --load: the container driver builds in an isolated BuildKit; load the
+          # result into the local daemon so trivy/syft can scan the tag.
+          WW_BUILDX_CACHE: "--cache-from=type=gha --cache-to=type=gha,mode=max --load"
       - uses: actions/upload-artifact@v4   # retained image-scan report + SBOM (CI-R6)
         if: always()
         with: { name: image-scan-sbom, path: .scan/ }
@@ -453,13 +603,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just install-boot-check    # CI-R1 item 20 (uv build + boot from wheel)
@@ -482,7 +640,11 @@ jobs:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
       - uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just eval-live          # QA-EVAL-R9 live mode + INFRA_ERROR gate (QA-EVAL-R12(b))
@@ -532,18 +694,36 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: astral-sh/setup-uv@v8.2.0
         id: setup_uv
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
         continue-on-error: true   # issue #37: a transient fetch failure gets a retry, not a job failure
       - if: steps.setup_uv.outcome == 'failure'
         run: sleep 20
       - if: steps.setup_uv.outcome == 'failure'
         uses: astral-sh/setup-uv@v8.2.0
-        with: { python-version: "3.13" }
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          cache-python: true
       - uses: docker/login-action@v3            # GHCR push auth (CI-R12)
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true   # make `docker build` use the buildx container driver (gha cache export needs it)
+      - name: Expose Actions cache runtime to run steps (type=gha cache auth)
+        uses: crazy-max/ghaction-github-runtime@v3
       - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
       - run: just release               # CI-R10/CI-R12 (live in CI; FORGE_PROVIDER=github)
+        env:
+          # --load: scan/push read the tag from the local daemon (container driver
+          # builds in an isolated BuildKit otherwise).
+          WW_BUILDX_CACHE: "--cache-from=type=gha --cache-to=type=gha,mode=max --load"

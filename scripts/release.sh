@@ -101,7 +101,11 @@ if ww_is_dry_run; then
 else
   ww_require_tool docker
   ww_log "building release image ${image_tag}..."
+  # WW_BUILDX_CACHE: CI-injected buildx cache flags (issue #67), e.g.
+  # `--cache-from=type=gha --cache-to=type=gha,mode=max --load`; empty locally → no-op.
+  # shellcheck disable=SC2086  # intentional word-splitting of the flag list
   docker build \
+    ${WW_BUILDX_CACHE:-} \
     --build-arg "WATTWISE_VERSION=${VERSION}" \
     --build-arg "WATTWISE_REVISION=$(git -C "${WW_REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)" \
     --label "org.opencontainers.image.version=${VERSION}" \

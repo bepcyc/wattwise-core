@@ -56,13 +56,8 @@ just fmt-check
 log "Type check (just type)";                  just type
 log "Conventional commits (just lint-commits)"; just lint-commits || fail "lint-commits"
 log "Pre-commit config validity";              uv run pre-commit validate-config
-log "Fast tiers"
-just test-unit
-just test-property
-just test-golden
-just test-contract
-just test-fuzz
-just test-logging
+log "Fast tiers (combined xdist, issue #67)"
+just test-fast-combined
 log "Coverage gate (just cov)";                just cov
 log "Agent eval gate (just eval)";             just eval
 log "Injection gate (just test-inject)";       just test-inject
