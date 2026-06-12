@@ -24,6 +24,9 @@ cd wattwise-core
 just bootstrap
 ```
 
+> **Port conflict?** If port 8000 is already in use, set a different port before
+> running bootstrap or dev: `WATTWISE_API__PORT=8001 just bootstrap`.
+
 `just bootstrap` installs the pinned toolchain (`uv sync --frozen`), applies the
 versioned ORM migrations from empty (BOOT-R2), and starts the engine via uvicorn
 against `WATTWISE_DATABASE_DSN`. With no DSN set it defaults to a local SQLite
