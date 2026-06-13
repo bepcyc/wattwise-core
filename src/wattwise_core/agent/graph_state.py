@@ -21,12 +21,10 @@ from wattwise_core.agent.contracts import (
     TURN_COUNTER_FLOOR,
     AgentState,
     ChatModel,
-    CoverageCaveat,
     GroundDecision,
     ReflectDecision,
     ReflectVerdict,
     RetrievalRequest,
-    RunStatus,
     stamp_coverage_gaps,
     stamp_retrieved,
     turn_gaps,
@@ -35,6 +33,7 @@ from wattwise_core.agent.contracts import (
 
 # The loaded language packs + config-driven default-language fallback (LANG-R1/-R4) live in the
 # LEAF :mod:`locale` module; the abstain limitation copy resolves through them.
+from wattwise_core.agent.grounding_factsheet import render_capability_factsheet
 from wattwise_core.agent.locale import EMPTY_LOCALE_POLICY, LocalePolicy
 
 # Re-export the COACH-R8 stable-id observation projection from its focused LEAF module
@@ -43,7 +42,6 @@ from wattwise_core.agent.locale import EMPTY_LOCALE_POLICY, LocalePolicy
 from wattwise_core.agent.observations import build_observations
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
 from wattwise_core.agent.tiering import TokenCounter, estimate_tokens
-from wattwise_core.observability import runtrace
 
 # Bounded recovery budgets (REFLECT-R4), shared with the graph for routing decisions.
 MAX_REFLECTIONS = 2
@@ -323,8 +321,15 @@ def render_context(
         key=lambda kv: context_relevance(kv[1]),
         reverse=True,
     )
-    for key, value in items:
-        candidate = f"{key}:\n<untrusted-data>\n{value}\n</untrusted-data>"
+    # COMPOSE-R1: render each gathered capability through the deterministic fact-sheet path so
+    # the model sees the CURRENT canonical values + trend FIRST (a compact day-series tail
+    # follows), never a raw repr dump whose warm-up zeros dominate the salience and steer the
+    # answer away from the one claim that can ground. The grounder (§7) still verifies every
+    # number the model then states — the fact sheet only steers salience, it certifies nothing.
+    sheets = render_capability_factsheet(dict(items))
+    for key, _ in items:
+        body = sheets.get(key, "no current value available")
+        candidate = f"{key}:\n<untrusted-data>\n{body}\n</untrusted-data>"
         if count("\n".join([*rendered, candidate])) > budget:
             trimmed = True
             continue
@@ -416,60 +421,11 @@ def limitation_text(state: AgentState, locales: LocalePolicy | None = None) -> s
 
 
 # --- terminal status + coverage caveat (OUTCOME-R1/-R4/-R5; no self-grading) ---
-
-
-def terminal_status(state: AgentState, decision: GroundDecision | None, ceiling: int) -> RunStatus:
-    """Deterministically pick the single terminal status (OUTCOME-R1/-R5; no self-grading).
-
-    ``awaiting_approval`` is NEVER produced here (it is yielded by the durable interrupt at
-    interrupt_gate). ``budget_exceeded`` on a refused admission; ``degraded`` on a ceiling
-    breach, a grounder abstain, a bound-exhausted non-PROCEED recovery, or open gaps;
-    otherwise ``completed``.
-    """
-    if budget_exceeded(state):
-        return RunStatus.BUDGET_EXCEEDED
-    if (
-        over_ceiling(state, ceiling)
-        or last_reflect_verdict(state) is ReflectVerdict.GIVE_UP_GRACEFULLY
-        or decision is GroundDecision.ABSTAIN
-        or open_gaps(state)
-        or (decision is not None and decision is not GroundDecision.PROCEED)
-    ):
-        return RunStatus.DEGRADED
-    return RunStatus.COMPLETED
-
-
-def build_caveat(
-    state: AgentState, status: RunStatus, decision: GroundDecision | None
-) -> dict[str, Any] | None:
-    """Build the typed OUTCOME-R4 coverage caveat for a non-completed outcome."""
-    gaps = open_gaps(state)
-    if status is RunStatus.COMPLETED and not gaps:
-        return None
-    fidelity = "degraded" if decision is GroundDecision.ABSTAIN else "partial"
-    caveat = CoverageCaveat(missing=tuple(sorted(gaps)), fidelity=fidelity)
-    return caveat.model_dump()
-
-
-def cost_rollup(state: AgentState, status: RunStatus) -> dict[str, Any]:
-    """Per-run cost/latency rollup carried on every outcome (OUTCOME-R2, AGT-OBS-R2).
-
-    Carries the node-visit + cost-event counts (OUTCOME-R2) AND, when a run trace is active, the
-    AGT-OBS-R2 per-run rollup read from the recorded model/tool spans: total prompt/completion
-    tokens, total cost, total latency, the model-tier mix, the reflection count, and the scrub
-    count — read from the real provider usage, never fabricated. Outside a run (no active trace)
-    only the deterministic counts are present.
-    """
-    events = state.get("cost_events", [])
-    rollup: dict[str, Any] = {
-        "node_visits": state.get("node_visits", 0),
-        "cost_event_count": len(events),
-        "status": status.value,
-    }
-    trace = runtrace.active_trace()
-    if trace is not None:
-        rollup.update(trace.rollup(status.value))
-    return rollup
+#
+# The deterministic terminal-status + coverage-caveat + cost-rollup cluster lives in the focused
+# leaf :mod:`graph_terminal` (QUAL-R9 module-size split). It is re-exported here so existing
+# ``gs.terminal_status`` / ``gs.build_caveat`` / ``gs.cost_rollup`` call sites keep resolving; the
+# bottom-of-file import below breaks the cycle (this module's readers are fully defined first).
 
 
 __all__ = [
@@ -482,6 +438,9 @@ __all__ = [
     "build_observations",
     "context_relevance",
     "cost_rollup",
+    "gathered_metric_capability",
+    "grounded_survivor_count",
+    "is_honest_refusal",
     "is_new_turn",
     "last_ground_decision",
     "last_plan_requests",
@@ -502,3 +461,17 @@ __all__ = [
     "tick_visit",
     "turn_id",
 ]
+
+
+# Bottom-of-file re-export of the terminal-status leaf (QUAL-R9 split): placed here so this
+# module's readers (read_retrieved/over_ceiling/budget_exceeded/open_gaps) are fully defined
+# before graph_terminal imports them, breaking what would otherwise be an import cycle. The
+# names stay on the graph_state surface so call sites use ``gs.terminal_status`` unchanged.
+from wattwise_core.agent.graph_terminal import (  # noqa: E402
+    build_caveat,
+    cost_rollup,
+    gathered_metric_capability,
+    grounded_survivor_count,
+    is_honest_refusal,
+    terminal_status,
+)

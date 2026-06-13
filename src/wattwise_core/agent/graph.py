@@ -49,7 +49,6 @@ from wattwise_core.agent import tiering
 from wattwise_core.agent.contracts import (
     AgentState,
     ChatModel,
-    GroundDecision,
     RunStatus,
     stamp_coverage_gaps,
     stamp_retrieved,
@@ -326,17 +325,16 @@ def _make_finalize(svc: AgentServices, ceiling: int, locales: LocalePolicy) -> G
             "thread_id": state.get("thread_id"),
             "cost_events": [{"node": "finalize", "kind": "settle", "status": status.value}],
         }
-        # Fail closed on abstain (GROUND-R6): when grounding could not verify enough to
-        # answer, the deliverable MUST be an explicit "insufficient grounded data"
-        # limitation — never the last scrubbed draft (a partial non-answer). Replace the
-        # body so the projected deliverable states the limitation, not a stale draft.
-        if decision is GroundDecision.ABSTAIN:
+        # Fail closed on an honest refusal (GROUND-R6 / STATUS-R1): a grounder abstain OR a
+        # data-grounded PROCEED that published ZERO grounded survivors. The deliverable MUST be
+        # the localized "insufficient grounded data" limitation, never the last scrubbed draft (a
+        # confident-sounding number-free non-answer). There is no grounded observation to drill
+        # into a non-answer, so the observations channel is cleared too (COACH-R8).
+        if gs.is_honest_refusal(state, status, decision):
             limitation = gs.limitation_text(state, locales)
             update["grounded_text"] = limitation
             update["grounded_html"] = gs.safe_html(limitation)
             update["citations"] = []
-            # An abstaining deliverable ships only the limitation text — there is no grounded
-            # observation to drill/reveal into a non-answer, so clear the channel too (COACH-R8).
             update["observations"] = []
         return gs.tick_visit(state, update)
 

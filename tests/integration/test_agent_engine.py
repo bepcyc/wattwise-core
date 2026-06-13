@@ -163,16 +163,32 @@ def _ride(native_id: str, day: _dt.date) -> GboCandidate:
 async def test_engine_answer_runs_graph_to_completed(
     seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
 ) -> None:
-    """The engine drives the compiled graph to a terminal grounded answer (GRAPH-R1)."""
-    _, database, _ = seeded
+    """The engine drives the compiled graph to a terminal grounded answer (GRAPH-R1).
+
+    The scripted model states the CANONICAL current fitness as a dateless NUMBER claim, so the
+    real grounder grounds it with a citation and the run completes. (A number-free draft over a
+    gathered metric capability no longer completes — STATUS-R1 degrades it honestly; the
+    completed-with-zero-citations semantics this test once pinned was the issue-44/-45 defect.)
+    """
+    svc, database, _ = seeded
+    today = _dt.datetime.now(UTC).date()
+    series = await svc.pmc(str(OWNER_ATHLETE_ID), today - _dt.timedelta(days=42), today)
+    ctl = next(day.value.ctl for day in reversed(series) if day.available)
     model = FakeModel(
         scripted={
             "_PlanSchema": _PlanSchema(capabilities=["weekly_load"], window_days=42),
             "_ClaimSchema": _ClaimSchema(
-                claims=[_ExtractedClaim(kind=ClaimKind.STATEMENT, text="trending up")]
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text=f"your fitness is {ctl:.2f}",
+                        metric="ctl",
+                        value=ctl,
+                    )
+                ]
             ),
         },
-        prose="Your form is in a good place this week.",
+        prose=f"Your form is in a good place this week — fitness is around {ctl:.2f}.",
     )
     engine = GraphAgentEngine(database, model)  # type: ignore[arg-type]
     answer = await engine.answer(
@@ -185,6 +201,7 @@ async def test_engine_answer_runs_graph_to_completed(
     )
     assert answer.status is RunStatus.COMPLETED
     assert "good place" in answer.answer_text
+    assert answer.citations, "a completed data-grounded answer carries >=1 citation (STATUS-R1)"
 
 
 async def test_claimgrounder_grounds_number_against_canonical(

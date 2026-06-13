@@ -1,4 +1,4 @@
-{"recorded_with": {"model": "deepseek/deepseek-v4-flash", "prompt_sha256": "15e7d66c6190327ab5f233ee2e4a8165bfb79c62dc44862ddd1ed0e2365d171a"}, 
+{"recorded_with": {"model": "deepseek/deepseek-v4-flash", "prompt_sha256": "c39d40e065e676edda55dfea10566d4e7524ba8a770c040a589389de2b011cf9"}, 
   "dataset_version": "1.0.0",
   "suite": "injection",
   "qa_eval_suite": "R2.2/INJ-R2",

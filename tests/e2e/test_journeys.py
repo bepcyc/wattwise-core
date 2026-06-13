@@ -305,8 +305,39 @@ def test_journey_b_pmc_and_headline_metric(journey: _Journey) -> None:
 # --- (c) grounded API ask --------------------------------------------------------
 
 
+def _live_fitness(journey: _Journey) -> float:
+    """The seeded athlete's canonical current fitness (CTL) read off the PMC surface."""
+    pmc = journey.client.get(
+        "/v1/performance/load-fitness",
+        params={"from": "2026-05-25", "to": "2026-06-08"},
+        headers=journey.auth,
+    )
+    ctl = pmc.json()["summary"]["fitness"]
+    assert ctl is not None and ctl > 0
+    return float(ctl)
+
+
 def test_journey_c_grounded_agent_ask(journey: _Journey) -> None:
-    """A grounded question returns a COMPLETED, grounded answer through the agent surface."""
+    """A grounded question returns a COMPLETED, grounded answer through the agent surface.
+
+    The scripted claim states the CANONICAL current fitness so the run completes WITH a grounded
+    citation (STATUS-R1: a data-grounded answer needs grounded substance to complete — the
+    number-free completed answer this journey once pinned was the issue-44 defect).
+    """
+    ctl = _live_fitness(journey)
+    journey.model.set_response(
+        _ClaimSchema(
+            claims=[
+                _ExtractedClaim(
+                    kind=ClaimKind.NUMBER,
+                    text=f"your fitness is around {ctl:.1f}",
+                    metric="ctl",
+                    value=ctl,
+                    as_of="2026-06-08",
+                )
+            ]
+        )
+    )
     resp = journey.client.post(
         "/v1/agent/ask", json={"question": "How is my training going?"}, headers=journey.auth
     )
@@ -314,6 +345,7 @@ def test_journey_c_grounded_agent_ask(journey: _Journey) -> None:
     body = resp.json()
     assert body["status"] == "completed"
     assert body["grounding"]["grounded"] is True
+    assert body["grounding"]["citations"], "a completed data-grounded answer carries a citation"
     assert body["answer_text"].strip()
     assert "<p>" in body["answer_html"]
 
@@ -388,7 +420,22 @@ def test_journey_d_token_issuance_drives_a_grounded_query(journey: _Journey) -> 
     assert claims["sub"] == OWNER_SUBJECT
     assert uuid.UUID(claims["sub"]) == OWNER_ATHLETE_ID
 
-    # The SAME token drives a grounded query through the canonical API path.
+    # The SAME token drives a grounded query through the canonical API path. The scripted claim
+    # states the canonical fitness so the run completes WITH grounded substance (STATUS-R1).
+    ctl = _live_fitness(journey)
+    journey.model.set_response(
+        _ClaimSchema(
+            claims=[
+                _ExtractedClaim(
+                    kind=ClaimKind.NUMBER,
+                    text=f"your fitness is around {ctl:.1f}",
+                    metric="ctl",
+                    value=ctl,
+                    as_of="2026-06-08",
+                )
+            ]
+        )
+    )
     resp = journey.client.post(
         "/v1/agent/ask", json={"question": "Give me a quick read on my form."}, headers=journey.auth
     )

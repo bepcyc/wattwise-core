@@ -51,7 +51,10 @@ from wattwise_core.agent.memory import (  # registers agent_memory_item on Agent
 from wattwise_core.agent.model import FakeModel
 from wattwise_core.agent.state_db import AgentStateDatabase, build_agent_state_database
 from wattwise_core.agent.state_store import AgentStateBase
-from wattwise_core.domain.enums import SignatureOrigin
+from wattwise_core.analytics.service import AnalyticsService
+from wattwise_core.domain.candidate import GboCandidate
+from wattwise_core.domain.enums import Fidelity, SignatureOrigin
+from wattwise_core.ingestion.ingest import IngestService
 from wattwise_core.persistence.models import (
     Athlete,
     Base,
@@ -59,6 +62,7 @@ from wattwise_core.persistence.models import (
     SourceDescriptor,
     Sport,
 )
+from wattwise_core.storage import content_hash
 
 if TYPE_CHECKING:
     from _pytest.mark.structures import ParameterSet
@@ -148,9 +152,42 @@ class _SessionCtx:
         await self._session.close()
 
 
+def _ride(native_id: str, day: _dt.date) -> GboCandidate:
+    """A constant-250 W, 1 h cycling ride (TSS == 100 at FTP 250) on ``day``."""
+    seconds, watts = 3600, 250.0
+    payload = {
+        "start_time": _dt.datetime(day.year, day.month, day.day, 8, 0, tzinfo=_dt.UTC),
+        "sport": "cycling",
+        "elapsed_time_s": seconds,
+        "moving_time_s": seconds,
+        "avg_power_w": watts,
+        "streams": {
+            "power_w": {"values": [watts] * seconds, "sample_basis": "time", "sample_rate_hz": 1.0}
+        },
+        "laps": [
+            {"lap_index": 0, "start_offset_s": 0, "duration_s": seconds, "avg_power_w": watts}
+        ],
+    }
+    return GboCandidate(
+        gbo_type="activity",
+        source_descriptor_id="placeholder",
+        source_native_id=native_id,
+        content_hash=content_hash(native_id.encode()),
+        payload=payload,
+        trust_tier=Fidelity.RAW_STREAM,
+        fetched_at=_dt.datetime.now(_dt.UTC),
+    )
+
+
 @pytest_asyncio.fixture
 async def canonical() -> AsyncIterator[_DatabaseStub]:
-    """An in-memory canonical store seeded with the owner athlete + an FTP signature."""
+    """An in-memory canonical store: owner athletes + FTP signatures + recent rides for A.
+
+    ATHLETE_A carries three recent 100-TSS rides so a free-form answer has a REAL canonical
+    current fitness to ground (STATUS-R1: a data-grounded run only completes when at least one
+    grounded survivor cites canonical data — the number-free completed answer was the issue-44
+    defect these tests once pinned).
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -168,11 +205,18 @@ async def canonical() -> AsyncIterator[_DatabaseStub]:
                     origin=SignatureOrigin.MEASURED,
                 )
             )
-        session.add(
-            SourceDescriptor(
-                source_key="file_import", display_name="Activity files", kind="file_upload"
-            )
+        descriptor = SourceDescriptor(
+            source_key="file_import", display_name="Activity files", kind="file_upload"
         )
+        session.add(descriptor)
+        await session.flush()
+        ingest = IngestService(session)
+        today = _dt.datetime.now(_dt.UTC).date()
+        for i in range(3):
+            day = today - _dt.timedelta(days=3 - i)
+            await ingest.ingest(
+                ATHLETE_A, str(descriptor.source_descriptor_id), [_ride(f"r{i}", day)]
+            )
         await session.commit()
     try:
         yield _DatabaseStub(factory)
@@ -180,16 +224,38 @@ async def canonical() -> AsyncIterator[_DatabaseStub]:
         await engine.dispose()
 
 
-def _answer_model() -> FakeModel:
-    """A FakeModel scripting a grounded free-form answer (one STATEMENT claim, no numbers)."""
+async def _live_ctl(canonical: _DatabaseStub) -> float:
+    """The athlete's CURRENT canonical fitness (latest computed PMC day), read like the engine."""
+    today = _dt.datetime.now(_dt.UTC).date()
+    async with canonical.session() as session:
+        series = await AnalyticsService(session).pmc(
+            ATHLETE_A, today - _dt.timedelta(days=42), today
+        )
+    return next(day.value.ctl for day in reversed(series) if day.available)
+
+
+def _answer_model(ctl: float) -> FakeModel:
+    """A FakeModel scripting a grounded free-form answer stating the CANONICAL fitness.
+
+    The dateless NUMBER claim re-states the live canonical CTL so the real grounder grounds it
+    with a citation and the run COMPLETES (STATUS-R1: a data-grounded answer needs at least one
+    grounded survivor to complete — a number-free draft now degrades honestly).
+    """
     return FakeModel(
         scripted={
             "_PlanSchema": _PlanSchema(capabilities=["weekly_load"], window_days=42),
             "_ClaimSchema": _ClaimSchema(
-                claims=[_ExtractedClaim(kind=ClaimKind.STATEMENT, text="trending up")]
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text=f"your fitness is {ctl:.2f}",
+                        metric="ctl",
+                        value=ctl,
+                    )
+                ]
             ),
         },
-        prose="Your form is in a good place this week.",
+        prose=f"Your form is in a good place this week — fitness around {ctl:.2f}.",
     )
 
 
@@ -228,7 +294,7 @@ async def test_followup_expand_resumes_same_durable_thread(
     fixes). Both turns COMPLETE on the durable saver, proving the run-scoped reset across the turn
     boundary works through the real pool.
     """
-    engine = _engine(canonical, state_db, _answer_model())
+    engine = _engine(canonical, state_db, _answer_model(await _live_ctl(canonical)))
     first = await engine.answer(
         athlete_id=ATHLETE_A,
         question="How am I doing?",
@@ -262,7 +328,7 @@ async def test_followup_reveal_numbers_runs_on_same_thread(
     grounded (the reveal merges grounded citations, never invents one). Here the answer carries no
     grounded number, so the reveal simply completes on the same thread without fabricating one.
     """
-    engine = _engine(canonical, state_db, _answer_model())
+    engine = _engine(canonical, state_db, _answer_model(await _live_ctl(canonical)))
     first = await engine.answer(
         athlete_id=ATHLETE_A,
         question="What's my fitness?",
@@ -332,14 +398,22 @@ async def test_run_recalls_durable_memory_into_compose_and_writes_an_episode(
     before = await _memory_rows(state_db, ATHLETE_A)
     assert len(before) == 1
 
+    ctl = await _live_ctl(canonical)
     model = _ContextCapturingModel(
         scripted={
             "_PlanSchema": _PlanSchema(capabilities=["weekly_load"], window_days=42),
             "_ClaimSchema": _ClaimSchema(
-                claims=[_ExtractedClaim(kind=ClaimKind.STATEMENT, text="trending up")]
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text=f"your fitness is {ctl:.2f}",
+                        metric="ctl",
+                        value=ctl,
+                    )
+                ]
             ),
         },
-        prose="Your form is in a good place this week.",
+        prose=f"Your form is in a good place this week — fitness around {ctl:.2f}.",
     )
     engine = _engine(canonical, state_db, model)
     answer = await engine.answer(

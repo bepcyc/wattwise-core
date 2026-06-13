@@ -48,6 +48,8 @@ def make_route_after_assess(ceiling: int, max_tool_iterations: int) -> Any:
             return "finalize"
         if gs.over_tool_ceiling(state, max_tool_iterations):
             return "compose"
+        if gs.plan_requires_approval(state):
+            return "compose"
         if gs.open_gaps(state) and state.get("reflection_count", 0) < MAX_REFLECTIONS:
             return "reflect"
         return "compose"
