@@ -186,6 +186,7 @@ def _dev_settings() -> Any:
     return load_settings(
         app__environment="development",
         database_dsn="sqlite+aiosqlite:///:memory:",
+        api__json_body_max_bytes=262144,
         agent__model="test-model",
         agent__temperature=0.7,
         agent__max_output_tokens=256,

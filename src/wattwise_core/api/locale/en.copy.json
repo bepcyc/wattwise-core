@@ -24,6 +24,16 @@
     "code": "unsupported_archetype",
     "text": "This source isn't connected with a key."
   },
+  "connection.credential_storage_disabled": {
+    "kind": "validation",
+    "code": "credential_storage_disabled",
+    "text": "Credential storage is disabled until an encryption root key is configured."
+  },
+  "connection.credential_storage_disabled_detail": {
+    "kind": "error",
+    "code": "credential_storage_disabled_detail",
+    "text": "Configure WATTWISE_ENCRYPTION_ROOT_KEY and restart before connecting sources that store API keys. File upload/import still works without credential storage."
+  },
   "sync.unknown_source": {
     "kind": "error",
     "code": "unknown_source",

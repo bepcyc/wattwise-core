@@ -24,6 +24,16 @@
     "code": "unsupported_archetype",
     "text": "Этот источник подключается не по ключу."
   },
+  "connection.credential_storage_disabled": {
+    "kind": "validation",
+    "code": "credential_storage_disabled",
+    "text": "Хранилище ключей отключено, пока не настроен ключ шифрования."
+  },
+  "connection.credential_storage_disabled_detail": {
+    "kind": "error",
+    "code": "credential_storage_disabled_detail",
+    "text": "Настрой WATTWISE_ENCRYPTION_ROOT_KEY и перезапусти сервис перед подключением источников, которые хранят API-ключи. Загрузка файлов работает и без хранилища ключей."
+  },
   "sync.unknown_source": {
     "kind": "error",
     "code": "unknown_source",

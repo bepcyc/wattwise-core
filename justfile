@@ -251,8 +251,6 @@ test-inject:
 # Entry point CHOSEN: the app factory `wattwise_core.api.app:create_app`
 # (uvicorn `--factory`). The engine ships no product CLI / `python -m` runtime
 # (DELIV-R4), so the ASGI factory is the single boot surface.
-# TODO(src/wattwise_core/api): `wattwise_core.api.app:create_app` owned by the
-# API sibling (Dev A). Until it lands this recipe fails at the uvicorn step.
 bootstrap: install _migrate_dev
     @echo "bootstrap: starting wattwise-core against {{WATTWISE_DATABASE_DSN}} (BOOT-R1)"
     WATTWISE_APP__ENVIRONMENT=development \
@@ -262,8 +260,6 @@ bootstrap: install _migrate_dev
 
 # Apply versioned ORM migrations from empty (BOOT-R2). Vendor-portable: the same
 # Alembic revisions run on SQLite/PostgreSQL/MariaDB (only the DSN differs).
-# TODO(migrations): Alembic env + revisions owned by the persistence sibling
-# (Dev B); `alembic.ini` + `migrations/`.
 migrate:
     WATTWISE_DATABASE_DSN="{{WATTWISE_DATABASE_DSN}}" {{uv}} alembic upgrade head
 
@@ -365,10 +361,8 @@ test-forge-portable:
 
 # Package-build & install-boot gate (CI-R1 item 20, COMM-R12): `uv build`
 # produces wheel+sdist, the wheel installs into a FRESH env (not the editable
-# checkout), and the engine boots + passes offline tiers FROM the installed
-# package.
-# TODO(scripts): `scripts/install_boot_check.sh` owned by the delivery sibling
-# (build a clean venv, `pip install dist/*.whl`, run offline tiers from it).
+# checkout), and the installed package boots offline without importing from the
+# source tree.
 build:
     uv build
 

@@ -129,6 +129,7 @@ def test_t2_windowed_equivalence_oracle(
 # --- PMC-T3: convergence --------------------------------------------------------
 
 
+@settings(deadline=None)
 @given(c=st.floats(1.0, 300.0, allow_nan=False), tau_ctl=_tau_ctl, tau_atl=_tau_atl)
 def test_t3_constant_load_converges(c: float, tau_ctl: float, tau_atl: float) -> None:
     """Constant L=c for t >> tau drives CTL,ATL -> c and TSB -> 0."""

@@ -14,9 +14,9 @@ CI the path of least resistance.
 
 ## 1. One-command bootstrap (BOOT-R1)
 
-Clone, then bring up a working instance and a green offline suite with a single
-documented command. The only thing you supply by hand is secrets, via the
-environment (BOOT-R4) — never a committed file.
+Clone, then bring up a working local instance with a single documented command.
+The only thing you supply by hand is secrets, via the environment (BOOT-R4) —
+never a committed file. Run the test gate separately before opening a PR.
 
 ```bash
 git clone https://github.com/bepcyc/wattwise-core.git
@@ -37,7 +37,9 @@ PostgreSQL or MariaDB to run on those backends — only the DSN changes (BOOT-R3
 Secrets come from the environment / a secret manager only (BOOT-R4, SEC-R12).
 See `.env.example` for the variable **names** (copy the shapes into your secret
 manager; do not commit values). In `development` the engine boots without the
-production secrets; in `staging`/`production` it fails closed if any are absent.
+production secrets for file-upload/local analytics work; API-key connector storage
+stays disabled until `WATTWISE_ENCRYPTION_ROOT_KEY` is configured. In
+`staging`/`production` it fails closed if required secrets are absent.
 
 ### The single interface: `just`
 

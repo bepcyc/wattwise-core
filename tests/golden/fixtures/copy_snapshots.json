@@ -1,25 +1,34 @@
 {
   "de": {
     "connection.credential_rejected": "Der Schlüssel hat nicht funktioniert — prüf ihn und versuch es noch einmal.",
+    "connection.credential_storage_disabled": "Die Speicherung von Zugangsdaten ist deaktiviert, bis ein Verschlüsselungsschlüssel konfiguriert ist.",
+    "connection.credential_storage_disabled_detail": "Konfiguriere WATTWISE_ENCRYPTION_ROOT_KEY und starte neu, bevor du Quellen verbindest, die API-Schlüssel speichern. Datei-Uploads funktionieren weiter ohne Zugangsdatenspeicher.",
     "connection.key_archetype_only": "Diese Quelle wird nicht über einen Schlüssel verbunden.",
     "sync.unknown_source": "Das hast du noch nicht verbunden.",
     "validation.check_value": "Prüf den Wert und versuch es noch einmal.",
+    "validation.default_tier_not_allowed": "Wähl eine Standard-Stufe, die auch zu den erlaubten Stufen gehört.",
     "validation.range_reversed": "Das Startdatum muss am oder vor dem Enddatum liegen.",
     "validation.signature_type_required": "Sag uns, um welche Art von Signatur es sich handelt, und versuch es noch einmal."
   },
   "en": {
     "connection.credential_rejected": "That key didn't work — double-check it and try again.",
+    "connection.credential_storage_disabled": "Credential storage is disabled until an encryption root key is configured.",
+    "connection.credential_storage_disabled_detail": "Configure WATTWISE_ENCRYPTION_ROOT_KEY and restart before connecting sources that store API keys. File upload/import still works without credential storage.",
     "connection.key_archetype_only": "This source isn't connected with a key.",
     "sync.unknown_source": "You haven't connected that yet.",
     "validation.check_value": "Check that value and try again.",
+    "validation.default_tier_not_allowed": "Pick a default tier that is also one of the allowed tiers.",
     "validation.range_reversed": "The start date needs to be on or before the end date.",
     "validation.signature_type_required": "Tell us which kind of signature this is and try again."
   },
   "ru": {
     "connection.credential_rejected": "Этот ключ не подошёл — проверь его и попробуй ещё раз.",
+    "connection.credential_storage_disabled": "Хранилище ключей отключено, пока не настроен ключ шифрования.",
+    "connection.credential_storage_disabled_detail": "Настрой WATTWISE_ENCRYPTION_ROOT_KEY и перезапусти сервис перед подключением источников, которые хранят API-ключи. Загрузка файлов работает и без хранилища ключей.",
     "connection.key_archetype_only": "Этот источник подключается не по ключу.",
     "sync.unknown_source": "Это ещё не подключено.",
     "validation.check_value": "Проверь значение и попробуй ещё раз.",
+    "validation.default_tier_not_allowed": "Выбери стандартный уровень из списка разрешённых уровней.",
     "validation.range_reversed": "Дата начала должна быть не позже даты окончания.",
     "validation.signature_type_required": "Укажи, какой это тип сигнатуры, и попробуй ещё раз."
   }

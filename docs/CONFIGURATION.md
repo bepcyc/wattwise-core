@@ -53,6 +53,11 @@ You need three things to boot in the default `production` environment:
 - an **encryption root key** (`WATTWISE_ENCRYPTION_ROOT_KEY`),
 - a **token signing key** (`WATTWISE_TOKEN_SIGNING_KEY`).
 
+For local file-only evaluation, `development` can run without the encryption root
+key. In that mode FIT/GPX/TCX upload and local analytics still work, but API-key
+connectors are disabled until `WATTWISE_ENCRYPTION_ROOT_KEY` is configured. The
+service never stores connector credentials in plaintext or under an ephemeral key.
+
 Generate the two keys once and keep them safe — rotating them invalidates stored
 encrypted data and issued tokens. The commands below create fresh values:
 
@@ -151,6 +156,11 @@ curl http://127.0.0.1:8000/v1/connections -H "$AUTH"
 
 Follow the steps the connector returns to supply your intervals.icu API key. Once
 connected, syncs pull your history on demand.
+
+If you started in development without `WATTWISE_ENCRYPTION_ROOT_KEY`, completing an
+API-key connector returns `credential-storage-disabled`. Restart with a real
+encryption root key to enable encrypted credential storage; file uploads remain
+available without it.
 
 You do not normally touch any configuration for this. If intervals.icu rate-limits
 your account or you want to pace requests differently, the connector's retry and
@@ -325,8 +335,10 @@ WATTWISE_MIGRATE_ON_START=0 to manage migrations yourself.
 Fix: correct `WATTWISE_DATABASE_DSN`, make sure the database is up, and restart.
 
 > **Tip for development only.** Setting `WATTWISE_APP__ENVIRONMENT=development` relaxes
-> the secret requirements — the service will boot with only a database connection
-> string, using an ephemeral key path. Never run a real deployment in `development`.
+> production secret requirements. The service can boot with only a database connection
+> string, but credential-backed connectors stay disabled until
+> `WATTWISE_ENCRYPTION_ROOT_KEY` is configured. Never run a real deployment in
+> `development`.
 
 ## Reference: every setting
 
