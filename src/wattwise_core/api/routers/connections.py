@@ -118,8 +118,24 @@ class CredentialSink(BaseModel):
 
 
 def credential_sink() -> CredentialSink:
-    """Provide the credential-store seam; the app factory overrides it (AUTH-R16)."""
-    raise ProblemError("internal-error")  # pragma: no cover - replaced by the app factory
+    """Provide the credential-store seam; keyless apps keep credential storage disabled.
+
+    ``create_app`` overrides this dependency only when an envelope encryption root key is
+    configured. Without that key, file upload/import remains available but API-key connector
+    completion fails closed with a typed operator-actionable 4xx instead of storing a secret
+    insecurely or surfacing a generic internal error.
+    """
+    raise ProblemError(
+        "credential-storage-disabled",
+        detail=_copy("connection.credential_storage_disabled_detail"),
+        errors=[
+            FieldError(
+                code="credential_storage_disabled",
+                message=_copy("connection.credential_storage_disabled"),
+                parameter="source",
+            )
+        ],
+    )
 
 
 ProbeDep = Annotated[CredentialProbe, Depends(credential_probe)]

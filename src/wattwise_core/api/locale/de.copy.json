@@ -24,6 +24,16 @@
     "code": "unsupported_archetype",
     "text": "Diese Quelle wird nicht über einen Schlüssel verbunden."
   },
+  "connection.credential_storage_disabled": {
+    "kind": "validation",
+    "code": "credential_storage_disabled",
+    "text": "Die Speicherung von Zugangsdaten ist deaktiviert, bis ein Verschlüsselungsschlüssel konfiguriert ist."
+  },
+  "connection.credential_storage_disabled_detail": {
+    "kind": "error",
+    "code": "credential_storage_disabled_detail",
+    "text": "Konfiguriere WATTWISE_ENCRYPTION_ROOT_KEY und starte neu, bevor du Quellen verbindest, die API-Schlüssel speichern. Datei-Uploads funktionieren weiter ohne Zugangsdatenspeicher."
+  },
   "sync.unknown_source": {
     "kind": "error",
     "code": "unknown_source",

@@ -225,7 +225,7 @@ def _build_app(
     settings: Settings,
     holder: dict[str, AsyncSession],
     probe: _FakeProbe,
-    sink: _FakeSink,
+    sink: _FakeSink | None,
     processor: _FakeProcessor,
     orchestrator: _FakeOrchestrator,
 ) -> FastAPI:
@@ -252,9 +252,10 @@ def _build_app(
     app.dependency_overrides[get_db] = _session
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[connections_router.credential_probe] = lambda: probe
-    app.dependency_overrides[connections_router.credential_sink] = lambda: (
-        connections_router.CredentialSink(store=sink.store)
-    )
+    if sink is not None:
+        app.dependency_overrides[connections_router.credential_sink] = lambda: (
+            connections_router.CredentialSink(store=sink.store)
+        )
     app.dependency_overrides[imports_router.import_processor] = lambda: processor
     app.dependency_overrides[sync_router.sync_orchestrator] = lambda: orchestrator
     app.dependency_overrides[get_agent_state_session] = _make_state_session()
@@ -389,6 +390,26 @@ def test_complete_bad_key_is_422_with_no_half_connected_row(harness: _Harness) -
     assert resp.json()["type"].endswith("/credential-invalid")
     # The probe rejected it, so nothing was stored and no half-connected row exists.
     assert harness.sink.stored == []
+    assert _connection_count(harness) == 0
+
+
+def test_complete_without_credential_storage_is_typed_422(harness: _Harness) -> None:
+    """Keyless mode refuses API-key storage with a typed 422; no row is created (#48)."""
+    app = harness.client.app
+    previous = app.dependency_overrides.pop(connections_router.credential_sink)
+    try:
+        resp = harness.client.post(
+            "/v1/connections/intervals_icu/complete",
+            headers=_auth(),
+            json={"api_key": "good-key"},
+        )
+    finally:
+        app.dependency_overrides[connections_router.credential_sink] = previous
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["type"].endswith("/credential-storage-disabled")
+    assert body["errors"][0]["code"] == "credential_storage_disabled"
     assert _connection_count(harness) == 0
 
 

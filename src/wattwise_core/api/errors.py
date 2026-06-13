@@ -110,6 +110,7 @@ def _catalog() -> dict[str, ProblemType]:
         ProblemType("import-rejected", 422, "We couldn't read that file"),
         ProblemType("decision-conflict", 409, "That plan was already decided"),
         ProblemType("credential-invalid", 422, "Those sign-in details didn't work"),
+        ProblemType("credential-storage-disabled", 422, "Credential storage is not enabled"),
         ProblemType("internal-error", 500, "Something went wrong on our side"),
     )
     return {entry.slug: entry for entry in entries}
