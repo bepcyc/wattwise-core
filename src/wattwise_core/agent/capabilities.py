@@ -137,6 +137,16 @@ _Resolver = Callable[[AnalyticsService, str, BaseModel], Awaitable[Any]]
 
 async def _r_weekly_load(svc: AnalyticsService, athlete_id: str, p: BaseModel) -> Any:
     q = cast(DateRangeParams, p)
+    latest_activity_date = getattr(svc, "latest_activity_date", None)
+    if callable(latest_activity_date):
+        latest = await latest_activity_date(athlete_id)
+        if not isinstance(latest, _dt.date):
+            return _gap("no_activities", "athlete has no activities to compute training load")
+        if latest < q.from_date:
+            return _gap(
+                "no_recent_activities",
+                f"latest activity {latest.isoformat()} predates requested window",
+            )
     return await svc.pmc(athlete_id, q.from_date, q.to_date)
 
 

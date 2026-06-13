@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime as _dt
 import math
 import os
+import re
 from collections.abc import AsyncIterator
 
 import pytest
@@ -205,6 +206,57 @@ async def test_live_agent_answers_grounded_and_completed(live_db: Database) -> N
         "live agent did not reach a grounded COMPLETED answer with citations in "
         f"{_MAX_ATTEMPTS} attempts (last status={last_status}); the headline grounding path "
         "regressed — natural-term claims are not grounding against canonical analytics."
+    )
+
+
+async def test_live_load_question_states_a_concrete_number(live_db: Database) -> None:
+    """COMPOSE-R1/-R2 + STATUS-R1 (issues #44/#45): the load answer STATES a concrete figure.
+
+    The pre-fix live defect (issue #44) was vague, number-free prose ("there isn't a single
+    'total load' number ... but the pattern shows a clear ramp-up") that terminated ``completed``
+    with ``citations=[]``. With the fact-sheet compose context (COMPOSE-R1), the figure-stating
+    voice prompt (COMPOSE-R2), and grounded-substance status coupling (STATUS-R1), a COMPLETED
+    load answer MUST carry ≥1 citation AND surface a concrete number in the athlete-facing text —
+    and a run that grounds nothing degrades honestly rather than completing empty. Bounded
+    attempts (a real model is stochastic); the capability, not a single draft, is asserted.
+    """
+    settings = load_settings(
+        app__environment="development",
+        database_dsn=str(live_db.engine.url),
+        llm_api_key=os.environ["WATTWISE_LLM_API_KEY"],
+    )
+    engine = build_agent_engine(live_db, settings)
+    assert engine is not None, "live tier requires a configured model (WATTWISE_LLM_API_KEY)"
+
+    last_status: RunStatus | None = None
+    for _ in range(_MAX_ATTEMPTS):
+        answer = await engine.answer(
+            athlete_id=str(OWNER_ATHLETE_ID),
+            question="How is my training load and fitness looking right now?",
+            thread_id=None,
+            response_length="standard",
+            follow_up=None,
+            locale="en",
+        )
+        last_status = answer.status
+        # STATUS-R1: a data-grounded run that grounds nothing must NOT complete empty — it
+        # degrades. So a COMPLETED outcome here MUST carry grounded citations (never completed+[]).
+        if answer.status is RunStatus.COMPLETED:
+            assert answer.citations, "COMPLETED load answer with zero citations (STATUS-R1)"
+        if answer.status is not RunStatus.COMPLETED or not answer.citations:
+            continue
+        # The athlete-facing text states a concrete figure (COMPOSE-R1/-R2), not number-free filler.
+        assert re.search(r"\d", answer.answer_text), (
+            "COMPLETED grounded load answer surfaced NO number in the prose — the issue-44 "
+            f"number-free-filler regression: {answer.answer_text!r}"
+        )
+        matches = [await _canonical_matches(live_db, c.metric, c.value) for c in answer.citations]
+        assert all(matches), f"a citation did not match canonical analytics: {answer.citations}"
+        return
+
+    pytest.fail(
+        "live load question did not reach a grounded COMPLETED answer stating a concrete number in "
+        f"{_MAX_ATTEMPTS} attempts (last status={last_status}); issues #44/#45 regressed."
     )
 
 

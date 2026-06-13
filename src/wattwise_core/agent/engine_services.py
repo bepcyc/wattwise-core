@@ -71,9 +71,14 @@ class DeterministicCoverage:
     """Reports planned capabilities that resolved to no canonical evidence (pure)."""
 
     def assess(self, *, request_text: str | None, retrieved: Mapping[str, Any]) -> set[str]:
-        # A turn with no retrieved evidence at all is the only structural gap the headline
-        # flow reports; per-capability emptiness is surfaced by the gather records.
-        return set() if retrieved else {"no_canonical_evidence"}
+        if not retrieved:
+            return {"no_canonical_evidence"}
+        gaps: set[str] = set()
+        for key, record in retrieved.items():
+            if isinstance(record, Mapping) and record.get("available") is False:
+                reason = record.get("reason")
+                gaps.add(f"{key}:{reason}" if reason else key)
+        return gaps
 
 
 class CoachBundle:
