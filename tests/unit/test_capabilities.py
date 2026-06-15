@@ -113,6 +113,12 @@ class FakeAnalyticsService:
         self.activity_calls.append(activity_id)
         return Computed(value=88.0)
 
+    async def durability(self, activity_id: str) -> MetricResult[Any]:
+        self.activity_calls.append(activity_id)
+        if self._missing:
+            return Unavailable(UnavailableReason.INSUFFICIENT_DATA, "no fatigued state")
+        return Computed(value="durability-decrement")
+
     async def hrv(self, athlete_id: str, local_date: _dt.date) -> MetricResult[TimeDomainHrv]:
         self.athlete_calls.append(athlete_id)
         if self._missing:
@@ -139,6 +145,7 @@ _EXPECTED_METHOD_BY_KEY = {
     "hrv": "hrv",
     "decoupling": "aerobic_decoupling",
     "trimp": "trimp",
+    "durability": "durability",
 }
 
 
@@ -280,6 +287,16 @@ async def test_gather_routes_activity_capabilities_by_activity_id() -> None:
     ).records
     assert svc.activity_calls == ["act-9"]
     assert out["decoupling"].value == 4.2
+
+
+async def test_gather_routes_durability_by_activity_id() -> None:
+    """The durability capability resolves to svc.durability for the named activity (PLAN-R3)."""
+    svc = _svc()
+    out = (
+        await gather(svc, _ATHLETE, [RetrievalRequest("durability", {"activity_id": "act-d"})])
+    ).records
+    assert svc.activity_calls == ["act-d"]
+    assert out["durability"].value == "durability-decrement"
 
 
 # --------------------------------------------------------------------------- #

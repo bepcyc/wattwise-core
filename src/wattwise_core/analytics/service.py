@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.analytics import _service_load as _load_path
 from wattwise_core.analytics import decoupling as _dec
+from wattwise_core.analytics import durability as _dur
 from wattwise_core.analytics import hrv as _hrv
 from wattwise_core.analytics import load_resolution as _load_res
 from wattwise_core.analytics import mmp_cp as _mmp
@@ -211,6 +212,46 @@ class AnalyticsService:  # noqa: size-limits
             return _wbal.wbal(None, None, None, sport=act.sport)
         sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
         return _wbal.wbal(resample_to_1hz(power), sig.cp_w, sig.w_prime_j, sport=act.sport)
+
+    async def durability(self, activity_id: str) -> MetricResult[_dur.DurabilityDecrement]:
+        """Compute the work-conditioned durability decrement for an activity (DUR-R1..R8).
+
+        Durability (fatigue resistance) is the drop in best ``target_duration_s`` power
+        from the fresh to the fatigued part of ONE ride, where "fatigued" is reached by
+        accumulating intensity-weighted work above CP (the W'-expenditure signal Spragg
+        2024 identifies as the driver of the power-duration downward shift — not raw kJ).
+        The fresh→fatigued threshold is anchored per-athlete to a multiple of ``W'``
+        (DUR-R7) so the split is comparable across athletes, never a global kJ literal.
+
+        Fail-closed envelope, threaded VERBATIM from the pure metric (ANL-R4): sport
+        applicability is the first gate (ANL-R12) — a non-cycling-power sport yields
+        ``NOT_APPLICABLE_FOR_SPORT`` regardless of W'/power; an applicable sport with no
+        resolvable ``W'`` is ``MISSING_REQUIRED_INPUT``; a ride that never reaches the
+        fatigue threshold (the COMMON path — most rides are neither long nor hard enough)
+        is ``INSUFFICIENT_DATA``, never a fabricated full-retention number (DUR-R5).
+        """
+        act = await self._activity(activity_id)
+        if act is None:
+            return Unavailable(_MISSING, "unknown activity")
+        channels = await self._activity_channels(activity_id)
+        power = channels.get(StreamChannelName.POWER_W)
+        power_1hz = resample_to_1hz(power) if power is not None else None
+        sig = await self.resolve_signature(str(act.athlete_id), act.sport, act.start_time.date())
+        cp_w = sig.cp_w if sig.cp_w is not None else 0.0
+        # ANL-R12: the sport gate must speak first. The pure metric checks sport before any
+        # W'/power/CP gate, so a non-cycling sport fails closed NOT_APPLICABLE here with the
+        # placeholder threshold never reached (it is ignored before validation).
+        if act.sport not in _dur.APPLICABLE_SPORTS:
+            return _dur.durability_decrement(
+                power_1hz, cp_w, fatigue_threshold_j=1.0, sport=act.sport
+            )
+        # DUR-R7: per-athlete fatigue threshold from W'; a missing/invalid W' fails closed.
+        threshold = _dur.fatigue_threshold_from_wprime(sig.w_prime_j)
+        if not is_computed(threshold):
+            return threshold
+        return _dur.durability_decrement(
+            power_1hz, cp_w, fatigue_threshold_j=threshold.value, sport=act.sport
+        )
 
     async def aerobic_decoupling(self, activity_id: str) -> MetricResult[float]:
         """Compute aerobic decoupling for an activity (DEC-R1)."""
