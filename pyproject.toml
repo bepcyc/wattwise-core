@@ -171,7 +171,20 @@ pytest_add_cli_args_test_selection = ["tests/"]
 # via test_traceability+test_planted_secret, docker/ via test_container_entrypoint, alembic
 # bits via migration-shape tests). mutation-floors.toml is copied so the gate can read the
 # ratchet floors from inside the sandbox; justfile so recipe-introspection tests resolve.
-also_copy = ["tools", "scripts", "migrations", "docker", "alembic.ini", "mutation-floors.toml", "justfile"]
+# The packaged config defaults.toml is the lowest Settings layer (config/settings.py reads it
+# via ``Path(__file__).with_name``); mutmut copies only .py from source_paths, so without this
+# any test that builds Settings inside the sandbox fails the required-field validation (e.g.
+# api__json_body_max_bytes) and aborts the clean-baseline run before a single mutant is checked.
+also_copy = [
+  "tools",
+  "scripts",
+  "migrations",
+  "docker",
+  "alembic.ini",
+  "mutation-floors.toml",
+  "justfile",
+  "src/wattwise_core/config/defaults.toml",
+]
 do_not_mutate = [
   # Shipped seam-contract TEST base classes (GOLD-R5 §6.3a) — assertion helpers,
   # not product logic; mutating them only measures the helpers, not the suite.
