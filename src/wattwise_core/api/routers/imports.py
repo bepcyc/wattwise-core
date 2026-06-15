@@ -35,6 +35,7 @@ from typing import Annotated, Final, Literal
 from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select, tuple_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from wattwise_core.agent.ops_jobs import ImportJobRecord
@@ -338,18 +339,31 @@ def _job_of(row: ImportJobRecord) -> ImportJob:
 
 
 async def _record_job(session: AsyncSession, athlete_id: str, job: ImportJob) -> None:
-    """Persist the accepted job's bookkeeping row on the agent-state store (ARCH-R13)."""
-    session.add(
-        ImportJobRecord(
-            import_job_id=job.import_job_id,
-            athlete_id=uuid.UUID(athlete_id),
-            status=job.status,
-            filename=job.filename,
-            status_text=job.status_text,
-            received_at=job.received_at,
-        )
-    )
-    await session.flush()
+    """Persist the accepted job's bookkeeping row on the agent-state store (ARCH-R13).
+
+    Idempotent on the job id (ING-R6 / FIL-R5): re-uploading a file whose activity has
+    already landed re-derives the same activity id (the upsert's stable resolution) and
+    thus the same ``import_job_id``. A naive ``INSERT`` then collides on the primary key
+    and a bare ``IntegrityError`` would surface as a ``500`` — exactly the failure a
+    retrying/double-clicking user must never see. The insert is wrapped in a SAVEPOINT
+    (``begin_nested``) so a collision rolls back ONLY the duplicate add, leaving the outer
+    session usable, and the already-recorded job stands: the second upload converges to
+    the same accepted job rather than crashing the request.
+    """
+    try:
+        async with session.begin_nested():
+            session.add(
+                ImportJobRecord(
+                    import_job_id=job.import_job_id,
+                    athlete_id=uuid.UUID(athlete_id),
+                    status=job.status,
+                    filename=job.filename,
+                    status_text=job.status_text,
+                    received_at=job.received_at,
+                )
+            )
+    except IntegrityError:
+        pass
 
 
 def queued_job(import_job_id: str, filename: str | None) -> ImportJob:
