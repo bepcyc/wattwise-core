@@ -375,6 +375,29 @@ async def test_approval_gated_plan_pauses_at_durable_interrupt() -> None:
     assert resumed["status"] is RunStatus.COMPLETED
 
 
+async def test_non_proceed_plan_degrades_never_awaits_approval() -> None:
+    """A non-PROCEED plan run is NEVER put to a human decision (issue #25, decision-aware gate).
+
+    The ``ground`` node writes ``grounded_text`` on EVERY pass — including an ABSTAIN body the
+    grounder ruled unpublishable. Without a decision-aware gate, an approval-gated plan would pause
+    and ship that body as AWAITING_APPROVAL, asking the athlete to approve a plan the grounder does
+    not stand behind. The gate now requires PROCEED before soliciting approval: a non-PROCEED plan
+    falls through to finalize and degrades like every other deliverable.
+    """
+    model, svc = _services(gaps=set(), decision=GroundDecision.ABSTAIN)
+    graph = build_graph(model, svc, InMemorySaver())
+    cfg = _config("non-proceed-plan")
+
+    state = _input()
+    # An approval-gated PLAN deliverable, but the grounder ABSTAINS on its body.
+    state["messages"] = [{"role": "system", "kind": "plan_deliverable", "requires_approval": True}]
+    out = await graph.ainvoke(state, config=cfg)
+
+    assert "__interrupt__" not in out  # never paused for a human decision
+    assert out["status"] is RunStatus.DEGRADED
+    assert out["status"] is not RunStatus.AWAITING_APPROVAL
+
+
 async def test_write_once_identity_overwrite_is_rejected() -> None:
     """A second write of a DIFFERENT athlete_id is rejected at the reducer (STATE-R4)."""
     assert _write_once("", "athlete-1") == "athlete-1"

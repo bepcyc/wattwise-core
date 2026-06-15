@@ -388,14 +388,20 @@ def _has_regatherable_metric_gap(claims: Sequence[GroundedClaim]) -> bool:
     """True iff a scrubbed claim is a missing-metric gap that re-gathering could close (GROUND-R6).
 
     The deterministic signal that distinguishes a RECOVERABLE under-grounding (route ``replan``)
-    from a pure fabrication (route ``abstain``): an ungrounded NUMBER is a real metric the draft
-    cited whose canonical value was MISSING at grounding time (``_verify_number`` returns
+    from a pure fabrication (route ``abstain``): an ungrounded DESCRIPTIVE NUMBER is a real metric
+    the draft cited whose canonical value was MISSING at grounding time (``_verify_number`` returns
     ``UNGROUNDED`` only when the canonical value was ``None`` — never retrieved); that gap is what
     re-gathering closes (GROUND-R9 ``replan`` = "missing evidence"). An ungrounded NAME/URL or
-    scrubbed prescription is a fabrication retrieval can never ground, so it does NOT replan.
+    scrubbed prescription is a fabrication retrieval can never ground, so it does NOT replan: a
+    PRESCRIPTION is a future target, not a cell of the record, so re-gathering canonical evidence
+    can never make it sayable (issue #25) — it degrades honestly instead of burning the re-plan
+    budget on a wall it cannot clear.
     """
     return any(
-        c.verdict is GroundVerdict.UNGROUNDED and c.claim.kind is ClaimKind.NUMBER for c in claims
+        c.verdict is GroundVerdict.UNGROUNDED
+        and c.claim.kind is ClaimKind.NUMBER
+        and not c.claim.prescriptive
+        for c in claims
     )
 
 
