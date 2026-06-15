@@ -121,6 +121,13 @@ CAPABILITIES: tuple[Capability, ...] = (
         service_method="trimp",
         param_schema=ActivityParams,
     ),
+    Capability(
+        key="durability",
+        description="Durability / fatigue-resistance: the fresh-vs-fatigued power decrement "
+        "(and total work above CP) for one activity.",
+        service_method="durability",
+        param_schema=ActivityParams,
+    ),
 )
 
 CAPABILITY_BY_KEY: Mapping[str, Capability] = {c.key: c for c in CAPABILITIES}
@@ -187,6 +194,10 @@ async def _r_trimp(svc: AnalyticsService, athlete_id: str, p: BaseModel) -> Any:
     return await svc.trimp(cast(ActivityParams, p).activity_id)
 
 
+async def _r_durability(svc: AnalyticsService, athlete_id: str, p: BaseModel) -> Any:
+    return await svc.durability(cast(ActivityParams, p).activity_id)
+
+
 RESOLVERS: Mapping[str, _Resolver] = {
     "weekly_load": _r_weekly_load,
     "critical_power": _r_critical_power,
@@ -195,6 +206,7 @@ RESOLVERS: Mapping[str, _Resolver] = {
     "hrv": _r_hrv,
     "decoupling": _r_decoupling,
     "trimp": _r_trimp,
+    "durability": _r_durability,
 }
 
 # Identity/scope-shaped keys a model-selected request is structurally forbidden from

@@ -100,6 +100,10 @@ class RecordingAnalytics:
         self.calls.append(("trimp", (activity_id,)))
         return {"trimp": 77.0}
 
+    async def durability(self, activity_id: str) -> Any:
+        self.calls.append(("durability", (activity_id,)))
+        return {"decrement_pct": 8.0}
+
     async def hrv(self, athlete_id: str, local_date: _dt.date) -> Any:
         self.calls.append(("hrv", (athlete_id, local_date)))
         return {"rmssd_ms": 42.0}

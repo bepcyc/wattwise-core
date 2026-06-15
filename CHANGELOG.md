@@ -41,6 +41,15 @@ semver derived from Conventional Commits.
   gating as the default path (`Unavailable(INSUFFICIENT_DATA)` when the record cannot
   support the number), a non-blocking `fresh_effort_below_cp` quality flag, and new
   `[analytics]` keys `durability_target_duration_s` / `durability_wprime_multiple`.
+- Durability wired into the consumer surface (issue #39): `AnalyticsService.durability`
+  resolves the per-athlete CP/W′ as-of the activity date and computes the decrement
+  on demand (same fail-closed envelope as its siblings — sport applicability, then a
+  missing-W′ gate, then the sufficiency gate), and a new `durability` capability exposes
+  it on both the deterministic `gather` route and the MCP tool surface, so the coach can
+  retrieve and discuss a ride's fatigue resistance. Per-activity numeric *grounding* of
+  the decrement (a cited number) is the shared activity-scoped evidence gap tracked in
+  issue #47; persisting `work_above_cp_j` awaits a derived-activity store writer (no such
+  ingest path exists yet — analytics are computed on demand).
 - Binding-faithful grounding (issue #10): the deterministic claim-binding layer re-derives
   each NUMBER claim's `(metric, as_of)` verification target from the claim's own sentence
   (metric mis-attributions corrected in place, stale-as-current dates dropped, dated
