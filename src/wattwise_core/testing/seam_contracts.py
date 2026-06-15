@@ -393,6 +393,7 @@ class _ContractGrounder:
         draft: str,
         retrieved: Any,
         request_text: str | None = None,
+        active_constraints: Any = None,
     ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="42", value=42.0)
         survivor = GroundedClaim(

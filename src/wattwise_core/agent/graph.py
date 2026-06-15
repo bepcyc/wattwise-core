@@ -231,6 +231,11 @@ def _make_ground(svc: AgentServices) -> GraphNode:
             # echo (the request's constraint, e.g. "5-7 hours a week"), never a canonical-data
             # claim the grounder must fail closed on.
             request_text=state.get("request_text"),
+            # The athlete's ACTIVE constraints, from the recalled core tier (MEM-R6), so the
+            # deterministic constraint gate (GROUND-R13/R14) can veto/caution a contradicting
+            # prescription. Kept as the plain {content, severity} projection — the pure gate stays
+            # pure; this is the state -> gate wiring (ADR 0008 §6).
+            active_constraints=gs.active_constraints(state),
         )
         obs.record_grounding(result)
         citations = [gc.citation for gc in result.survivors if gc.citation is not None]

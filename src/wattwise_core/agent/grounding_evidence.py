@@ -26,8 +26,10 @@ from wattwise_core.agent import grounding_sweep as _sweep
 from wattwise_core.agent.capabilities import CanonicalEvidence, MetricEquivalence
 from wattwise_core.agent.contracts import ChatModel, Claim, ClaimKind, GroundingResult
 from wattwise_core.agent.grounding_binding import BindingGuard, BindingMode
+from wattwise_core.agent.grounding_constraints import ActiveConstraint, ConstraintGate
 from wattwise_core.agent.grounding_entailment import EntailmentGate
 from wattwise_core.agent.grounding_factsheet import render_fact_sheet
+from wattwise_core.agent.memory import ConstraintSeverity
 from wattwise_core.agent.structured import StructuredOutputError, run_structured
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.observability import metrics as obs_metrics
@@ -97,6 +99,20 @@ _WORKOUT_TYPE_TO_NAME: Mapping[CanonicalWorkoutType, str] = {
 def _normalize_workout_name(name: str) -> str:
     """Normalize a workout name for canonical-library comparison (case/whitespace-folded)."""
     return " ".join(name.casefold().split())
+
+
+def _coerce_severity(value: object) -> ConstraintSeverity:
+    """Coerce a recalled constraint's ``severity`` projection to the enum, defaulting SOFT.
+
+    The recalled core tier (MEM-R6) carries ``severity`` as a plain string token; an unknown /
+    missing value falls back closed to SOFT (caution, never an unintended HARD veto, ADR 0008 §4).
+    """
+    if value is None:
+        return ConstraintSeverity.SOFT
+    try:
+        return ConstraintSeverity(str(value))
+    except ValueError:
+        return ConstraintSeverity.SOFT
 
 
 class _SnapshotEvidence:
@@ -265,6 +281,7 @@ class ClaimGrounder:
         claim_system: str = "",
         binding: BindingGuard | None = None,
         entailment: EntailmentGate | None = None,
+        constraint_gate: ConstraintGate | None = None,
     ) -> None:
         self._model = model
         self._svc = svc
@@ -288,6 +305,11 @@ class ClaimGrounder:
         # decides enforce/shadow/off), ``entailment`` the decorrelated GROUND-R11 sentence gate.
         self._binding = binding
         self._entailment = entailment
+        # The deterministic constraint gate (proposed GROUND-R13/R14, ADR 0008): runs AFTER the
+        # value + entailment layers, vetoing/cautioning a prescription that contradicts an active
+        # athlete constraint threaded in via ``active_constraints``. ``None`` (mode off, or empty
+        # bundle) preserves the prior behaviour. The gate is PURE; this grounder does the wiring.
+        self._constraint_gate = constraint_gate
 
     async def ground(
         self,
@@ -296,6 +318,7 @@ class ClaimGrounder:
         draft: str,
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
+        active_constraints: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult:
         try:
             extracted = await run_structured(
@@ -348,7 +371,45 @@ class ClaimGrounder:
             request_numbers=request_numbers,
             binding=guard if guard is not None and guard.mode is BindingMode.ENFORCE else None,
         )
-        return await self._apply_entailment(result, snapshots, retrieved, request_text)
+        result = await self._apply_entailment(result, snapshots, retrieved, request_text)
+        return self._apply_constraints(result, active_constraints)
+
+    def _apply_constraints(
+        self, result: GroundingResult, active_constraints: Sequence[Mapping[str, Any]] | None
+    ) -> GroundingResult:
+        """Run the deterministic constraint gate over the grounded result (GROUND-R13/R14).
+
+        The athlete's ACTIVE constraints are threaded in from graph state (the recalled core tier,
+        MEM-R6) as plain ``{content, severity}`` projections; this wiring builds the typed
+        :class:`ActiveConstraint` set (deriving each forbidden-activity token set) and runs the PURE
+        gate. A HARD violation scrubs the contradicting prescription and forces the decision off
+        ``proceed``; a SOFT one surfaces a caution (the prescription stays). Both are RECORDED on
+        observability counters (ADR 0008 §7), mirroring the entailment recorder. With no gate
+        configured (mode off / empty bundle) or no active constraints, the result is unchanged.
+        """
+        if self._constraint_gate is None or not active_constraints:
+            return result
+        constraints = [
+            ActiveConstraint.from_content(content, _coerce_severity(item.get("severity")))
+            for item in active_constraints
+            if (content := str(item.get("content") or "").strip())
+        ]
+        if not constraints:
+            return result
+        gated = self._constraint_gate.apply(result, constraints)
+        registry = obs_metrics.get_registry()
+        for sentence in gated.hard_violations:  # noqa: B007  count, not the value
+            registry.increment(
+                obs_metrics.CONSTRAINT_VIOLATIONS,
+                labels={"severity": ConstraintSeverity.HARD.value},
+            )
+        if gated.cautions:
+            registry.increment(obs_metrics.CONSTRAINT_CAUTIONS, amount=float(len(gated.cautions)))
+        if gated.hard_violations:
+            _logger.warning("grounding_constraint_violations", count=len(gated.hard_violations))
+        if gated.cautions:
+            _logger.info("grounding_constraint_cautions", count=len(gated.cautions))
+        return gated.result
 
     def _anchored_guard(self) -> BindingGuard | None:
         """The run's GROUND-R10 guard, anchored ONCE to the evidence's reference date.

@@ -180,6 +180,13 @@ class _GroundingSettings(BaseModel):
     # non-empty value here additionally pins the exact dataset_version label.
     agent__entailment__calibration_dataset_version: str
     agent__entailment__max_checks: int = Field(ge=1)
+    # Constraint-aware grounding (issue #77, proposed GROUND-R13/R14; ADR 0008). ``enabled`` gates
+    # ONLY the NLI model layer (the 3-way contradiction verifier ADR 0008 §1 proposes — a documented
+    # follow-up, NOT implemented here), default OFF. The DETERMINISTIC floor (a structured/lexical
+    # activity-term contradiction check) runs regardless, governed by ``mode`` (off|shadow|enforce —
+    # validated by the closed enum at gate construction). Schema only — values in defaults.toml.
+    agent__constraints__enabled: bool
+    agent__constraints__mode: str
 
 
 class Settings(_GroundingSettings, _AnalyticsSettings, BaseSettings):

@@ -1,6 +1,6 @@
 # ADR 0008 — Constraint-aware grounding (issue #77): the athlete's own limits gate the advice
 
-Status: proposed (2026-06-15). Source: issue #77 (the safety slice) — companion thesis in
+Status: accepted (2026-06-15). Source: issue #77 (the safety slice) — companion thesis in
 issue #79 (athlete-as-human model + closed observe→adapt loop). This ADR is **constraints
 only**; the broader human-state model and the absence/deviation loop are #79.
 
@@ -203,3 +203,46 @@ Complementary to #25 (verifies a future number is *feasible*) and #79 (the human
 absence/deviation loop, which extends MEM-R6/R7). No shared code paths with ADR 0005's value /
 binding / entailment layers beyond the reused verifier *adapter architecture* and the conformal
 *calibration* primitive.
+
+## 11. Implemented in this PR vs. deferred
+
+**Implemented (the deterministic, ENFORCED vertical slice):**
+
+- **Salience tier (§3, MEM-R6).** `OssMemoryStore.fetch_active_constraints` returns the full active
+  set (HARD-first, never `limit`-bounded); `recall_memory_for_run` PREPENDS it ahead of the
+  keyword/recency pool, de-duplicated by id — a constraint is never evicted by usage.
+- **Lifecycle + severity (§2/§4, MEM-R7/GROUND-R14).** `ConstraintSeverity` {HARD, SOFT} +
+  `ConstraintStatus` {ACTIVE, LIFTED, EXPIRED} + nullable `severity`/`status`/`effective_until`
+  columns on `agent_memory_item` (migration `0016`); NULL status reads as ACTIVE (backward-compat);
+  expiry excludes a constraint from the active set; `lift_constraint` clears one.
+- **Deterministic constraint gate (§1/§2/§10.1, GROUND-R13/R14).** `grounding_constraints.py`: a
+  pure, synchronous activity-term contradiction FLOOR with a minimal multilingual (EN/DE/RU)
+  negation+activity lexicon. HARD → veto (scrub the violating span + force the decision off
+  `proceed`, mirroring `_downgrade_for_sweep`); SOFT → a structured caution (the prescription stays,
+  flagged). Conservative by construction: a NEUTRAL activity ("easy swim" vs "no running") is never
+  blocked. Wired into `ClaimGrounder.ground` after the value+entailment layers, with the active
+  constraints threaded through graph state (`graph_state.active_constraints`).
+- **Capture API (§5).** `POST`/`GET`/`DELETE /v1/user-settings/constraints` (server-derived
+  identity), through the shared engine seam (`ConstraintCaptureMixin`).
+- **Config / observability / tests.** `[agent.constraints]` (`mode = off|shadow|enforce`, default
+  `enforce`); `wattwise_agent_grounding_constraint_violations_total{severity}` +
+  `..._cautions_total`; unit tests for the gate (incl. the neutral-must-proceed and multilingual
+  cases), the lifecycle, and constraint salience under N≫limit unrelated history.
+
+**Deferred (documented opt-in seam, default OFF — NOT implemented here):**
+
+- **The 3-way NLI contradiction verifier (§1, the GROUND-R13 model layer).** The decorrelated,
+  fully-local DeBERTa-v3-MNLI-class checkpoint scoring `P(contradiction)` per (constraint,
+  prescription) pair that would catch PARAPHRASE the deterministic floor cannot. `[agent.constraints]
+  enabled` is its (off) gate; the deterministic floor runs regardless of `enabled`. Per-severity
+  split-conformal thresholds (§2) are part of this deferred layer.
+- **Model-side auto-extraction of inferred constraints (§5).** Detecting a constraint-expressing
+  turn ("my knee hurts") and auto-writing an `inferred=True`, SOFT constraint. The explicit
+  user-settings capture path ships; the LLM extraction does not.
+- **Athlete-facing SOFT-caution surfacing (§2).** The SOFT path currently *detects* the
+  contradiction and records it (the `CautionNote`, the `..._cautions_total` counter, a structured
+  log line) but does NOT yet thread the caution into the athlete-facing deliverable as the
+  shared-decision prompt ("I see you noted X — is Y still off the table?"). Surfacing requires
+  carrying the cautions on `GroundingResult` → graph state → the deliverable projection/API
+  contract; deferred to keep this PR's deliverable contract unchanged. The HARD veto (the safety
+  guarantee) is fully wired; the SOFT path is observable now and athlete-visible next.

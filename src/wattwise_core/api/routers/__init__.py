@@ -31,6 +31,7 @@ from wattwise_core.api.routers import (
     planning,
     sync,
     user_settings,
+    user_settings_constraints,
     users,
 )
 
@@ -45,6 +46,7 @@ ROUTERS: list[APIRouter] = [
     agent_routes.router,
     athlete.router,
     user_settings.router,
+    user_settings_constraints.router,
     users.router,
     planning.router,
     goals.router,
