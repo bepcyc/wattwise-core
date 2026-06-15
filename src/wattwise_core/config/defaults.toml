@@ -85,10 +85,17 @@ content_security_policy = "default-src 'none'; frame-ancestors 'none'; base-uri 
 # raise them. They must be strictly positive (a 0/negative bound is a degenerate plan,
 # rejected fail-closed at load). node_visit_ceiling comfortably exceeds the longest legal
 # agent path (ingest + bounded reflect/redraft cycles + finalize); it matches the graph's
-# historical generous default.
+# historical generous default. wall_clock_seconds must accommodate a 2026 reasoning
+# model's multi-minute thinking trace per call across the run's bounded node path
+# (MODEL-R5a), so it tracks the per-call request_timeout headroom rather than the old
+# 120s that truncated legitimate reasoning runs.
 node_visit_ceiling = 60
-max_output_tokens = 8192
-wall_clock_seconds = 120
+# The run-guard OUTPUT ceiling. MUST be >= the agent's model output budget
+# ([agent].max_output_tokens) or the guard would clip a reasoning model's answer
+# below what the model is told it may emit (MODEL-R5a: sized for reasoning models,
+# sub-4096 non-conforming). Kept in lockstep with the agent budget.
+max_output_tokens = 32768
+wall_clock_seconds = 600
 max_tool_iterations = 16
 # The per-athlete AGENT-class request-rate bound (LIMIT-R2): the production RateLimiter's
 # ``agent`` ceiling is built from THIS value, so it IS the documented agent baseline of
@@ -253,18 +260,25 @@ reasoning_effort = "low"
 temperature = 0.0
 # Sized for reasoning models: reasoning tokens are billed against the completion
 # budget and emitted BEFORE the answer, so a small allowance yields an empty answer
-# (MODEL-R5a). Must comfortably hold reasoning trace + visible answer.
-max_output_tokens = 8192
+# (MODEL-R5a). Must comfortably hold reasoning trace + visible answer. 32768 gives a
+# 2026 flash-class reasoning model ample room for an extended thinking trace plus the
+# full coach answer; a swapped smaller model overrides this down via the env var.
+max_output_tokens = 32768
 # The target model's context window (tokens), for the MODEL-R3 input budget: the engine
 # assembles the compose context within ``context_window_tokens`` minus the reserved OUTPUT
 # headroom (the resolved output-token budget above), trimming lowest-relevance records first.
-# Loaded content (CFG-R1a) — set per the deployed model; the 2026 default model carries a
-# large window, sized here conservatively so a swapped smaller model is not silently overrun.
-context_window_tokens = 131072
+# Loaded content (CFG-R1a) — set per the deployed model. The 2026 default model
+# (deepseek-v4-flash) carries a ~1M-token window (MODEL-R5a: no legacy/small-model
+# assumptions); a swapped smaller model overrides this down via the env var so it is
+# never silently overrun.
+context_window_tokens = 1000000
 # Fail-closed grounding (GROUND-R*): the agent abstains unless every claim is
 # grounded in retrieved canonical data at/above this coverage.
 grounding_min_coverage = 1.0
-request_timeout_seconds = 60
+# A 2026 reasoning-capable model emits an extended thinking trace before the answer,
+# so a single completion can legitimately take minutes (MODEL-R5a). 60s clipped real
+# answers mid-reasoning; 600s (10 min) is the per-call ceiling, config-overridable.
+request_timeout_seconds = 600
 # AGT-SEC-R4 provider-send PII policy ("where policy requires"): mask the outbound system +
 # untrusted-data regions through the central redactor before they reach the third-party
 # provider. ON by default so durable agent PII never leaves the process unmasked.

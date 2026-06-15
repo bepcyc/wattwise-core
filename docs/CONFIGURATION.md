@@ -194,16 +194,17 @@ a question fails, but uploads, syncs, and analytics all work.
 
 A few model settings worth knowing:
 
-- `WATTWISE_AGENT__MAX_OUTPUT_TOKENS` (default `8192`) is the answer budget. Reasoning
+- `WATTWISE_AGENT__MAX_OUTPUT_TOKENS` (default `32768`) is the answer budget. Reasoning
   models spend tokens thinking before they answer, and that thinking is billed against
   this same budget — so a small value can leave no room for the actual answer. Keep it
   generous.
-- `WATTWISE_AGENT__CONTEXT_WINDOW_TOKENS` (default `131072`) must match your model's
-  real context window. If you swap to a smaller model, lower this so the engine does
-  not overrun it.
+- `WATTWISE_AGENT__CONTEXT_WINDOW_TOKENS` (default `1000000`) must match your model's
+  real context window. The default matches the shipped model's ~1M-token window; if you
+  swap to a smaller model, lower this so the engine does not overrun it.
 - `WATTWISE_AGENT__TEMPERATURE` (default `0.0`) keeps answers steady and repeatable.
-- `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` (default `60`) caps how long a single
-  model call may take.
+- `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` (default `600`) caps how long a single
+  model call may take. A reasoning model's thinking trace can legitimately run for
+  minutes, so this is generous; lower it only if you want to fail faster.
 
 If you want per-run cost reporting to be accurate, set your provider's real prices in
 `WATTWISE_AGENT__COST__INPUT_PER_MILLION_USD` and
@@ -221,10 +222,10 @@ to invent numbers. The defaults are good. A few knobs matter to a self-hoster:
 - **Reply length and budget.** The agent run is bounded so a single question cannot run
   away. The bounds live under `WATTWISE_ENTITLEMENT__*`:
   - `NODE_VISIT_CEILING` (default `60`) — the maximum reasoning steps per run.
-  - `MAX_OUTPUT_TOKENS` (default `8192`) — the per-run output ceiling enforced by the
+  - `MAX_OUTPUT_TOKENS` (default `32768`) — the per-run output ceiling enforced by the
     run guard. (This is separate from `WATTWISE_AGENT__MAX_OUTPUT_TOKENS`, which is the
-    value sent to the model.)
-  - `WALL_CLOCK_SECONDS` (default `120`) — the wall-clock limit for one run.
+    value sent to the model; keep this ceiling at least as large.)
+  - `WALL_CLOCK_SECONDS` (default `600`) — the wall-clock limit for one run.
   - `MAX_TOOL_ITERATIONS` (default `16`) — the cap on data-fetch loops.
   You can raise these if runs feel cut short. They appear in the `/readyz` `plan` block,
   so you can confirm an override took effect.
@@ -450,8 +451,8 @@ Applies to PostgreSQL/MariaDB; SQLite ignores these.
 | `WATTWISE_RATELIMIT__MUTATING_PER_MINUTE` | `30` | ≥ 1 | Per-minute ceiling for write requests. |
 | `WATTWISE_ENTITLEMENT__REQUEST_RATE_PER_MINUTE` | `20` | ≥ 1 | Per-minute ceiling for agent requests. |
 | `WATTWISE_ENTITLEMENT__NODE_VISIT_CEILING` | `60` | ≥ 1 | Maximum reasoning steps per agent run. |
-| `WATTWISE_ENTITLEMENT__MAX_OUTPUT_TOKENS` | `8192` | ≥ 1 | Output-token ceiling enforced on an agent run. |
-| `WATTWISE_ENTITLEMENT__WALL_CLOCK_SECONDS` | `120` | > 0 | Wall-clock limit for one agent run. |
+| `WATTWISE_ENTITLEMENT__MAX_OUTPUT_TOKENS` | `32768` | ≥ 1 | Output-token ceiling enforced on an agent run. |
+| `WATTWISE_ENTITLEMENT__WALL_CLOCK_SECONDS` | `600` | > 0 | Wall-clock limit for one agent run. |
 | `WATTWISE_ENTITLEMENT__MAX_TOOL_ITERATIONS` | `16` | ≥ 1 | Maximum data-fetch loops per agent run. |
 
 ### Ingestion and syncing
@@ -514,9 +515,9 @@ performance-management practice; change them only if you know what you are doing
 | `WATTWISE_AGENT__TIER` | `flash` | — | Label tagged on model spans for observability. |
 | `WATTWISE_AGENT__REASONING_EFFORT` | `low` | — | Reasoning-effort label tagged on model spans. |
 | `WATTWISE_AGENT__TEMPERATURE` | `0.0` | 0.0–2.0 | Sampling temperature. |
-| `WATTWISE_AGENT__MAX_OUTPUT_TOKENS` | `8192` | ≥ 1 | Output-token budget sent to the model. |
-| `WATTWISE_AGENT__CONTEXT_WINDOW_TOKENS` | `131072` | ≥ 1024 | Your model's context window; set to match the deployed model. |
-| `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` | `60` | > 0 | Timeout for one model request. |
+| `WATTWISE_AGENT__MAX_OUTPUT_TOKENS` | `32768` | ≥ 1 | Output-token budget sent to the model. |
+| `WATTWISE_AGENT__CONTEXT_WINDOW_TOKENS` | `1000000` | ≥ 1024 | Your model's context window; set to match the deployed model. |
+| `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` | `600` | > 0 | Timeout for one model request. |
 | `WATTWISE_AGENT__GROUNDING_MIN_COVERAGE` | `1.0` | 0.0–1.0 | Required fraction of claims backed by your data. |
 | `WATTWISE_AGENT__REDACT_PROVIDER_PAYLOADS` | `true` | — | Mask personal data before it reaches the model provider. |
 | `WATTWISE_AGENT__IDEMPOTENCY_DEDUP_WINDOW_SECONDS` | `60` | ≥ 0 | Window in which a resubmitted identical turn reuses the same run; `0` disables. |
