@@ -97,6 +97,23 @@ def _request_echo(claim: Claim) -> _Outcome:
     return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), token)
 
 
+def _is_request_echo(
+    claim: Claim, request_values: frozenset[float], *, echo_blocked: bool
+) -> bool:
+    """True iff this claim's value echoes a number the ATHLETE supplied in their request.
+
+    Sign-insensitive: a range's second member ("5-7") extracts with the dash attached, so a
+    claimed 7 (or -7) matches the user's sign-stripped echo token. ``echo_blocked`` is the binding
+    guard's R10d veto (issue #10): a METRIC-SHAPED sentence may never ground as a request echo — it
+    verifies canonically or scrubs (fail-closed). ``claim.value is None`` can never echo. The ONE
+    place this predicate lives so the descriptive (``_verify_number``) and prescriptive
+    (``_verify_prescription``) callers cannot drift.
+    """
+    if echo_blocked or claim.value is None:
+        return False
+    return claim.value in request_values or abs(claim.value) in request_values
+
+
 def _verify_prescription(
     claim: Claim,
     request_values: frozenset[float],
@@ -118,9 +135,7 @@ def _verify_prescription(
     stand behind. The binding guard's R10d veto (``echo_blocked``) still forbids a metric-shaped
     sentence from grounding as an echo.
     """
-    if not echo_blocked and (
-        claim.value in request_values or abs(claim.value or 0.0) in request_values
-    ):
+    if _is_request_echo(claim, request_values, echo_blocked=echo_blocked):
         return _request_echo(claim)
     return _scrubbed(claim, GroundVerdict.UNGROUNDED)
 
@@ -142,9 +157,10 @@ def _verify_number(
     is scrubbed entirely — never a placeholder or zero (GROUND-R7) — UNLESS the number is an ECHO of
     one the ATHLETE supplied in their own request (``request_values``): a user-supplied figure is
     the request's own constraint, not a canonical-data claim, so it stays sayable and is cited as a
-    ``user_request`` echo. Canonical verification always runs FIRST: a claim whose metric resolves
-    to an available canonical value is verified (and corrected) against canonical data even if its
-    value coincides with a request number.
+    ``user_request`` echo. For a descriptive claim, canonical verification runs FIRST: a claim
+    whose metric resolves to an available canonical value is verified (and corrected) against
+    canonical data even if its value coincides with a request number. (A PRESCRIPTION never reaches
+    this canonical path — it short-circuits above.)
 
     Tolerance only decides whether a claim is RECOGNIZED as a (rounded/restated) reference to
     the canonical number — it NEVER lets the model's own figure ship. A claimed value within
@@ -162,13 +178,9 @@ def _verify_number(
         _canonical_metric(evidence, claim.metric, claim.ref) if claim.metric is not None else None
     )
     if canonical is None:
-        # Sign-insensitive: a range's second member ("5-7") extracts with the dash attached,
-        # so a claimed 7 (or -7) matches the user's sign-stripped echo token. ``echo_blocked``
-        # is the binding guard's R10d veto (issue #10): a METRIC-SHAPED sentence may never
-        # ground as a request echo — it verifies canonically or scrubs (fail-closed).
-        if not echo_blocked and (
-            claim.value in request_values or abs(claim.value) in request_values
-        ):
+        # An unavailable canonical value scrubs UNLESS it echoes a number the athlete supplied
+        # in their own request (the request's own constraint, not a canonical-data claim).
+        if _is_request_echo(claim, request_values, echo_blocked=echo_blocked):
             return _request_echo(claim)
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
     # The PUBLISHED figure is ALWAYS the canonical value rounded to display precision — never the
@@ -184,6 +196,7 @@ def _verify_number(
 
 __all__ = [
     "_Outcome",
+    "_is_request_echo",
     "_parse_request_values",
     "_request_echo",
     "_scrubbed",

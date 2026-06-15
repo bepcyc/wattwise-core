@@ -85,9 +85,17 @@ parameter instability — not a predicted outcome.
 
 ## 4. Accepted residuals / scope boundary
 
-- The decision-aware gate (§2) is **inert in Phase 1**: the product ships no approval-gated
-  plan (`plan_requires_approval` is effectively always false), so the change is a forward
-  guard. The load-bearing safety fix is the §1 numeric split.
+- The decision-aware gate (§2) is **live, not a forward guard**: the multi-day PLAN deliverable
+  ships (the `/v1` planning endpoint -> `engine.plan_deliverable(requires_approval=True)`), so
+  the gate change actively governs approval. Concretely, since a target-bearing plan's
+  prescriptive numbers now scrub: a plan that still grounds *something* (workout NAMEs,
+  request-echoes) reaches the gate as `PROCEED` and pauses for approval with its numeric targets
+  stripped; a plan whose only content was prescriptive numbers becomes `ABSTAIN` and **degrades
+  at finalize instead of pausing** — correctly, since the grounder will not stand behind a gutted
+  body. This is the agreed #25 interim, but it is a *visible* change to the approval feature, not
+  a dormant one. (An earlier draft of this ADR called the gate "inert in Phase 1"; that was wrong
+  — the stale `plan_requires_approval` docstring claimed Phase-1 ships no plan, which the live
+  planning endpoint contradicts.)
 - The recorded eval cassettes still capture descriptive claims, so the offline suite does not
   yet exercise the prescriptive path end-to-end; the plan goldens that assert "progressive
   targets survive grounding" and "a taper is never rewritten upward via simulation" land with
