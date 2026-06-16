@@ -184,6 +184,7 @@ class _RecordingGrounder:
         draft: str,
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
+        active_constraints: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult:
         self.seen_keys.append(sorted(retrieved.keys()))
         claim = Claim(kind=ClaimKind.NUMBER, text="42", value=42.0)
