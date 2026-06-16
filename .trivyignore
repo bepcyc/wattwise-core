@@ -2,13 +2,25 @@
 # re-reviewed whenever the pinned base-image digest changes. The gate itself stays
 # unconditional — this file is the explicit, reviewable exception list, not a blanket flag.
 
-# debian:bookworm base (python:3.13-slim-bookworm@e4fa1f97). Fixed upstream in
-# 3.7.9-2+deb12u7 but the pinned base has not republished; remove on next digest bump.
-CVE-2026-33845
-CVE-2026-42010
 # No upstream fix available (vendor will_not_fix / fix_deferred); not reachable through the
 # engine's runtime surface (no DTLS, no perl entrypoints, no minizip use).
 CVE-2025-7458
 CVE-2026-42496
 CVE-2026-8376
 CVE-2023-45853
+
+# debian:bookworm base (python:3.13-slim-bookworm@05b95397). The libgnutls30/libssl3
+# advisories that were here for @e4fa1f97 are FIXED by the digest bump to @05b95397
+# (deb12u7 / deb12u2) and removed. These remain: no upstream fix yet, and none is reachable
+# through the runtime surface — re-review on the next base digest bump.
+#   libncursesw6: no terminal/curses UI in the runtime (uvicorn server, no TUI).
+CVE-2025-69720
+#   libsqlite3-0 (system lib): the engine talks to SQLite through aiosqlite's own bundled
+#   library, not the system libsqlite3 — these are not on the runtime path.
+CVE-2026-11822
+CVE-2026-11824
+#   perl-base: no perl entrypoint or perl-invoking code path in the runtime image.
+CVE-2026-42497
+CVE-2026-48959
+CVE-2026-48962
+CVE-2026-9538

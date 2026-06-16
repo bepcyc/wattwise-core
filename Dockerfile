@@ -63,7 +63,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime: minimal, non-root, no build tools, no dev deps, no tests.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:e4fa1f978c539608a10cdf74700ac32a3f719dfc6e8b6b6001da82deb36302a2 AS runtime
+FROM python:3.13-slim-bookworm@sha256:05b95397cac02b060ff1251afaa78087d92d7034369afbc8eb765631cada8257 AS runtime
 
 # OCI provenance labels (CI-R12). version/revision are injected at build/release time; defaults keep
 # a bare `docker build` honest. ARGs are NOT secrets (SEC-R12) — purely build metadata.
