@@ -16,21 +16,24 @@ from __future__ import annotations
 
 import datetime as _dt
 from collections.abc import Mapping, Sequence
-from enum import StrEnum
 from typing import Any
-
-from pydantic import BaseModel, Field
 
 from wattwise_core.agent import grounding as _grounding
 from wattwise_core.agent import grounding_sweep as _sweep
 from wattwise_core.agent.capabilities import CanonicalEvidence, MetricEquivalence
 from wattwise_core.agent.contracts import ChatModel, Claim, ClaimKind, GroundingResult
 from wattwise_core.agent.grounding_binding import BindingGuard, BindingMode
+from wattwise_core.agent.grounding_claim_schema import (
+    _WORKOUT_TYPE_TO_NAME,
+    CanonicalWorkoutType,
+    _ClaimSchema,
+    _ExtractedClaim,
+    source_claims,
+)
 from wattwise_core.agent.grounding_constraints import ActiveConstraint, ConstraintGate
 from wattwise_core.agent.grounding_entailment import EntailmentGate
 from wattwise_core.agent.grounding_factsheet import render_fact_sheet
 from wattwise_core.agent.memory import ConstraintSeverity
-from wattwise_core.agent.structured import StructuredOutputError, run_structured
 from wattwise_core.analytics.service import AnalyticsService
 from wattwise_core.observability import metrics as obs_metrics
 from wattwise_core.observability.logging import get_logger
@@ -60,40 +63,6 @@ CANONICAL_WORKOUT_NAMES: frozenset[str] = frozenset(
         "sprint intervals",
     }
 )
-
-
-class CanonicalWorkoutType(StrEnum):
-    """The closed, LANGUAGE-INDEPENDENT canonical workout-type vocabulary (COACH-R2, STRUCT-R1/R3).
-
-    The typed prescription the model emits as STRUCTURED output for a prescribed-workout NAME
-    claim: a plan in ANY language carries the SAME enum member, so grounding resolves the workout
-    by its STRUCTURE — never by re-matching a translated surface name (the language-enumeration the
-    owner rejected). Each member maps 1:1 to a canonical training-prescription name in
-    :data:`CANONICAL_WORKOUT_NAMES`, so a structured-type ground yields the SAME stable
-    ``workout:{name}`` canonical id as the legacy surface-name path (GROUND-R5 citation stability).
-    The enum is exhaustive for the prescription decision space (STRUCT-R3): an out-of-vocabulary
-    value is a structured-output validation failure, never a new type.
-    """
-
-    REST_DAY = "rest_day"
-    RECOVERY_RIDE = "recovery_ride"
-    RECOVERY_SPIN = "recovery_spin"
-    ENDURANCE_RIDE = "endurance_ride"
-    LONG_RIDE = "long_ride"
-    TEMPO_INTERVALS = "tempo_intervals"
-    SWEET_SPOT_INTERVALS = "sweet_spot_intervals"
-    THRESHOLD_INTERVALS = "threshold_intervals"
-    VO2MAX_INTERVALS = "vo2max_intervals"
-    ANAEROBIC_INTERVALS = "anaerobic_intervals"
-    SPRINT_INTERVALS = "sprint_intervals"
-
-
-#: The structured canonical workout TYPE -> the normalized canonical NAME its ``workout:{name}``
-#: citation id is keyed on. The type's identifier IS the canonical name with spaces (so the
-#: structured-type ground and the legacy surface-name ground produce a byte-identical canonical id).
-_WORKOUT_TYPE_TO_NAME: Mapping[CanonicalWorkoutType, str] = {
-    member: member.value.replace("_", " ") for member in CanonicalWorkoutType
-}
 
 
 def _normalize_workout_name(name: str) -> str:
@@ -220,38 +189,6 @@ async def _resolve_snapshots(
     return snapshots
 
 
-class _ExtractedClaim(BaseModel):
-    """One candidate claim the model points at (STRUCT-R5); code verifies it, not the model.
-
-    ``workout_type`` is the typed canonical prescription the model emits for a prescribed-workout
-    NAME claim (COACH-R2, language-independent, issue #18): a closed :class:`CanonicalWorkoutType`
-    enum so the plan-structure verdict is provider-enforced over the canonical vocabulary (STRUCT-R1
-    /R3), not the translated surface name. It is optional (``None``) — a NUMBER/URL/STATEMENT claim
-    carries none, and a NAME claim without it falls back to the legacy surface-name match.
-
-    ``prescriptive`` (GROUND-R9) distinguishes a directive statement ("do threshold work tomorrow")
-    from a descriptive one ("you did a threshold workout yesterday"). A prescriptive statement
-    with no verifiable number is classified COMPLEMENTARY and may be scrubbed, while a descriptive
-    one is published under the complementary free pass.
-    """
-
-    model_config = {"extra": "forbid"}
-    kind: ClaimKind = ClaimKind.NUMBER
-    text: str = ""
-    metric: str | None = None
-    value: float | None = None
-    as_of: str | None = None
-    prescriptive: bool = False
-    workout_type: CanonicalWorkoutType | None = None
-
-
-class _ClaimSchema(BaseModel):
-    """The structured claim-extraction output (GROUND-R2/STRUCT-R5)."""
-
-    model_config = {"extra": "forbid"}
-    claims: list[_ExtractedClaim] = Field(default_factory=list)
-
-
 class ClaimGrounder:
     """Model-extract + code-verify grounder over canonical evidence (GROUND-R1/R2/R7).
 
@@ -319,27 +256,18 @@ class ClaimGrounder:
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
         active_constraints: Sequence[Mapping[str, Any]] | None = None,
+        evidence_claims: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult:
-        try:
-            extracted = await run_structured(
-                self._model, system=self._claim_system, data=draft, schema=_ClaimSchema
-            )
-            claims = [
-                Claim(
-                    kind=c.kind,
-                    text=c.text,
-                    metric=c.metric,
-                    value=c.value,
-                    ref=c.as_of,
-                    prescriptive=c.prescriptive,
-                    # The typed canonical prescription (language-independent, issue #18): carried
-                    # onto the claim so the NAME verifier grounds by STRUCTURE, not surface name.
-                    workout_type=c.workout_type.value if c.workout_type is not None else None,
-                )
-                for c in extracted.claims
-            ]
-        except (StructuredOutputError, NotImplementedError):
-            claims = []
+        # COMPOSE-R3 point 2 (slice 3): the candidate-claim source is resolved by
+        # :func:`source_claims` — a POPULATED two-layer evidence layer is authoritative (grounding
+        # verifies THOSE claims, never re-extracting from the draft); an absent/empty layer falls
+        # back to draft extraction (the transitional bridge until compose always populates it).
+        claims = await source_claims(
+            model=self._model,
+            claim_system=self._claim_system,
+            draft=draft,
+            evidence_claims=evidence_claims,
+        )
         guard = self._anchored_guard()
         claims = self._rebind_claims(guard, draft, claims)
         evidence = CanonicalEvidence(
@@ -486,7 +414,10 @@ __all__ = [
     "CANONICAL_WORKOUT_NAMES",
     "CanonicalWorkoutType",
     "ClaimGrounder",
+    "_ClaimSchema",
+    "_ExtractedClaim",
     "_SnapshotEvidence",
     "_normalize_workout_name",
     "_resolve_snapshots",
+    "source_claims",
 ]

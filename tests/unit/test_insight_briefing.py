@@ -139,6 +139,7 @@ class _ScriptedReadinessGrounder:
         retrieved: Any,
         request_text: str | None = None,
         active_constraints: object = None,
+        evidence_claims: object = None,
     ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="form 4.0", metric="form", value=4.0)
         survivor = GroundedClaim(

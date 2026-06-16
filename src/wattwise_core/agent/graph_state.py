@@ -152,6 +152,17 @@ def active_constraints(state: AgentState) -> list[dict[str, Any]]:
     ]
 
 
+def evidence_claims(state: AgentState) -> list[dict[str, Any]]:
+    """The COMPOSE-R3 evidence layer emitted by ``compose``, for the grounder (point 2).
+
+    The candidate-claim list the two-layer answer carries alongside the visible ``draft``; when
+    populated it is grounding's authoritative source (the grounder verifies it instead of
+    re-extracting from the draft). An unset channel projects to the empty list — the grounder then
+    falls back to draft extraction (the transitional bridge until compose always populates it).
+    """
+    return list(state.get("evidence_claims") or [])
+
+
 def reset_run_scoped(state: AgentState) -> dict[str, Any]:
     """The head-node partial update that resets every run-scoped channel on a new turn.
 
