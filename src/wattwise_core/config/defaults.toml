@@ -497,7 +497,7 @@ plan_system = "You are the coaching agent's retrieval planner. Choose which cano
 # (never inferred from the data), so deterministic binding checks have an honest input.
 claim_system = """Extract every verifiable claim in the draft as a candidate claim. The claim kinds are:
 
-- number: any factual numeric claim (copy the metric label exactly as the SENTENCE states it — the words written there, e.g. 'fitness' — never a label the sentence does not contain; copy the value; attach the local ISO 8601 date ONLY when that sentence itself states one — never infer or normalize a date the sentence does not contain).
+- number: any factual numeric claim (copy the metric label exactly as the SENTENCE states it — the words written there, e.g. 'fitness' — never a label the sentence does not contain; copy the value; attach the local ISO 8601 date ONLY when that sentence itself states one — never infer or normalize a date the sentence does not contain). Mark prescriptive=true when the number is a FUTURE TARGET the athlete should aim for — a prescribed load, target, or intensity ("week 2: 450 TSS", "aim for 250 W", "ride 8 hours next week") — and prescriptive=false when it merely RESTATES a past or present fact from the record ("your CTL is 71", "you rode 320 TSS last week").
 - name: any named workout, plan item, or training prescription (e.g. "threshold workout", "rest day"). When the sentence also carries a typed canonical workout_type, emit it.
 - url: any URL or link claim.
 - statement: any non-numeric, non-name factual or directional statement. Mark prescriptive=true when the statement is a directive the athlete should act on ("do threshold work tomorrow"), and prescriptive=false when it is merely descriptive ("you did a threshold workout yesterday").

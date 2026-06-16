@@ -221,8 +221,12 @@ def plan_requires_approval(state: AgentState) -> bool:
     """Whether the grounded deliverable is a PLAN that product policy gates (CKPT-R5).
 
     Approval is driven by the DELIVERABLE TYPE + product approval policy — NEVER by a
-    grounder abstain (GROUND-R9/CKPT-R5). Phase-1 ships no PLAN deliverable, so this is
-    essentially always ``False`` and ``awaiting_approval`` never fires.
+    grounder abstain (GROUND-R9/CKPT-R5). The multi-day PLAN deliverable IS shipped (the
+    ``/v1`` planning endpoint -> ``engine.plan_deliverable(requires_approval=True)`` sets the
+    ``plan_deliverable`` marker), so this returns ``True`` for an approval-gated plan run.
+    ``interrupt_gate`` then pauses ONLY when the grounding decision is also ``PROCEED`` (issue
+    #25): a non-PROCEED plan degrades at finalize rather than soliciting approval on a body the
+    grounder does not stand behind.
     """
     for msg in reversed(state.get("messages", [])):
         if msg.get("kind") == "plan_deliverable":

@@ -70,6 +70,15 @@ def _statement(text: str, *, prescriptive: bool = False) -> Claim:
     return Claim(kind=ClaimKind.STATEMENT, text=text, prescriptive=prescriptive)
 
 
+def _prescription(
+    text: str, value: float, *, metric: str | None = None, ref: str | None = None
+) -> Claim:
+    """A NUMBER claim marked as a FUTURE TARGET (issue #25), not a restatement of the record."""
+    return Claim(
+        kind=ClaimKind.NUMBER, text=text, metric=metric, value=value, ref=ref, prescriptive=True
+    )
+
+
 # --- known-good draft unchanged (GROUND-R8) ---
 
 
@@ -547,6 +556,107 @@ def test_contradicted_shared_token_corrects_its_own_span_only() -> None:
     # occurrences are swept for regeneration.
     assert "TSS is 50" not in result.scrubbed_text
     assert "CTL is 90" not in result.scrubbed_text  # never the swap
+
+
+# --- prescriptions are a different claim type than descriptions (issue #25) ---
+
+
+def test_prescriptive_recovery_week_is_never_rewritten_upward() -> None:
+    """A prescribed recovery week below maintenance is NEVER loaded UP to 7xCTL (issue #25).
+
+    The dangerous direction the safety slice exists to forbid: today's descriptive verifier would
+    see 320 out of tolerance of the canonical ``weekly_load_target`` (7xCTL = 420) and rewrite it
+    IN PLACE to 420 — silently authoring +31% load in the one week the coach intended rest, through
+    the trust surface. A prescription is a future TARGET, not a restatement of a fact: it is never
+    retargeted toward a descriptive metric. Until simulation-grounding lands (issue #78) it scrubs
+    (fail-closed) and the run degrades honestly.
+    """
+    evidence = _FakeEvidence(metrics={"weekly_load_target": 420.0})
+    draft = "Recovery week: aim for 320 TSS."
+    result = ground(draft, [_prescription("320", 320.0, metric="weekly_load_target")], evidence, [])
+    (claim,) = result.claims
+    assert claim.verdict is GroundVerdict.UNGROUNDED  # NOT contradicted-and-rewritten
+    assert "420" not in result.scrubbed_text  # never loaded UP to maintenance
+    assert "320" not in result.scrubbed_text  # unverifiable target scrubbed, fail-closed
+    assert result.decision is GroundDecision.ABSTAIN  # honest degrade, not a wasteful replan
+
+
+def test_prescriptive_build_week_scrubs_instead_of_retargeting() -> None:
+    """A progressive build target is scrubbed, never retargeted to maintenance (issue #25).
+
+    A build is the defining feature of any plan toward a goal, and is always >2% from the
+    maintenance attractor — so the descriptive verdict would always CONTRADICT it and rewrite it
+    DOWN to flat maintenance. The prescription type stops that: the target is not silently
+    rewritten, it fails closed pending a real feasibility verifier.
+    """
+    evidence = _FakeEvidence(metrics={"weekly_load_target": 420.0})
+    result = ground(
+        "Build week: 480 TSS.",
+        [_prescription("480", 480.0, metric="weekly_load_target")],
+        evidence,
+        [],
+    )
+    assert result.claims[0].verdict is GroundVerdict.UNGROUNDED
+    assert "420" not in result.scrubbed_text  # never flattened to maintenance
+    assert "480" not in result.scrubbed_text  # scrubbed pending simulation-grounding
+
+
+def test_prescriptive_number_echoing_request_stays_sayable() -> None:
+    """A prescribed number the ATHLETE supplied in their own request grounds as an echo (issue #25).
+
+    The one prescription that is sayable today: the athlete's own constraint ("ride 450 TSS"),
+    re-published VERBATIM (never rewritten) and cited ``user_request`` — not failed closed against
+    canonical analytics.
+    """
+    result = ground(
+        "Next week: ride 450 TSS.",
+        [_prescription("450", 450.0)],
+        _FakeEvidence(metrics={"weekly_load_target": 420.0}),
+        [],
+        request_numbers=frozenset({"450"}),
+    )
+    (claim,) = result.claims
+    assert claim.verdict is GroundVerdict.GROUNDED
+    assert claim.citation == {"kind": "user_request", "record_id": "user_request", "value": 450.0}
+    assert "450" in result.scrubbed_text  # the athlete's own constraint, verbatim
+    assert result.decision is GroundDecision.PROCEED
+
+
+def test_plan_of_only_prescriptions_abstains_not_replan() -> None:
+    """A plan whose numbers are ALL future targets degrades honestly, never re-plans (issue #25).
+
+    Even the week equal to maintenance (420 == 7xCTL) is scrubbed: maintenance is no longer the
+    privileged groundable plan — every target awaits the feasibility verifier. Because a
+    prescription is not a re-gatherable metric gap (no canonical cell could ever ground a future
+    target), the aggregate is ``abstain``, not a ``replan`` that would burn the reflection budget
+    re-trying a wall it cannot clear.
+    """
+    evidence = _FakeEvidence(metrics={"weekly_load_target": 420.0})
+    draft = "Week 1: 420 TSS. Week 2: 450 TSS. Week 3: 480 TSS."
+    claims = [
+        _prescription("420", 420.0, metric="weekly_load_target"),
+        _prescription("450", 450.0, metric="weekly_load_target"),
+        _prescription("480", 480.0, metric="weekly_load_target"),
+    ]
+    result = ground(draft, claims, evidence, [])
+    assert all(c.verdict is GroundVerdict.UNGROUNDED for c in result.claims)
+    assert result.decision is GroundDecision.ABSTAIN
+    for token in ("420", "450", "480"):
+        assert token not in result.scrubbed_text
+
+
+def test_descriptive_number_still_grounds_and_rewrites_in_place() -> None:
+    """The prescription split leaves DESCRIPTIVE grounding untouched (issue #25 regression guard).
+
+    A descriptive number (``prescriptive=False``, today's default) is still verified against the
+    record and corrected in place — the type split must not weaken descriptive fidelity.
+    """
+    evidence = _FakeEvidence(metrics={"ctl": 84.0})
+    result = ground("Your fitness is 99 today", [_number("99", "ctl", 99.0)], evidence, [])
+    (claim,) = result.claims
+    assert claim.verdict is GroundVerdict.CONTRADICTED
+    assert "99" not in result.scrubbed_text
+    assert "84" in result.scrubbed_text
 
 
 def test_token_rewrite_never_lands_inside_a_longer_number() -> None:

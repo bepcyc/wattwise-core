@@ -7,6 +7,12 @@ the user-request ECHO path — a number the ATHLETE supplied in their own reques
 "5-7 hours a week") is the request's own constraint, not a canonical-data claim, so an echo of it
 grounds with a ``user_request`` citation instead of failing closed (GROUND-R3 scope, GROUND-R5).
 
+It also owns the PRESCRIPTION path (issue #25): a future TARGET ("week 2: 450 TSS") is a different
+claim type than a restatement of a past fact, so it is NEVER verified against — nor rewritten toward
+— a descriptive metric (the only attractor there is 7xCTL maintenance, and "correcting" a taper
+toward it loads it UP). Until typed simulation-grounding lands (issue #78) a prescription stays
+sayable only as an echo of the athlete's own request number; anything else fails closed.
+
 The POSITIONAL primitives the published rewrite runs on (word-bounded token spans, character-RANGE
 coverage — issue #4) live in :mod:`wattwise_core.agent.grounding_match`; an echoed figure is
 republished VERBATIM over its own anchored span via the same
@@ -91,6 +97,47 @@ def _request_echo(claim: Claim) -> _Outcome:
     return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), token)
 
 
+def _is_request_echo(claim: Claim, request_values: frozenset[float], *, echo_blocked: bool) -> bool:
+    """True iff this claim's value echoes a number the ATHLETE supplied in their request.
+
+    Sign-insensitive: a range's second member ("5-7") extracts with the dash attached, so a
+    claimed 7 (or -7) matches the user's sign-stripped echo token. ``echo_blocked`` is the binding
+    guard's R10d veto (issue #10): a METRIC-SHAPED sentence may never ground as a request echo — it
+    verifies canonically or scrubs (fail-closed). ``claim.value is None`` can never echo. The ONE
+    place this predicate lives so the descriptive (``_verify_number``) and prescriptive
+    (``_verify_prescription``) callers cannot drift.
+    """
+    if echo_blocked or claim.value is None:
+        return False
+    return claim.value in request_values or abs(claim.value) in request_values
+
+
+def _verify_prescription(
+    claim: Claim,
+    request_values: frozenset[float],
+    *,
+    echo_blocked: bool = False,
+) -> _Outcome:
+    """Verify a PRESCRIPTION — a future TARGET, not a restatement of a canonical fact (issue #25).
+
+    A prescription ("week 2: 450 TSS", "aim for 250 W") is a goal-directed intention DERIVED from
+    the record, not contained in it, so the descriptive NUMBER verifier has no sound theory of it:
+    its only canonical attractor is 7xCTL maintenance, and "correcting" a build/taper toward
+    maintenance AUTHORS advice the gate never validated — in the *aggressive* direction for a taper
+    (a recovery week silently rewritten UP). So a prescription is NEVER rewritten in place and
+    NEVER retargeted toward a descriptive metric. Until typed simulation-grounding lands
+    (issue #78), the only prescriptive number that stays sayable is an ECHO of one the ATHLETE
+    supplied in their own request (``request_values``) — the request's own constraint, cited
+    ``user_request``; everything else fails closed (scrubbed, GROUND-R3), and the non-PROCEED
+    decision states the limitation at finalize rather than shipping a number the grounder cannot
+    stand behind. The binding guard's R10d veto (``echo_blocked``) still forbids a metric-shaped
+    sentence from grounding as an echo.
+    """
+    if _is_request_echo(claim, request_values, echo_blocked=echo_blocked):
+        return _request_echo(claim)
+    return _scrubbed(claim, GroundVerdict.UNGROUNDED)
+
+
 def _verify_number(
     claim: Claim,
     evidence: GroundingEvidence,
@@ -101,14 +148,17 @@ def _verify_number(
 ) -> _Outcome:
     """Match a claimed number against the canonical analytic within tolerance (GROUND-R7).
 
-    A claim with no value cannot be checked, so it fails closed (scrubbed). When the
-    canonical computation is unavailable the number is scrubbed entirely — never a
-    placeholder or zero (GROUND-R7) — UNLESS the number is an ECHO of one the ATHLETE
-    supplied in their own request (``request_values``): a user-supplied figure is the
-    request's own constraint, not a canonical-data claim, so it stays sayable and is cited
-    as a ``user_request`` echo. Canonical verification always runs FIRST: a claim whose
-    metric resolves to an available canonical value is verified (and corrected) against
-    canonical data even if its value coincides with a request number.
+    A claim with no value cannot be checked, so it fails closed (scrubbed). A PRESCRIPTION (a
+    future target, ``claim.prescriptive``) is dispatched to :func:`_verify_prescription` BEFORE any
+    canonical lookup — it is never verified against, or rewritten toward, a descriptive metric
+    (issue #25). For a DESCRIPTIVE number, when the canonical computation is unavailable the number
+    is scrubbed entirely — never a placeholder or zero (GROUND-R7) — UNLESS the number is an ECHO of
+    one the ATHLETE supplied in their own request (``request_values``): a user-supplied figure is
+    the request's own constraint, not a canonical-data claim, so it stays sayable and is cited as a
+    ``user_request`` echo. For a descriptive claim, canonical verification runs FIRST: a claim
+    whose metric resolves to an available canonical value is verified (and corrected) against
+    canonical data even if its value coincides with a request number. (A PRESCRIPTION never reaches
+    this canonical path — it short-circuits above.)
 
     Tolerance only decides whether a claim is RECOGNIZED as a (rounded/restated) reference to
     the canonical number — it NEVER lets the model's own figure ship. A claimed value within
@@ -120,17 +170,15 @@ def _verify_number(
     """
     if claim.value is None:
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
+    if claim.prescriptive:
+        return _verify_prescription(claim, request_values, echo_blocked=echo_blocked)
     canonical = (
         _canonical_metric(evidence, claim.metric, claim.ref) if claim.metric is not None else None
     )
     if canonical is None:
-        # Sign-insensitive: a range's second member ("5-7") extracts with the dash attached,
-        # so a claimed 7 (or -7) matches the user's sign-stripped echo token. ``echo_blocked``
-        # is the binding guard's R10d veto (issue #10): a METRIC-SHAPED sentence may never
-        # ground as a request echo — it verifies canonically or scrubs (fail-closed).
-        if not echo_blocked and (
-            claim.value in request_values or abs(claim.value) in request_values
-        ):
+        # An unavailable canonical value scrubs UNLESS it echoes a number the athlete supplied
+        # in their own request (the request's own constraint, not a canonical-data claim).
+        if _is_request_echo(claim, request_values, echo_blocked=echo_blocked):
             return _request_echo(claim)
         return _scrubbed(claim, GroundVerdict.UNGROUNDED)
     # The PUBLISHED figure is ALWAYS the canonical value rounded to display precision — never the
@@ -144,4 +192,12 @@ def _verify_number(
     return _Outcome(GroundedClaim(claim, GroundVerdict.CONTRADICTED, None), canonical_display)
 
 
-__all__ = ["_Outcome", "_parse_request_values", "_request_echo", "_scrubbed", "_verify_number"]
+__all__ = [
+    "_Outcome",
+    "_is_request_echo",
+    "_parse_request_values",
+    "_request_echo",
+    "_scrubbed",
+    "_verify_number",
+    "_verify_prescription",
+]

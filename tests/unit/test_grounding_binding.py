@@ -433,3 +433,28 @@ def test_anchored_guard_pins_the_reference_date_once() -> None:
         _guard().anchored(dt.date(2030, 1, 1)).check_number("Your CTL is 71 today.", claim)
         is BindingViolation.STALE_AS_OF
     )
+
+
+# --- issue #25: prescriptions stay safe under the production binding-ENFORCE path -----------
+
+
+def _prescription(text: str, metric: str | None, value: float) -> Claim:
+    """A NUMBER claim marked as a future TARGET (issue #25)."""
+    return Claim(kind=ClaimKind.NUMBER, text=text, metric=metric, value=value, prescriptive=True)
+
+
+def test_prescription_under_binding_enforce_is_never_rewritten_upward() -> None:
+    """A prescribed recovery week is never loaded UP to 7xCTL on the DEFAULT (ENFORCE) path.
+
+    The issue #25 unit goldens run with ``binding=None``, but production wires the binding guard
+    in ENFORCE mode. A prescription must still bypass canonical correction with the guard live:
+    scrubbed, never rewritten to the maintenance value, decision off ``proceed``.
+    """
+    evidence = _FakeEvidence({("weekly_load_target", None): 420.0})
+    draft = "Recovery week: aim for 320 TSS."
+    claims = [_prescription("320", "weekly_load_target", 320.0)]
+    result = ground(draft, claims, evidence, [], binding=_guard())
+    assert result.claims[0].verdict is not GroundVerdict.GROUNDED
+    assert "420" not in result.scrubbed_text  # never loaded up to maintenance
+    assert "320" not in result.scrubbed_text  # unverifiable target scrubbed, fail-closed
+    assert result.decision is not GroundDecision.PROCEED
