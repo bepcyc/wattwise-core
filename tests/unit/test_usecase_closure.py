@@ -39,6 +39,7 @@ from wattwise_core.agent.contracts import (
     AgentState,
     Claim,
     ClaimKind,
+    ComposedAnswer,
     GroundDecision,
     GroundedClaim,
     GroundingResult,
@@ -375,6 +376,11 @@ class _RecordingModel:
     async def structured[M: BaseModel](self, *, system: str, data: str, schema: type[M]) -> M:
         if schema is ReflectDecision:
             return ReflectDecision(verdict=ReflectVerdict.ANSWER_WITH_CAVEAT)  # type: ignore[return-value]
+        if schema.__name__ == "ComposedAnswer":
+            return ComposedAnswer(  # type: ignore[return-value]
+                visible_answer=await self.compose(system=system, context=data),
+                evidence_claims=(),
+            )
         raise NotImplementedError
 
     async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:

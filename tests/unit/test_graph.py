@@ -37,6 +37,7 @@ from wattwise_core.agent.contracts import (
     AgentState,
     Claim,
     ClaimKind,
+    ComposedAnswer,
     GroundDecision,
     GroundedClaim,
     GroundingResult,
@@ -77,6 +78,15 @@ class FakeModel:
         self.structured_calls += 1
         if schema is ReflectDecision:
             return ReflectDecision(verdict=self._reflect_verdict)  # type: ignore[return-value]
+        if schema is ComposedAnswer:
+            # COMPOSE-R3: compose now drives structured decoding of the two-layer answer.
+            # Count it as a compose pass (the node's single visible-prose generation) so the
+            # redraft/reflect budget assertions still hold.
+            self.compose_calls += 1
+            return ComposedAnswer(  # type: ignore[return-value]
+                visible_answer=f"draft#{self.compose_calls}: {data.splitlines()[0]}",
+                evidence_claims=(),
+            )
         raise NotImplementedError(f"no scripted structured output for {schema.__name__}")
 
     async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:
