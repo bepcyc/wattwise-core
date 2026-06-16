@@ -55,20 +55,29 @@ case "${scanner}" in
             --output "${WW_OUT_DIR}/trivy-image.txt" \
             "${image_target}"; then
         ww_warn "image scan found vulnerabilities at/above ${WW_FAIL_SEVERITY} (see ${WW_OUT_DIR}/trivy-image.txt)"
+        # Surface the findings table in the job log so the blocking CVE is visible WITHOUT
+        # downloading an artifact (CI-R14: validate the gate by what it prints, not a hidden file).
+        cat "${WW_OUT_DIR}/trivy-image.txt" >&2 || true
         rc=1
       fi
     fi
     # Filesystem / lockfile SCA (SEC-R13.2) — catches a vulnerable pinned dependency.
     if [ "${scan_fs}" -eq 1 ]; then
       ww_log "scanning filesystem (SCA): ${fs_target}"
+      # --ignorefile parity with the image scan above: a triaged, justified .trivyignore entry
+      # (a CVE with no fix yet, or one not reachable in our usage) MUST suppress on BOTH the fs
+      # and image legs, or a pinned-dependency advisory can never be lawfully waived.
       if ! trivy fs \
             --severity "${WW_FAIL_SEVERITY}" \
             --exit-code 1 \
             --scanners vuln \
+            --ignorefile .trivyignore \
             --format table \
             --output "${WW_OUT_DIR}/trivy-fs.txt" \
             "${fs_target}"; then
         ww_warn "filesystem SCA found vulnerabilities at/above ${WW_FAIL_SEVERITY} (see ${WW_OUT_DIR}/trivy-fs.txt)"
+        # Surface the findings table in the job log so the blocking CVE id is visible directly.
+        cat "${WW_OUT_DIR}/trivy-fs.txt" >&2 || true
         rc=1
       fi
     fi
