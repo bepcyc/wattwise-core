@@ -536,6 +536,15 @@ class CoachConfig:
     voice_examples: Sequence[str] = field(default_factory=tuple)
 
 
+# COMPOSE-R3 two-layer-answer contracts live in a focused leaf module (QUAL-R9) and are
+# re-exported here so existing `from wattwise_core.agent.contracts import ...` sites are
+# unchanged. Imported at the bottom because compose_contracts depends on names defined above.
+from wattwise_core.agent.compose_contracts import (  # noqa: E402
+    ComposedAnswer,
+    EvidenceClaim,
+    compose_structured,
+)
+
 __all__ = [
     "COVERAGE_GAPS_TURN_PREFIX",
     "RETRIEVED_MAX_BYTES",
@@ -549,7 +558,9 @@ __all__ = [
     "Claim",
     "ClaimKind",
     "CoachConfig",
+    "ComposedAnswer",
     "CoverageCaveat",
+    "EvidenceClaim",
     "GroundDecision",
     "GroundVerdict",
     "GroundedClaim",
@@ -560,6 +571,7 @@ __all__ = [
     "RetrievalRequest",
     "RunStatus",
     "Trigger",
+    "compose_structured",
     "stamp_coverage_gaps",
     "stamp_retrieved",
     "turn_gaps",
