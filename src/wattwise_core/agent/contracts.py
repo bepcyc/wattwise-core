@@ -547,7 +547,7 @@ class CoachConfig:
 from wattwise_core.agent.compose_contracts import (  # noqa: E402
     ComposedAnswer,
     EvidenceClaim,
-    compose_structured,
+    parse_tagged_answer,
 )
 
 __all__ = [
@@ -576,7 +576,7 @@ __all__ = [
     "RetrievalRequest",
     "RunStatus",
     "Trigger",
-    "compose_structured",
+    "parse_tagged_answer",
     "stamp_coverage_gaps",
     "stamp_retrieved",
     "turn_gaps",

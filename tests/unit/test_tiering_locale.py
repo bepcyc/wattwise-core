@@ -243,3 +243,44 @@ async def test_compose_node_uses_the_run_locale_variant() -> None:
     node = make_compose(object(), model, "persona", SingleModelRoutingPolicy(), _packs(), None)
     await node({"athlete_id": "ath-1", "request_text": "wie geht's", "locale": "de"})
     assert model.compose_calls and "Antworte auf Deutsch." in model.compose_calls[0]
+
+
+class _TaggedComposeModel:
+    """A ChatModel double whose ``compose`` returns an inline-<technical_proof>-tagged answer."""
+
+    async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:
+        return (
+            "<technical_proof>fitness is 5.7 (ctl, as_of 2026-06-15)</technical_proof>\n"
+            "You've been building steadily."
+        )
+
+
+async def test_compose_node_parses_inline_tags_into_visible_and_evidence() -> None:
+    """COMPOSE-R3 (tags): the node splits compose() output into draft prose + evidence_claims.
+
+    The visible prose (tag stripped) becomes the STATE-R2 ``draft``; the evidence layer is parsed
+    from the ``<technical_proof>`` block into ``evidence_claims`` (the candidate-claim list the
+    grounder consumes), NOT re-extracted from the draft.
+    """
+    node = make_compose(
+        object(),
+        _TaggedComposeModel(),
+        "persona",
+        SingleModelRoutingPolicy(),
+        EMPTY_LOCALE_POLICY,
+        None,
+    )
+    update = await node({"athlete_id": "ath-1", "request_text": "how is my fitness?"})
+    assert update["draft"] == "You've been building steadily."
+    assert "technical_proof" not in update["draft"]
+    assert update["evidence_claims"] == [
+        {
+            "kind": "number",
+            "text": "fitness is 5.7 (ctl, as_of 2026-06-15)",
+            "metric": "ctl",
+            "value": 5.7,
+            "ref": "2026-06-15",
+            "prescriptive": False,
+            "workout_type": None,
+        }
+    ]
