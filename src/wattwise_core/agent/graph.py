@@ -232,6 +232,10 @@ def _make_ground(svc: AgentServices) -> GraphNode:
             # prescription. Kept as the plain {content, severity} projection — the pure gate stays
             # pure; this is the state -> gate wiring (ADR 0008 §6).
             active_constraints=gs.active_constraints(state),
+            # COMPOSE-R3 point 2 (slice 3): the evidence layer compose emitted alongside the draft.
+            # When populated it is grounding's authoritative candidate-claim source; unset/empty
+            # falls back to draft extraction inside the grounder.
+            evidence_claims=gs.evidence_claims(state),
         )
         obs.record_grounding(result)
         citations = [gc.citation for gc in result.survivors if gc.citation is not None]

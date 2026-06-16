@@ -288,6 +288,7 @@ class _UnreachedGrounder:
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
         active_constraints: object = None,
+        evidence_claims: object = None,
     ) -> Any:
         raise AssertionError("ground must not run in a gather-only run")
 

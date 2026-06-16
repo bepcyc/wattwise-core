@@ -242,6 +242,7 @@ class _ScrubAllGrounder:
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
         active_constraints: object = None,
+        evidence_claims: object = None,
     ) -> GroundingResult:
         # A publishable complementary (number-free) claim -> PROCEED with NO citation survivor.
         claim = Claim(kind=ClaimKind.STATEMENT, text="a clear ramp-up")

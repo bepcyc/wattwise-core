@@ -25,6 +25,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from wattwise_core.agent.capabilities import CanonicalEvidence
+from wattwise_core.agent.compose_contracts import EvidenceClaim
 from wattwise_core.agent.contracts import ClaimKind, GroundDecision, RunStatus
 from wattwise_core.agent.deliverables import (
     HRV_UNAVAILABLE_CLAUSE,
@@ -237,6 +238,45 @@ async def test_claimgrounder_grounds_number_against_canonical(
     assert grounded, "the canonical NUMBER claim must survive grounded with a citation"
     assert grounded[0].citation["metric"] == "ctl"
     assert grounded[0].citation["value"] == ctl  # verbatim canonical value, never re-derived
+
+
+async def test_claimgrounder_uses_evidence_layer_as_authoritative_claim_source(
+    seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
+) -> None:
+    """COMPOSE-R3 point 2 / slice 3: when the two-layer answer's ``evidence_claims`` are
+    supplied, the grounder verifies THOSE as the authoritative candidate source and does NOT
+    re-extract from the draft.
+
+    The model's ``_ClaimSchema`` extraction is scripted EMPTY — if the grounder still grounded
+    the canonical CTL number, the only possible source is the passed evidence layer. With the
+    pre-slice-3 behaviour (draft re-extraction only) the empty extraction yields no claims and
+    nothing grounds, so this fails RED until the evidence layer is wired in.
+    """
+    svc, _, _ = seeded
+    series = await svc.pmc(str(OWNER_ATHLETE_ID), _dt.date(2026, 6, 1), _dt.date(2026, 6, 3))
+    ctl = series[-1].value.ctl
+    model = FakeModel(scripted={"_ClaimSchema": _ClaimSchema(claims=[])})  # draft extraction empty
+    evidence_claims = [
+        EvidenceClaim(
+            kind=ClaimKind.NUMBER,
+            text=f"your fitness is {ctl:.2f}",
+            metric="ctl",
+            value=ctl,
+            ref="2026-06-03",
+        ).model_dump()
+    ]
+    grounder = ClaimGrounder(model, svc)
+    result = await grounder.ground(
+        athlete_id=str(OWNER_ATHLETE_ID),
+        draft=f"Your fitness is {ctl:.2f} and steady.",
+        retrieved={"weekly_load": series},
+        evidence_claims=evidence_claims,
+    )
+    assert result.decision is GroundDecision.PROCEED
+    grounded = [c for c in result.survivors if c.citation is not None]
+    assert grounded, "the evidence-layer NUMBER claim must ground even with empty draft extraction"
+    assert grounded[0].citation["metric"] == "ctl"
+    assert grounded[0].citation["value"] == ctl
 
 
 async def test_claimgrounder_unparseable_past_date_scrubs_not_grounds_latest(
