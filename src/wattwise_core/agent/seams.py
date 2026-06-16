@@ -86,6 +86,10 @@ class Grounder(Protocol):
     MEM-R6) as plain ``{content, severity}`` projections: the deterministic constraint gate
     (proposed GROUND-R13/R14, ADR 0008) vetoes a HARD-contradicting prescription and surfaces a
     SOFT one as a caution. ``None`` runs no constraint gate (the prior behaviour).
+
+    ``evidence_claims`` is the COMPOSE-R3 two-layer answer's evidence layer (point 2): when
+    POPULATED it is the authoritative candidate-claim source and the grounder verifies it instead
+    of re-extracting from the visible ``draft``; ``None`` or empty falls back to draft extraction.
     """
 
     async def ground(
@@ -96,6 +100,7 @@ class Grounder(Protocol):
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
         active_constraints: Sequence[Mapping[str, Any]] | None = None,
+        evidence_claims: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult: ...
 
 

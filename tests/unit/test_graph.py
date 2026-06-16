@@ -145,6 +145,7 @@ class FakeGrounder:
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
         active_constraints: object = None,
+        evidence_claims: object = None,
     ) -> GroundingResult:
         self.calls += 1
         claim = Claim(kind=ClaimKind.NUMBER, text="42", value=42.0)

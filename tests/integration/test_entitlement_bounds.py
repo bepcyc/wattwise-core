@@ -155,6 +155,7 @@ class _ProceedGrounder:
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
         active_constraints: Sequence[Mapping[str, Any]] | None = None,
+        evidence_claims: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult:
         survivor = GroundedClaim(
             claim=Claim(kind=ClaimKind.NUMBER, text="1", value=1.0),
