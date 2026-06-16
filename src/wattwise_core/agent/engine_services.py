@@ -35,6 +35,10 @@ from wattwise_core.agent.engine_planner import (
     _PlanSchema as _PlanSchema,  # noqa: PLC0414  explicit re-export (historical import path)
 )
 from wattwise_core.agent.grounding_binding import BindingGuard, guard_from_settings
+from wattwise_core.agent.grounding_constraints import ConstraintGate
+from wattwise_core.agent.grounding_constraints import (
+    gate_from_settings as constraint_gate_from_settings,
+)
 from wattwise_core.agent.grounding_entailment import EntailmentGate, gate_from_settings
 from wattwise_core.agent.grounding_evidence import CANONICAL_WORKOUT_NAMES, ClaimGrounder
 from wattwise_core.agent.locale import LocalePolicy
@@ -102,6 +106,7 @@ class CoachBundle:
         "allowed_hosts",
         "binding",
         "claim_system",
+        "constraint_gate",
         "detailed_compose_directive",
         "entailment",
         "equivalence",
@@ -136,6 +141,7 @@ class CoachBundle:
         detailed_compose_directive: str = "",
         binding: BindingGuard | None = None,
         entailment: EntailmentGate | None = None,
+        constraint_gate: ConstraintGate | None = None,
     ) -> None:
         self.system_prompt = system_prompt
         self.equivalence = equivalence if equivalence is not None else MetricEquivalence({})
@@ -183,6 +189,11 @@ class CoachBundle:
         # (the FakeModel suite); ``from_settings`` wires the loaded config in.
         self.binding = binding
         self.entailment = entailment
+        # The deterministic constraint gate (issue #77, proposed GROUND-R13/R14; ADR 0008):
+        # threaded into EVERY grounder this bundle builds so a prescription contradicting an active
+        # athlete constraint is vetoed (HARD) or cautioned (SOFT). ``None`` (mode off / empty
+        # bundle) preserves the prior behaviour; ``from_settings`` wires ``[agent.constraints]`` in.
+        self.constraint_gate = constraint_gate
 
     @property
     def compose_system(self) -> str:
@@ -257,6 +268,10 @@ class CoachBundle:
             # artifact fails the boot closed too, GROUND-R12).
             binding=guard_from_settings(settings, equivalence),
             entailment=gate_from_settings(settings),
+            # The deterministic constraint floor (issue #77, ADR 0008 §7): mode validated through
+            # the closed ConstraintMode enum — a bad mode fails the boot. ``enabled`` (the NLI model
+            # layer, not implemented here) does NOT gate the floor; ``mode`` does.
+            constraint_gate=constraint_gate_from_settings(settings),
         )
 
     def services(
@@ -275,6 +290,7 @@ class CoachBundle:
             claim_system=self.claim_system,
             binding=self.binding,
             entailment=self.entailment,
+            constraint_gate=self.constraint_gate,
         )
 
     def grounder(self, model: ChatModel, svc: AnalyticsService) -> ClaimGrounder:
@@ -289,6 +305,7 @@ class CoachBundle:
             claim_system=self.claim_system,
             binding=self.binding,
             entailment=self.entailment,
+            constraint_gate=self.constraint_gate,
         )
 
 
@@ -306,6 +323,7 @@ def build_services(
     claim_system: str = "",
     binding: BindingGuard | None = None,
     entailment: EntailmentGate | None = None,
+    constraint_gate: ConstraintGate | None = None,
 ) -> AgentServices:
     """Assemble the concrete production service bundle for the graph (GRAPH-R5).
 
@@ -338,6 +356,7 @@ def build_services(
             claim_system=claim_system,
             binding=binding,
             entailment=entailment,
+            constraint_gate=constraint_gate,
         ),
     )
 

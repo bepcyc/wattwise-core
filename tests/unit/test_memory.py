@@ -13,6 +13,7 @@ row is needed. Runs on in-memory SQLite (the portable agent-state substrate, GBO
 from __future__ import annotations
 
 import dataclasses
+import datetime as _dt
 import uuid
 from collections.abc import AsyncIterator
 
@@ -21,6 +22,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from wattwise_core.agent.memory import (
+    ConstraintSeverity,
+    ConstraintStatus,
     MemoryItem,
     MemoryItemKind,
     OssMemoryStore,
@@ -248,3 +251,149 @@ async def test_memory_does_not_substitute_a_live_canonical_number(
     # field (`recorded_at`/`inferred` are recency/provenance metadata, not a metric).
     assert not hasattr(item, "value")
     assert not hasattr(item, "metric")
+
+
+# --- constraint lifecycle + salience (proposed MEM-R6/MEM-R7, GROUND-R14; ADR 0008) ---
+
+
+def _now() -> _dt.datetime:
+    return _dt.datetime.now(_dt.UTC)
+
+
+@pytest.mark.unit
+async def test_add_constraint_is_active_and_fetched(session: AsyncSession) -> None:
+    """``add_constraint`` writes an ACTIVE CONSTRAINT row fetched by the active-constraint read."""
+    aid = await _athlete(session)
+    store = OssMemoryStore(session)
+
+    written = await store.add_constraint(
+        athlete_id=aid, content="No running for six weeks.", severity=ConstraintSeverity.HARD
+    )
+    assert written.kind is MemoryItemKind.CONSTRAINT
+    assert written.severity is ConstraintSeverity.HARD
+    assert written.status is ConstraintStatus.ACTIVE
+
+    active = await store.fetch_active_constraints(athlete_id=aid, now=_now())
+    assert len(active) == 1
+    assert active[0].content == "No running for six weeks."
+    assert active[0].severity is ConstraintSeverity.HARD
+
+
+@pytest.mark.unit
+async def test_fetch_active_constraints_orders_hard_first(session: AsyncSession) -> None:
+    """The active set is deterministic: HARD before SOFT, then most-recent (MEM-R6)."""
+    aid = await _athlete(session)
+    store = OssMemoryStore(session)
+
+    await store.add_constraint(
+        athlete_id=aid, content="Soft one.", severity=ConstraintSeverity.SOFT
+    )
+    await store.add_constraint(
+        athlete_id=aid, content="Hard one.", severity=ConstraintSeverity.HARD
+    )
+
+    active = await store.fetch_active_constraints(athlete_id=aid, now=_now())
+    assert [c.severity for c in active] == [ConstraintSeverity.HARD, ConstraintSeverity.SOFT]
+
+
+@pytest.mark.unit
+async def test_lift_constraint_excludes_it(session: AsyncSession) -> None:
+    """A LIFTED constraint stops gating — it is excluded from the active set (MEM-R7)."""
+    aid = await _athlete(session)
+    store = OssMemoryStore(session)
+
+    written = await store.add_constraint(athlete_id=aid, content="No intervals.")
+    lifted = await store.lift_constraint(athlete_id=aid, memory_item_id=written.memory_item_id)
+    assert lifted is True
+    assert await store.fetch_active_constraints(athlete_id=aid, now=_now()) == []
+
+
+@pytest.mark.unit
+async def test_lift_constraint_is_athlete_scoped(session: AsyncSession) -> None:
+    """A cross-athlete / unknown id lifts nothing and returns False (AGT-SEC-R1, fail-closed)."""
+    mine = await _athlete(session)
+    other = await _athlete(session)
+    store = OssMemoryStore(session)
+
+    written = await store.add_constraint(athlete_id=other, content="No running.")
+    # Another athlete cannot lift it; an unknown id lifts nothing either.
+    assert (
+        await store.lift_constraint(athlete_id=mine, memory_item_id=written.memory_item_id) is False
+    )
+    assert await store.lift_constraint(athlete_id=mine, memory_item_id="not-a-uuid") is False
+    assert await store.lift_constraint(athlete_id=mine, memory_item_id=str(uuid.uuid4())) is False
+    # The owner's constraint is untouched.
+    assert len(await store.fetch_active_constraints(athlete_id=other, now=_now())) == 1
+
+
+@pytest.mark.unit
+async def test_expired_constraint_is_excluded(session: AsyncSession) -> None:
+    """A constraint whose ``effective_until`` has passed is excluded from the set (MEM-R7)."""
+    aid = await _athlete(session)
+    store = OssMemoryStore(session)
+    now = _now()
+
+    await store.add_constraint(
+        athlete_id=aid,
+        content="No running until last week.",
+        effective_until=now - _dt.timedelta(days=7),
+    )
+    await store.add_constraint(
+        athlete_id=aid,
+        content="No intervals until next month.",
+        effective_until=now + _dt.timedelta(days=30),
+    )
+
+    active = await store.fetch_active_constraints(athlete_id=aid, now=now)
+    assert len(active) == 1
+    assert "No intervals" in active[0].content
+
+
+@pytest.mark.unit
+async def test_null_status_treated_active(session: AsyncSession) -> None:
+    """A CONSTRAINT row written before the lifecycle columns (NULL status) reads as ACTIVE."""
+    aid = await _athlete(session)
+    store = OssMemoryStore(session)
+
+    # Simulate a legacy row: a plain write_episode never sets status/severity (both NULL).
+    await store.write_episode(
+        athlete_id=aid,
+        kind=MemoryItemKind.CONSTRAINT,
+        content="Legacy: no running.",
+        trusted=True,
+    )
+    active = await store.fetch_active_constraints(athlete_id=aid, now=_now())
+    assert len(active) == 1
+    assert active[0].status is None  # NULL on the row ...
+    assert "Legacy" in active[0].content  # ... but still recalled (backward-compat)
+
+
+@pytest.mark.unit
+async def test_constraint_survives_recall_amid_unrelated_history(session: AsyncSession) -> None:
+    """A constraint survives recall amid N >> limit=8 unrelated PLAN_HISTORY rows (MEM-R6).
+
+    The salience-tier fix for #77 Hole 1: the keyword/recency pool (``fetch_relevant``, limit=8)
+    grows one PLAN_HISTORY row per turn and a zero-overlap constraint would be evicted — but the
+    always-resident core tier (``fetch_active_constraints``) carries it regardless of overlap or
+    limit. This mirrors the engine's ``recall_memory_for_run`` composition.
+    """
+    aid = await _athlete(session)
+    store = OssMemoryStore(session)
+
+    await store.add_constraint(
+        athlete_id=aid, content="No running — post-ACL.", severity=ConstraintSeverity.HARD
+    )
+    for index in range(20):  # N >> limit=8 unrelated turns
+        await store.write_episode(
+            athlete_id=aid,
+            kind=MemoryItemKind.PLAN_HISTORY,
+            content=f"Asked about my swim threshold pace, attempt {index}.",
+            trusted=True,
+        )
+
+    # A query sharing NO keywords with the constraint evicts it from the recency/keyword pool ...
+    pool = await store.fetch_relevant(athlete_id=aid, query="swim threshold pace", limit=8)
+    assert all("running" not in item.content for item in pool)
+    # ... but the always-resident constraint tier still surfaces it (the salience fix).
+    active = await store.fetch_active_constraints(athlete_id=aid, now=_now())
+    assert any("No running" in item.content for item in active)

@@ -81,6 +81,11 @@ class Grounder(Protocol):
     bounded recovery :class:`GroundDecision`. ``request_text`` is the athlete's own
     request: a number the USER supplied there is a sayable echo (the request's own
     constraint), never a canonical-data claim to fail closed on.
+
+    ``active_constraints`` are the athlete's ACTIVE constraints (the recalled core tier,
+    MEM-R6) as plain ``{content, severity}`` projections: the deterministic constraint gate
+    (proposed GROUND-R13/R14, ADR 0008) vetoes a HARD-contradicting prescription and surfaces a
+    SOFT one as a caution. ``None`` runs no constraint gate (the prior behaviour).
     """
 
     async def ground(
@@ -90,6 +95,7 @@ class Grounder(Protocol):
         draft: str,
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
+        active_constraints: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult: ...
 
 

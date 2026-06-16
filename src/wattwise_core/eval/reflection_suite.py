@@ -130,6 +130,7 @@ class _ScriptedGrounder:
         draft: str,
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
+        active_constraints: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="1", value=1.0, metric="ctl")
         survivor = GroundedClaim(

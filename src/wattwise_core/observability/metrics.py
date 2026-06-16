@@ -41,6 +41,13 @@ GROUNDING_BINDING_EVENTS = "wattwise_agent_grounding_binding_events_total"
 ENTAILMENT_CHECKS = "wattwise_agent_grounding_entailment_checks_total"
 ENTAILMENT_VETOES = "wattwise_agent_grounding_entailment_vetoes_total"
 ENTAILMENT_UNAVAILABLE = "wattwise_agent_grounding_entailment_unavailable_total"
+# Constraint-aware grounding signals (proposed GROUND-R13/R14, ADR 0008): the deterministic
+# constraint gate's HARD veto count (labelled by severity) and SOFT caution count, so the
+# constraint floor's would-be vetoes/cautions are observable in production (ADR 0008 §7).
+CONSTRAINT_VIOLATIONS = (
+    "wattwise_agent_grounding_constraint_violations_total"  # labelled by severity
+)
+CONSTRAINT_CAUTIONS = "wattwise_agent_grounding_constraint_cautions_total"
 VALIDATION_FAILURES = "wattwise_agent_structured_validation_failures_total"
 REFLECTIONS = "wattwise_agent_reflections_total"
 REFLECTION_EXHAUSTIONS = "wattwise_agent_reflection_exhaustions_total"
@@ -207,6 +214,8 @@ def get_registry() -> MetricsRegistry:
 
 
 __all__ = [
+    "CONSTRAINT_CAUTIONS",
+    "CONSTRAINT_VIOLATIONS",
     "ENDPOINT_LATENCY_SECONDS",
     "ENDPOINT_REQUESTS",
     "ENTAILMENT_CHECKS",

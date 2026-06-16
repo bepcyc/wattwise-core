@@ -1518,6 +1518,105 @@
         "title": "ConnectionSummary",
         "type": "object"
       },
+      "ConstraintCreate": {
+        "additionalProperties": false,
+        "description": "A new athlete-stated CONSTRAINT to record (MEM-R7 / GROUND-R14, ADR 0008 \u00a75).\n\n``content`` is the athlete's own stated limit (\"doctor said no running for 6 weeks\"), preserved\nverbatim (MEM-R2). ``severity`` selects whether a contradicting prescription is VETOED (``hard``\n\u2014 an absolute contraindication, never published) or surfaced as a CAUTION (``soft`` \u2014 a relative\none, the shared-decision default). ``effective_until`` is an optional self-expiry instant.\n``additionalProperties:false`` rejects a forged ``athlete_id`` (SCHEMA-R4): identity is\nserver-derived, never client-supplied.",
+        "properties": {
+          "content": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "effective_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Until"
+          },
+          "severity": {
+            "default": "soft",
+            "enum": [
+              "hard",
+              "soft"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "ConstraintCreate",
+        "type": "object"
+      },
+      "ConstraintList": {
+        "additionalProperties": false,
+        "description": "The owner's ACTIVE constraint set (HARD-first, then most-recent; MEM-R6/-R7).",
+        "properties": {
+          "constraints": {
+            "items": {
+              "$ref": "#/components/schemas/ConstraintOut"
+            },
+            "title": "Constraints",
+            "type": "array"
+          }
+        },
+        "title": "ConstraintList",
+        "type": "object"
+      },
+      "ConstraintOut": {
+        "additionalProperties": false,
+        "description": "One active constraint as the capture surface returns it (MEM-R7, personalization only).\n\nCarries the stable ``memory_item_id`` (the lift handle), the verbatim ``content``, the\n``severity``, ``inferred`` (engine-derived vs athlete-stated), and the optional\n``effective_until``. Carries NO canonical analytic number (MEM-R1).",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "effective_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Until"
+          },
+          "inferred": {
+            "title": "Inferred",
+            "type": "boolean"
+          },
+          "memory_item_id": {
+            "title": "Memory Item Id",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "hard",
+              "soft"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_item_id",
+          "content",
+          "severity",
+          "inferred"
+        ],
+        "title": "ConstraintOut",
+        "type": "object"
+      },
       "CoverageCaveatOut": {
         "additionalProperties": true,
         "description": "The TYPED coverage caveat of a ``degraded`` member (API-R11a / SCHEMA-R9).\n\nThe machine-readable basis a client uses to badge \"reduced precision / estimated\"\nWITHOUT parsing ``reason_text``: which canonical inputs were ``missing`` /\n``substituted`` / ``stale`` (source-agnostic class names, never a provider) and the\nresulting ``fidelity``. ``reason``/``inputs_unavailable`` carry the engine's typed\nno-coverage / unconfigured notes. ``extra=\"allow\"`` keeps the caveat additive-safe\n(API-R6) while the named fields stay typed at the boundary.",
@@ -17532,6 +17631,435 @@
           }
         ],
         "summary": "Put Coach Numeric Detail Level",
+        "tags": [
+          "user-settings"
+        ]
+      }
+    },
+    "/v1/user-settings/constraints": {
+      "get": {
+        "description": "List the owner's ACTIVE safety constraints (MEM-R6/-R7, HARD-first then most-recent).\n\nReads the always-resident constraint tier (MEM-R6, ADR 0008 \u00a73) \u2014 the SAME set the run path\nrecalls and the grounding gate enforces \u2014 scoped to the server-derived owner (AGT-SEC-R1).\nPersonalization context only, never a canonical number (MEM-R1).",
+        "operationId": "listUserConstraints",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConstraintList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "List Constraints",
+        "tags": [
+          "user-settings"
+        ]
+      },
+      "post": {
+        "description": "Record a new athlete-stated safety constraint (MEM-R7 / GROUND-R14, ADR 0008 \u00a75).\n\nPersists the constraint in the athlete's own words into the agent-state store, scoped to the\nserver-derived owner (AGT-SEC-R1) \u2014 so the run path recalls it (MEM-R6) and a contradicting\nprescription is vetoed (``hard``) or cautioned (``soft``) at the grounding gate. Identity is\nnever taken from the client (SCHEMA-R4). Returns the persisted constraint.",
+        "operationId": "createUserConstraint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConstraintCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConstraintOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "write"
+            ]
+          }
+        ],
+        "summary": "Create Constraint",
+        "tags": [
+          "user-settings"
+        ]
+      }
+    },
+    "/v1/user-settings/constraints/{memory_item_id}": {
+      "delete": {
+        "description": "Lift (clear) the owner's constraint by id (MEM-R7, the shared-decision StARRT stance).\n\nA LIFTED constraint stops gating. The lift is scoped to BOTH the id AND the server-derived\nowner (AGT-SEC-R1): a cross-athlete / unknown / non-UUID id lifts nothing and reads as a 404 \u2014\na foreign row is never confirmed to exist (fail-closed). Returns ``204`` on a successful lift.",
+        "operationId": "liftUserConstraint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_item_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Error (RFC 9457 problem)"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "write"
+            ]
+          }
+        ],
+        "summary": "Lift Constraint",
         "tags": [
           "user-settings"
         ]

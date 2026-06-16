@@ -29,6 +29,7 @@ from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, diagnose_co
 from wattwise_core.agent.digest_history import (
     digest_history as read_digest_history,
 )
+from wattwise_core.agent.engine_constraints import ConstraintCaptureMixin
 from wattwise_core.agent.engine_extras import (
     _read_stored_response_length,
 )
@@ -56,7 +57,7 @@ from wattwise_core.persistence import Database
 from wattwise_core.seams import EngineSessionProvider, SessionProvider
 
 
-class UnconfiguredAgentEngine:
+class UnconfiguredAgentEngine(ConstraintCaptureMixin):
     """Graceful no-model engine when the OSS deployment has no LLM configured (RUN-R4.1).
 
     The engine boots without a model; the LLM-shaped coaching surfaces (``answer`` /

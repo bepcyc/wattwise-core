@@ -83,6 +83,7 @@ class _Grounder:
         draft: str,
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
+        active_constraints: object = None,
     ) -> GroundingResult:
         """Ground one claim (grounded) + one scrubbed (ungrounded) so scrub-count is exercised."""
         grounded = GroundedClaim(

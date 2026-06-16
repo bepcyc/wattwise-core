@@ -135,6 +135,23 @@ def read_coverage_gaps(state: AgentState) -> set[str]:
     return turn_gaps(state.get("coverage_gaps", set()))
 
 
+def active_constraints(state: AgentState) -> list[dict[str, Any]]:
+    """The CONSTRAINT items of the recalled core tier, for the constraint gate (MEM-R6 -> R13).
+
+    Projects the recalled memory (the always-resident constraint tier, MEM-R6) down to the
+    CONSTRAINT-kind ``{content, severity}`` items the deterministic constraint gate consumes
+    (GROUND-R13/R14, ADR 0008 §6). A non-constraint memory item is skipped; the pure gate never
+    reads a store, so this state-side extraction keeps it pure (GRAPH-R4). The ``"constraint"``
+    literal is the :class:`~wattwise_core.agent.memory.MemoryItemKind.CONSTRAINT` value.
+    """
+    recalled = state.get("recalled_memory") or []
+    return [
+        {"content": item.get("content"), "severity": item.get("severity")}
+        for item in recalled
+        if item.get("kind") == "constraint"
+    ]
+
+
 def reset_run_scoped(state: AgentState) -> dict[str, Any]:
     """The head-node partial update that resets every run-scoped channel on a new turn.
 

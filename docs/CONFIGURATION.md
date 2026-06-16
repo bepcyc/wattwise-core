@@ -564,6 +564,35 @@ optional fact-checking model is off and needs extra setup to enable.
 | `WATTWISE_AGENT__ENTAILMENT__CALIBRATION_DATASET_VERSION` | `` (empty) | — | Optional exact pin on the calibration artifact's dataset version. |
 | `WATTWISE_AGENT__ENTAILMENT__MAX_CHECKS` | `16` | ≥ 1 | Maximum fact-checks per answer. |
 
+### Constraints & safety
+
+The coach treats the athlete's own stated limits — injuries, medical advice, hard life
+constraints — as the first filter on any prescription. An active constraint is always recalled
+(it is never crowded out by recent history) and gates the advice: a prescription that contradicts
+it cannot pass the grounding gate. A **HARD** constraint vetoes a contradicting prescription (it is
+scrubbed and the answer is re-drafted, exactly like a contradicted number); a **SOFT** one surfaces
+a caution rather than silently removing the advice — the athlete stays part of the decision.
+
+The deterministic floor is on by default and needs no model: it catches clear activity-term
+contradictions (a "no running" constraint vs a "run intervals" prescription) and is deliberately
+conservative — it never blocks a neutral activity (an "easy swim" against "no running" still
+publishes). The optional 3-way contradiction model that would also catch paraphrase is a documented
+follow-up and is **not** shipped yet; `…__ENABLED` gates only that model layer, so the deterministic
+floor enforces regardless.
+
+| Variable | Default | Limits | Effect |
+| --- | --- | --- | --- |
+| `WATTWISE_AGENT__CONSTRAINTS__MODE` | `enforce` | `off`, `shadow`, or `enforce` | How the deterministic constraint floor runs (`shadow` records would-be vetoes/cautions without applying them). |
+| `WATTWISE_AGENT__CONSTRAINTS__ENABLED` | `false` | — | Enable the optional NLI contradiction model (a documented follow-up, not yet implemented). The deterministic floor runs regardless. |
+
+Athletes manage their own constraints over the API (identity is taken from the bearer token, never
+the request body):
+
+- `POST /v1/user-settings/constraints` — record a constraint (`content`, `severity` =
+  `hard`|`soft`, optional `effective_until`). Requires the `write` scope.
+- `GET /v1/user-settings/constraints` — list the active constraints (HARD first). Requires `read`.
+- `DELETE /v1/user-settings/constraints/{id}` — lift (clear) a constraint by id. Requires `write`.
+
 ### Offline evaluation budgets
 
 Used by the offline evaluation harness, not at request time.

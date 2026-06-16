@@ -354,6 +354,28 @@ calibration_dataset_version = ""
 # real deliverables far below it).
 max_checks = 16
 
+[agent.constraints]
+# Constraint-aware grounding (issue #77, proposed GROUND-R13/R14; ADR 0008). The athlete's own
+# active CONSTRAINTs (injuries, medical advice, hard life limits) become (1) an always-resident
+# recall tier (MEM-R6 — deterministic, no model, ALWAYS enforced regardless of the settings below)
+# and (2) a gate on a contradicting prescription. Two layers, mirroring the entailment posture:
+#
+#  * a DETERMINISTIC FLOOR (this PR): a structured/lexical activity-term contradiction check
+#    (a "no running" constraint vs a "run 5x4 min" prescription). It runs REGARDLESS of ``enabled``
+#    below — it needs no model and no download — governed only by ``mode``. A HARD-severity match
+#    vetoes (scrub + non-proceed); a SOFT one surfaces a caution (the prescription stays, flagged).
+#    It is deliberately conservative (it never blocks a NEUTRAL activity like an "easy swim" against
+#    "no running") so it does not over-refuse — paraphrase is the model layer below.
+#  * an NLI MODEL (a documented follow-up, NOT implemented here): the 3-way NLI contradiction
+#    verifier of ADR 0008 §1 (a DeBERTa-v3-MNLI-class checkpoint scoring P(contradiction)) that
+#    catches paraphrase the floor cannot. ``enabled`` gates ONLY this model layer; it is OFF.
+enabled = false
+# Deterministic-floor rollout mode: "off" | "shadow" (detect + record on the counters, no scrub /
+# no caution applied) | "enforce" (HARD vetoes, SOFT cautions are applied). The floor is precise
+# (it fires only on an explicit activity-term contradiction), so the OSS default ENFORCES it —
+# matching ADR 0008 §7's "salience tier + deterministic enforces; the ML gate is an operator opt-in".
+mode = "enforce"
+
 [agent.cost]
 # Per-token pricing (USD per MILLION tokens) the AGT-OBS-R2 per-run cost is COMPUTED from. Loaded
 # config content (CFG-R1a) — no price literal lives in the engine; a deployment sets its provider's
