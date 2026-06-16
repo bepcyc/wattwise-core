@@ -27,6 +27,7 @@ from wattwise_core.agent.contracts import (
     AgentState,
     Claim,
     ClaimKind,
+    ComposedAnswer,
     GroundDecision,
     GroundedClaim,
     GroundingResult,
@@ -364,6 +365,12 @@ class _ContractModel:
     async def structured(self, *, system: str, data: str, schema: type[Any]) -> Any:
         if schema is ReflectDecision:
             return ReflectDecision(verdict=ReflectVerdict.REPLAN)
+        if schema is ComposedAnswer:
+            # COMPOSE-R3: compose now drives structured decoding; mirror the scripted
+            # draft as the visible layer with no evidence claims (HITL contract only
+            # exercises the pause/resume spine, not grounding substance).
+            visible = await self.compose(system=system, context=data)
+            return ComposedAnswer(visible_answer=visible, evidence_claims=())
         raise NotImplementedError(schema.__name__)
 
     async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:

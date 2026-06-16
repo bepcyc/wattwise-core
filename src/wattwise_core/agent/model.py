@@ -26,6 +26,7 @@ from typing import Any
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from wattwise_core.agent.contracts import ComposedAnswer
 from wattwise_core.api.redaction import redact_text
 from wattwise_core.config import Settings, get_settings
 from wattwise_core.observability import runtrace
@@ -276,9 +277,18 @@ class FakeModel:
         self._scripted[type(instance).__name__] = instance
 
     async def structured[M: BaseModel](self, *, system: str, data: str, schema: type[M]) -> M:
-        """Return the scripted instance for ``schema`` (no network)."""
+        """Return the scripted instance for ``schema`` (no network).
+
+        COMPOSE-R3: the compose node now decodes a ``ComposedAnswer`` structurally. When a test
+        has not scripted one explicitly, synthesize it from the canned prose (the visible layer =
+        ``compose`` output, an empty evidence layer) so the structured-compose seam works without
+        every FakeModel call site registering a ComposedAnswer. An explicit script still wins.
+        """
         instance = self._scripted.get(schema.__name__)
         if instance is None:
+            if schema.__name__ == "ComposedAnswer":
+                visible = await self.compose(system=system, context=data)
+                return ComposedAnswer(visible_answer=visible, evidence_claims=())  # type: ignore[return-value]
             raise KeyError(f"FakeModel has no scripted response for {schema.__name__!r}")
         if not isinstance(instance, schema):
             raise TypeError(

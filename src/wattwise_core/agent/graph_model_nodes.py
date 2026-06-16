@@ -17,7 +17,12 @@ from typing import Any
 
 from wattwise_core.agent import graph_state as gs
 from wattwise_core.agent import tiering
-from wattwise_core.agent.contracts import AgentState, ChatModel, stamp_coverage_gaps
+from wattwise_core.agent.contracts import (
+    AgentState,
+    ChatModel,
+    compose_structured,
+    stamp_coverage_gaps,
+)
 from wattwise_core.agent.locale import LocalePolicy
 from wattwise_core.agent.seams import AgentServices, GraphNode
 from wattwise_core.observability import metrics as obs_metrics
@@ -113,9 +118,17 @@ def make_compose(
             # content (CFG-R1a / ARCH-R29) — never an inline literal; grounding still decides
             # truth downstream (§7).
             system = f"{system}\n\n{detailed_directive}"
-        draft = await node_model.compose(system=system, context=context)
+        # COMPOSE-R3: emit the two-layer answer as ONE structured unit — the visible prose
+        # (carried downstream as `draft`) plus the evidence layer (`evidence_claims`) the
+        # grounder verifies against. Structured-only: a model that cannot return a typed
+        # ComposedAnswer raises (STRUCT-R2), handled upstream as a validation failure, never a
+        # flat-blob fallback. The evidence layer is persisted for grounding + reveal-on-demand
+        # (COACH-R8) and is NEVER shown to the athlete (VOICE-R2) or serialized to the API
+        # (OUTCOME-R2).
+        composed = await compose_structured(node_model, system=system, context=context)
         update: dict[str, Any] = {
-            "draft": draft,
+            "draft": composed.visible_answer,
+            "evidence_claims": [ec.model_dump() for ec in composed.evidence_claims],
             "messages": [{"role": "assistant", "kind": "draft"}],
         }
         if trimmed:
