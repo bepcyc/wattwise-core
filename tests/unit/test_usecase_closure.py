@@ -411,6 +411,7 @@ class _CitingGrounder:
         draft: str,
         retrieved: Mapping[str, Any],
         request_text: str | None = None,
+        active_constraints: object = None,
     ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="42", metric="ctl", value=42.0)
         survivor = GroundedClaim(

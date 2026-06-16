@@ -60,6 +60,9 @@ from wattwise_core.api.routers import performance as performance_router
 from wattwise_core.api.routers import planning as planning_router
 from wattwise_core.api.routers import sync as sync_router
 from wattwise_core.api.routers import user_settings as user_settings_router
+from wattwise_core.api.routers import (
+    user_settings_constraints as user_settings_constraints_router,
+)
 from wattwise_core.api.routers import users as users_router
 from wattwise_core.api.security import (
     agent_feature_gate,
@@ -237,6 +240,11 @@ def _wire_router_seams(app: FastAPI) -> None:
     # ``current_session``. Binding it to ``engine`` makes the value the athlete sets the value a run
     # applies (the VOICE-R8 store-split single source); the other user-settings stay canonical.
     overrides[user_settings_router.response_length_store] = lambda: engine
+    # The athlete safety-constraint capture surface (doc 50 MEM-R7 / GROUND-R14, ADR 0008 §5) is an
+    # agent-state memory item like the response-length preference — so its add/list/lift reach the
+    # SAME shared engine the run path recalls its constraint tier from (MEM-R6) and the grounding
+    # gate enforces (GROUND-R13/R14), NOT the canonical store.
+    overrides[user_settings_constraints_router.constraint_store] = lambda: engine
     # The breadth surfaces (diagnose / digest / memory) reuse the agent router's identity/scope/
     # engine/limiter overrides (above); only the breadth-local DB-session seam is new — bind it to
     # the shared transactional session so digest persistence + the email-verified gate are live

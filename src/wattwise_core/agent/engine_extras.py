@@ -25,6 +25,7 @@ from wattwise_core.agent.contracts import ChatModel
 from wattwise_core.agent.deliverables import Digest, Readiness, readiness_assessment
 from wattwise_core.agent.diagnose_deliverable import AgentDiagnosis, diagnose_coverage
 from wattwise_core.agent.digest_history import digest_history as read_digest_history
+from wattwise_core.agent.engine_constraints import ConstraintCaptureMixin
 from wattwise_core.agent.engine_memory import (
     delete_memory,
     erase_memory,
@@ -79,6 +80,39 @@ async def _read_stored_response_length(state_db: AgentStateDatabase, *, athlete_
     return response_length_from_items(items)
 
 
+def _compose_recalled(
+    constraints: Sequence[RecalledItem], items: Sequence[RecalledItem]
+) -> list[dict[str, object]]:
+    """Compose the recalled context: the constraint core tier first, then the pool (MEM-R6).
+
+    The non-evictable active-constraint set is PREPENDED ahead of the keyword/recency pool and
+    de-duplicated by id, so a constraint that ALSO surfaced in the pool is not rendered twice and is
+    never dropped by ``limit`` (the salience-tier fix for #77 Hole 1). The persisted
+    verbosity/numeric-detail markers are internal run-default knobs, not personalization prose, so
+    they are kept OUT of the recalled context (VOICE-R2). A CONSTRAINT item additionally carries its
+    ``severity`` so the downstream grounding gate (GROUND-R13/R14) can select veto vs caution.
+    """
+    seen: set[str] = set()
+    out: list[dict[str, object]] = []
+    for item in (*constraints, *items):
+        if item.memory_item_id in seen:
+            continue
+        if item.content.startswith(RESPONSE_LENGTH_PREF_PREFIX) or item.content.startswith(
+            COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX
+        ):
+            continue
+        seen.add(item.memory_item_id)
+        projection: dict[str, object] = {
+            "kind": item.kind.value,
+            "content": item.content,
+            "inferred": item.inferred,
+        }
+        if item.severity is not None:
+            projection["severity"] = item.severity.value
+        out.append(projection)
+    return out
+
+
 class _EngineSeams(Protocol):
     """The engine seams the diagnosis/readiness/memory methods read (supplied by the engine).
 
@@ -96,13 +130,14 @@ class _EngineSeams(Protocol):
     async def _agent_state_db(self) -> AgentStateDatabase: ...
 
 
-class DeliverableEngineMixin:
+class DeliverableEngineMixin(ConstraintCaptureMixin):
     """Diagnosis (API-R15) + athlete-scoped memory seam (MEM-R3/-R4) for the engine.
 
     Mixed into :class:`~wattwise_core.agent.engine.GraphAgentEngine`; every method is
     DETERMINISTIC (no LLM, no graph) and keeps ``athlete_id`` server-derived (AGT-SEC-R1). The
     diagnosis is read-only over the canonical store; the memory methods read/erase the dedicated
-    agent-state store, scoped strictly to the owner.
+    agent-state store, scoped strictly to the owner. The athlete safety-constraint capture surface
+    (MEM-R7 / GROUND-R14) is inherited from :class:`ConstraintCaptureMixin` (QUAL-R9 size split).
     """
 
     async def diagnose(
@@ -219,27 +254,22 @@ class DeliverableEngineMixin:
     async def recall_memory_for_run(
         self: _EngineSeams, *, athlete_id: str, query: str
     ) -> list[dict[str, object]]:
-        """Recall durable personalization memory for a coaching run (MEM-R4 recall-before-compose).
+        """Recall durable personalization memory for a coaching run (MEM-R4/MEM-R6).
 
         The run-path RECALL half of the ONE athlete-scoped MemoryStore seam (MEM-R4): it queries the
-        OSS relational store (recency/keyword) scoped STRICTLY to the server-derived owner (MEM-R3)
-        and returns a plain serializable projection (``kind``/``content``/``inferred``) the engine
-        injects into the run inputs so the agent personalizes its answer (MEM-R1/-R2). It returns
-        personalization context only, NEVER a canonical number (MEM-R1). A failure to read memory
-        never blocks the run — it degrades to no personalization (the answer is still grounded).
+        OSS relational store (recency/keyword) scoped STRICTLY to the server-derived owner (MEM-R3),
+        returning a plain serializable projection (``kind``/``content``/``inferred``) the engine
+        injects so the agent personalizes its answer (MEM-R1/-R2) — never a canonical number.
+        The FULL active-constraint core tier is PREPENDED and de-duplicated (MEM-R6 salience tier,
+        ADR 0008 §3) by :func:`_compose_recalled`: a standing constraint is never evicted by usage.
         """
+        now = utcnow()
         state_db = await self._agent_state_db()
         async with state_db.session() as session:
             store = OssMemoryStore(session)
+            constraints = await store.fetch_active_constraints(athlete_id=athlete_id, now=now)
             items = await store.fetch_relevant(athlete_id=athlete_id, query=query, limit=8)
-        return [
-            {"kind": item.kind.value, "content": item.content, "inferred": item.inferred}
-            for item in items
-            # The persisted verbosity-preference marker is an internal run-default knob, not athlete
-            # personalization prose — keep it OUT of the recalled context the model sees (VOICE-R2).
-            if not item.content.startswith(RESPONSE_LENGTH_PREF_PREFIX)
-            and not item.content.startswith(COACH_NUMERIC_DETAIL_LEVEL_PREF_PREFIX)
-        ]
+        return _compose_recalled(constraints, items)
 
     async def record_run_episode(self: _EngineSeams, *, athlete_id: str, content: str) -> None:
         """Record a completed coaching turn as a durable episode (MEM-R4 write-episode).

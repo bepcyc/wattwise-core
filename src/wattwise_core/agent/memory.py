@@ -33,6 +33,7 @@ from wattwise_core.persistence.types import (
     created_at_column,
     enum_column,
     pk_column,
+    timestamptz_column,
     updated_at_column,
 )
 
@@ -53,6 +54,33 @@ class MemoryItemKind(StrEnum):
     PREFERENCE = "preference"
     LANGUAGE = "language"
     PLAN_HISTORY = "plan_history"
+
+
+class ConstraintSeverity(StrEnum):
+    """Absolute vs relative contraindication severity on a CONSTRAINT row (GROUND-R14).
+
+    Mirrors ACSM's contraindication ontology (ADR 0008 §2): a ``HARD`` (absolute) constraint
+    veto-gates a contradicting prescription — never published, decision forced off ``proceed``;
+    a ``SOFT`` (relative) one degrades to a surfaced CAUTION, never a silent scrub. Meaningful
+    ONLY on a CONSTRAINT-kind row (NULL for every other kind).
+    """
+
+    HARD = "hard"
+    SOFT = "soft"
+
+
+class ConstraintStatus(StrEnum):
+    """Return-to-sport lifecycle of a CONSTRAINT row (MEM-R7, ADR 0008 §4).
+
+    A constraint is ``ACTIVE`` (gating), ``LIFTED`` (the athlete cleared it as part of the
+    shared decision), or ``EXPIRED`` (its ``effective_until`` passed). Meaningful ONLY on a
+    CONSTRAINT-kind row; a NULL status is treated as ``ACTIVE`` for backward compatibility with
+    rows written before the lifecycle columns existed.
+    """
+
+    ACTIVE = "active"
+    LIFTED = "lifted"
+    EXPIRED = "expired"
 
 
 # --- the persisted verbosity preference (VOICE-R8 §382 / MEM-R1; agent-state, not master-data) ---
@@ -146,6 +174,13 @@ class MemoryItem(AgentStateBase):
     kind: Mapped[MemoryItemKind] = enum_column(MemoryItemKind, nullable=False)
     content: Mapped[str] = mapped_column(String(2048), nullable=False)
     inferred: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # CONSTRAINT-lifecycle columns (MEM-R7 / GROUND-R14): meaningful ONLY on a CONSTRAINT-kind row,
+    # NULL for every other kind. ``severity`` selects veto (HARD) vs caution (SOFT) at the gate;
+    # ``status`` is the ACTIVE|LIFTED|EXPIRED lifecycle (NULL reads as ACTIVE, backward-compat);
+    # ``effective_until`` is the optional self-expiry instant ("no running for 6 months").
+    severity: Mapped[ConstraintSeverity | None] = enum_column(ConstraintSeverity, nullable=True)
+    status: Mapped[ConstraintStatus | None] = enum_column(ConstraintStatus, nullable=True)
+    effective_until: Mapped[_dt.datetime | None] = timestamptz_column(nullable=True)
     created_at: Mapped[_dt.datetime] = created_at_column()
     updated_at: Mapped[_dt.datetime] = updated_at_column()
 
@@ -170,6 +205,12 @@ class RecalledItem:
     #: The instant the row was last revised; ``None`` falls back to ``recorded_at`` at the
     #: API projection (API-R15a ``updated_at``).
     updated_at: _dt.datetime | None = None
+    #: CONSTRAINT-lifecycle projection (MEM-R7 / GROUND-R14): the severity selecting veto/caution,
+    #: the ACTIVE|LIFTED|EXPIRED status, and the optional self-expiry instant. All ``None`` for a
+    #: non-CONSTRAINT row (and for a constraint row that predates the lifecycle columns).
+    severity: ConstraintSeverity | None = None
+    status: ConstraintStatus | None = None
+    effective_until: _dt.datetime | None = None
 
 
 # --- the recall seam (MEM-R4) ---
@@ -200,6 +241,22 @@ class MemoryStore(Protocol):
         self, *, athlete_id: str, marker: str, content: str
     ) -> RecalledItem: ...
 
+    async def add_constraint(
+        self,
+        *,
+        athlete_id: str,
+        content: str,
+        severity: ConstraintSeverity = ConstraintSeverity.SOFT,
+        inferred: bool = True,
+        effective_until: _dt.datetime | None = None,
+    ) -> RecalledItem: ...
+
+    async def lift_constraint(self, *, athlete_id: str, memory_item_id: str) -> bool: ...
+
+    async def fetch_active_constraints(
+        self, *, athlete_id: str, now: _dt.datetime
+    ) -> Sequence[RecalledItem]: ...
+
     async def fetch_relevant(
         self, *, athlete_id: str, query: str, limit: int = 8
     ) -> Sequence[RecalledItem]: ...
@@ -224,6 +281,9 @@ def _to_recalled(row: MemoryItem) -> RecalledItem:
         inferred=row.inferred,
         recorded_at=row.created_at,
         updated_at=row.updated_at,
+        severity=row.severity,
+        status=row.status,
+        effective_until=row.effective_until,
     )
 
 
@@ -318,6 +378,58 @@ class OssMemoryStore:
         await self._session.flush()
         return _to_recalled(row)
 
+    async def add_constraint(
+        self,
+        *,
+        athlete_id: str,
+        content: str,
+        severity: ConstraintSeverity = ConstraintSeverity.SOFT,
+        inferred: bool = True,
+        effective_until: _dt.datetime | None = None,
+    ) -> RecalledItem:
+        """Write an ACTIVE CONSTRAINT row in the athlete's own words (MEM-R7 / GROUND-R14).
+
+        The explicit capture path of the constraint lifecycle (ADR 0008 §4/§5); delegates to
+        :func:`wattwise_core.agent.memory_constraints.add_constraint` (the QUAL-R9 size split).
+        Scoped to the server-derived owner (MEM-R3).
+        """
+        from wattwise_core.agent import memory_constraints  # noqa: PLC0415  avoid import cycle
+
+        return await memory_constraints.add_constraint(
+            self._session,
+            athlete_id=athlete_id,
+            content=content,
+            severity=severity,
+            inferred=inferred,
+            effective_until=effective_until,
+        )
+
+    async def lift_constraint(self, *, athlete_id: str, memory_item_id: str) -> bool:
+        """Mark the owner's CONSTRAINT row LIFTED; ``True`` iff one was lifted (MEM-R7, §4).
+
+        Delegates to :func:`wattwise_core.agent.memory_constraints.lift_constraint`; owner-scoped
+        and fail-closed on a cross-athlete / unknown id (AGT-SEC-R1).
+        """
+        from wattwise_core.agent import memory_constraints  # noqa: PLC0415  avoid import cycle
+
+        return await memory_constraints.lift_constraint(
+            self._session, athlete_id=athlete_id, memory_item_id=memory_item_id
+        )
+
+    async def fetch_active_constraints(
+        self, *, athlete_id: str, now: _dt.datetime
+    ) -> Sequence[RecalledItem]:
+        """The athlete's ALWAYS-RESIDENT active-constraint set (MEM-R6 / MEM-R7, ADR 0008 §3/§4).
+
+        Delegates to :func:`wattwise_core.agent.memory_constraints.fetch_active_constraints` (the
+        non-evictable core tier — owner-scoped, HARD-first deterministic order, never limited).
+        """
+        from wattwise_core.agent import memory_constraints  # noqa: PLC0415  avoid import cycle
+
+        return await memory_constraints.fetch_active_constraints(
+            self._session, athlete_id=athlete_id, now=now
+        )
+
     async def fetch_relevant(
         self, *, athlete_id: str, query: str, limit: int = 8
     ) -> Sequence[RecalledItem]:
@@ -367,6 +479,8 @@ __all__ = [
     "DEFAULT_COACH_NUMERIC_DETAIL_LEVEL",
     "RESPONSE_LENGTHS",
     "RESPONSE_LENGTH_PREF_PREFIX",
+    "ConstraintSeverity",
+    "ConstraintStatus",
     "MemoryItem",
     "MemoryItemKind",
     "MemoryStore",

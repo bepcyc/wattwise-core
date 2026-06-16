@@ -127,6 +127,7 @@ class _ScriptedGrounder:
         draft: str,
         retrieved: Any,
         request_text: str | None = None,
+        active_constraints: Any = None,
     ) -> GroundingResult:
         claim = Claim(kind=ClaimKind.NUMBER, text="1", value=1.0, metric="ctl")
         survivor = GroundedClaim(claim=claim, verdict=GroundVerdict.GROUNDED, citation={"m": "ctl"})

@@ -40,8 +40,9 @@ for rest. A refusal you can trust beats a guess you cannot.
   wellness, your training history — none of it has to leave your network. You can even run
   the coach against a local model, so nothing ever goes to an outside service.
 - **Answers grounded in your record.** The coach reads only your data and checks every claim
-  against it. You get honest refusals instead of confident nonsense, and the numbers you read
-  are the numbers you actually rode.
+  against it. You get honest refusals instead of confident nonsense, the numbers you read
+  are the numbers you actually rode, and it won't tell you to do what you've told it you can't —
+  your stated limits (an injury, a doctor's advice) gate the advice.
 - **Any language.** Ask in English, German, Russian, whatever you speak. The honesty rules
   hold in every language.
 - **Real metrics.** The Performance Management Chart (fitness, fatigue, form), Normalized
