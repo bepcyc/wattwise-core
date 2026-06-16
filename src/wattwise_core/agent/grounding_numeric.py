@@ -97,9 +97,7 @@ def _request_echo(claim: Claim) -> _Outcome:
     return _Outcome(GroundedClaim(claim, GroundVerdict.GROUNDED, citation), token)
 
 
-def _is_request_echo(
-    claim: Claim, request_values: frozenset[float], *, echo_blocked: bool
-) -> bool:
+def _is_request_echo(claim: Claim, request_values: frozenset[float], *, echo_blocked: bool) -> bool:
     """True iff this claim's value echoes a number the ATHLETE supplied in their request.
 
     Sign-insensitive: a range's second member ("5-7") extracts with the dash attached, so a

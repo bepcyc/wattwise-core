@@ -440,9 +440,7 @@ def test_anchored_guard_pins_the_reference_date_once() -> None:
 
 def _prescription(text: str, metric: str | None, value: float) -> Claim:
     """A NUMBER claim marked as a future TARGET (issue #25)."""
-    return Claim(
-        kind=ClaimKind.NUMBER, text=text, metric=metric, value=value, prescriptive=True
-    )
+    return Claim(kind=ClaimKind.NUMBER, text=text, metric=metric, value=value, prescriptive=True)
 
 
 def test_prescription_under_binding_enforce_is_never_rewritten_upward() -> None:
