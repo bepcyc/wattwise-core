@@ -67,11 +67,17 @@ case "${scanner}" in
       # --ignorefile parity with the image scan above: a triaged, justified .trivyignore entry
       # (a CVE with no fix yet, or one not reachable in our usage) MUST suppress on BOTH the fs
       # and image legs, or a pinned-dependency advisory can never be lawfully waived.
+      # Skip non-product trees: gitignored agent worktrees (.claude/worktrees/*/uv.lock are
+      # stale snapshots, not the shipped lockfile) and the venv. CI scans a clean checkout
+      # where these are absent; this keeps a local pre-push run scanning the SAME product
+      # surface (the committed uv.lock) instead of failing on an orphaned worktree's old pins.
       if ! trivy fs \
             --severity "${WW_FAIL_SEVERITY}" \
             --exit-code 1 \
             --scanners vuln \
             --ignorefile .trivyignore \
+            --skip-dirs .claude \
+            --skip-dirs .venv \
             --format table \
             --output "${WW_OUT_DIR}/trivy-fs.txt" \
             "${fs_target}"; then
