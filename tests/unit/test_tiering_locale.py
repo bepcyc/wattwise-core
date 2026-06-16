@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from wattwise_core.agent.contracts import ComposedAnswer
 from wattwise_core.agent.graph_model_nodes import make_compose
 from wattwise_core.agent.graph_state import limitation_text, render_context
 from wattwise_core.agent.locale import EMPTY_LOCALE_POLICY, LocalePolicy
@@ -42,6 +43,12 @@ class _RecordingModel:
         self.compose_calls: list[str] = []
 
     async def structured(self, *, system: str, data: str, schema: type) -> Any:
+        # COMPOSE-R3: the compose node now drives structured decoding of a ComposedAnswer;
+        # record the system prompt here (the node's single generation call) and return the
+        # two-layer answer. Other schemas are not exercised by these compose-node tests.
+        if schema.__name__ == "ComposedAnswer":
+            self.compose_calls.append(system)
+            return ComposedAnswer(visible_answer="drafted", evidence_claims=())
         raise NotImplementedError
 
     async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:

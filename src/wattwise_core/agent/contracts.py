@@ -348,6 +348,11 @@ class AgentState(TypedDict, total=False):
     cost_events: Annotated[list[dict[str, Any]], _append]
     # (c) outputs
     draft: str | None
+    # COMPOSE-R3 evidence layer: the candidate claims compose emitted alongside the visible
+    # prose (draft), the authoritative source the grounding extraction verifies against. Stored
+    # as plain dicts (EvidenceClaim.model_dump()) so it serializes into the checkpoint; never
+    # projected into an API response (OUTCOME-R2) and never shown to the athlete (VOICE-R2).
+    evidence_claims: list[dict[str, Any]] | None
     grounded_html: str | None
     grounded_text: str | None
     observations: list[dict[str, Any]]
