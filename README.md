@@ -169,6 +169,8 @@ here makes the core honesty promise something we can actually *prove*.
   code can ever leak into athlete-facing prose.
 - **#95** — Surface the gathered activity id into the compose fact sheet so per-ride TSS
   claims are genuinely citable in production, not just in theory.
+- **#103** — Scope the slow CI tiers to the change: a docs/text-only PR shouldn't pay the
+  database, e2e, and image-build tax, while any DDL or source change still runs the full gate.
 
 ### v0.0.2 — **Coggan** · the metrics vocabulary
 
