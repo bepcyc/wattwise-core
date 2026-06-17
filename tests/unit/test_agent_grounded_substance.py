@@ -134,6 +134,9 @@ def _data_grounded_state(*, citations: Sequence[Mapping[str, Any]]) -> AgentStat
     # A gathered canonical capability == the request was data-grounded (STATUS-R1 gate input).
     state["retrieved"] = stamp_retrieved(turn_id(state), {"weekly_load": _zero_dominated_pmc()})
     state["citations"] = list(citations)
+    # A real completable run carries a non-empty athlete-visible body; set one so the empty-visible
+    # fail-closed guard (COMPOSE-R3 point 1) does not fire on these synthetic status-only states.
+    state["grounded_text"] = "Your training load is holding steady."
     return state
 
 
@@ -154,6 +157,20 @@ def test_status_r1_proceed_with_survivors_completes() -> None:
     assert status is RunStatus.COMPLETED
 
 
+def test_empty_visible_body_degrades_even_with_grounded_survivors() -> None:
+    """COMPOSE-R3 point 1: an EMPTY athlete-visible body never ships as completed.
+
+    A compose answer that was ALL evidence layer (a ``<technical_proof>`` block with no surrounding
+    prose) parses to an empty ``visible_answer`` -> empty ``grounded_text``; even though its claims
+    grounded (a survivor is present), a blank body MUST degrade to the honest fail-closed outcome.
+    """
+    state = _data_grounded_state(citations=[{"metric": "ctl", "value": 1.81}])
+    assert grounded_survivor_count(state) == 1
+    state["grounded_text"] = "   "  # all-evidence-layer answer -> blank visible prose
+    status = terminal_status(state, GroundDecision.PROCEED, ceiling=99)
+    assert status is RunStatus.DEGRADED
+
+
 def test_status_r1_number_free_run_exempt_when_no_metric_gathered() -> None:
     """STATUS-R1 exemption: a run that gathered NO metric capability stays completed.
 
@@ -169,6 +186,7 @@ def test_status_r1_number_free_run_exempt_when_no_metric_gathered() -> None:
     )
     state["retrieved"] = stamp_retrieved(turn_id(state), {})
     state["citations"] = []
+    state["grounded_text"] = "You've got this — keep showing up."  # a real number-free body
     assert gathered_metric_capability(state) is False
     status = terminal_status(state, GroundDecision.PROCEED, ceiling=99)
     assert status is RunStatus.COMPLETED

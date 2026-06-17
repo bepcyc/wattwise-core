@@ -94,6 +94,43 @@ _NUMBER_RE = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?(?!\.?\d)(?!\w)")
 # the deterministic leads-with-state check (the body is sanitized later by the API).
 _TAG_RE = re.compile(r"<[^>]+>")
 
+# --- fail-closed <technical_proof> tag strip (COMPOSE-R3, #87) -----------------------------
+#
+# The compose-node parser already builds a tag-free visible_answer; this is the SECOND,
+# defense-in-depth strip at the athlete-facing boundary. It MUST catch BOTH the literal tag form
+# (`<technical_proof>`) AND the HTML-escaped form (`&lt;technical_proof&gt;`), because the HTML
+# body is `<p>` + html.escape(text) + `</p>` (graph_state.safe_html) — a literal-'<' regex is blind
+# to the escaped tag. After stripping, a construction-DIVERGED backstop checks the invariant token
+# `technical_proof` survives nowhere (catching a translated/novel spelling the structured regex
+# missed); if it does, the body is scrubbed to the warm fallback opener — never leaked.
+_TP_BLOCK_LITERAL_RE = re.compile(
+    r"<\s*technical_proof\b[^>]*>.*?(?:<\s*/\s*technical_proof\s*>|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_TP_BLOCK_ESCAPED_RE = re.compile(
+    r"&lt;\s*technical_proof\b.*?&gt;.*?(?:&lt;\s*/\s*technical_proof\s*&gt;|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_TP_FRAGMENT_RE = re.compile(
+    r"(?:<|&lt;)\s*/?\s*technical_proof\b[^>]*?(?:>|&gt;)?", flags=re.IGNORECASE
+)
+#: Construction-diverged backstop: the invariant token in ANY casing/spelling.
+_TP_BARE_TOKEN_RE = re.compile(r"technical_proof", flags=re.IGNORECASE)
+
+
+def _strip_technical_proof(body: str) -> str:
+    """Remove every <technical_proof> block + stray fragment (literal AND HTML-escaped form).
+
+    Fail-closed: an unclosed block consumes to end-of-text; duplicate/nested regions and orphan
+    fragments are removed; residual double-spaces are normalized. A surviving ``technical_proof``
+    token (a form the structured regexes missed) is handled by the caller's bare-substring backstop.
+    """
+    body = _TP_BLOCK_LITERAL_RE.sub("", body)
+    body = _TP_BLOCK_ESCAPED_RE.sub("", body)
+    body = _TP_FRAGMENT_RE.sub("", body)
+    return re.sub(r"[ \t]{2,}", " ", body)
+
+
 # Report-frame lead patterns that FAIL the leads-with-state gate (COACH-R7 / VOICE-R7): a
 # leading sentence that introduces a data/metrics readout ("here is your training-load
 # picture", "here are your latest metrics/numbers", "your current numbers are", a bare
@@ -408,6 +445,10 @@ def enforce_presentation(
     A deterministic PRESENTATION pass layered over the graph's fail-closed grounding; it
     rewrites no grounded number and changes no citation (VOICE-R7). In order:
 
+    0. **Fail-closed ``<technical_proof>`` strip (COMPOSE-R3).** Any tag block or stray fragment —
+       in the literal ``<technical_proof>`` form OR the HTML-escaped ``&lt;technical_proof&gt;``
+       form — removed from BOTH bodies before anything else (so block numbers never reach the
+       density count); a residual ``technical_proof`` token then scrubs the body to the fallback.
     1. **Translate / scrub raw internal metric tokens (VOICE-R2).** Any ``ctl``/``atl``/``tsb``/
        ``tss``/… code that survived into the prose (with markdown emphasis and/or a trailing
        gloss) is replaced by its athlete-native label from the config-loaded map, or by a neutral
@@ -426,6 +467,16 @@ def enforce_presentation(
     caller's already-sanitized HTML stays consistent. Numbers that survive are exactly the
     grounded ones; demotion only bounds in-prose density (citations are the reveal backing).
     """
+    # Step 0 (COMPOSE-R3 fail-closed tag strip): remove any <technical_proof> block/fragment from
+    # BOTH bodies (literal + HTML-escaped form) BEFORE the number-density count, so numbers inside a
+    # stripped block are never counted. Then the construction-diverged backstop: if the invariant
+    # token survives in either body, the strip missed a form — scrub the body to the warm fallback
+    # opener rather than leak the evidence layer to the athlete (VOICE-R2/-R3).
+    text = _strip_technical_proof(text)
+    html = _strip_technical_proof(html)
+    if _TP_BARE_TOKEN_RE.search(text) or _TP_BARE_TOKEN_RE.search(html):
+        text = presentation.fallback_lead
+        html = _wrap_html(text, html)
     text = _translate_tokens(text, presentation)
     html = _translate_tokens(html, presentation)
     text, html = _repair_lead(text, html, presentation)

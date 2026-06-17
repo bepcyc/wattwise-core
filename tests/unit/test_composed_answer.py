@@ -1,23 +1,22 @@
-"""The two-layer composed-answer types + structured-compose seam (COMPOSE-R3, #87).
+"""The two-layer composed-answer types + the inline-tag parser (COMPOSE-R3, #87).
 
-Slice 1 of the COMPOSE-R3 epic: the typed evidence/visible layers and the
-``compose_structured`` helper exist and behave, with NO node wired yet. Asserts the
-schema shape, the ``EvidenceClaim → Claim`` projection the grounder reuses, and that
-the helper drives a model's schema-constrained ``structured`` decoding (never a flat
-blob).
+Asserts the schema shape (visible prose + typed evidence layer), the ``EvidenceClaim → Claim``
+projection the grounder reuses, and :func:`parse_tagged_answer` — the deterministic simple-regex
+split of a ``<technical_proof>``-tagged model answer into the visible prose (``draft``) plus the
+parsed evidence-claim layer, fail-closed at every tag edge (unclosed/duplicate/stray/malformed).
 """
 
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from wattwise_core.agent.contracts import (
     Claim,
     ClaimKind,
     ComposedAnswer,
     EvidenceClaim,
-    compose_structured,
+    parse_tagged_answer,
 )
 
 pytestmark = pytest.mark.unit
@@ -68,38 +67,109 @@ def test_evidence_claim_projects_onto_grounding_claim() -> None:
     assert claim.workout_type == "sweet_spot"
 
 
-class _StructuredOnlyModel:
-    """A ChatModel fake whose ``structured`` decodes the requested schema; records the call."""
-
-    def __init__(self, answer: ComposedAnswer) -> None:
-        self._answer = answer
-        self.seen_schema: type[BaseModel] | None = None
-        self.seen_data: str | None = None
-
-    async def structured[M: BaseModel](self, *, system: str, data: str, schema: type[M]) -> M:
-        self.seen_schema = schema
-        self.seen_data = data
-        assert schema is ComposedAnswer
-        return self._answer  # type: ignore[return-value]
-
-    async def compose(self, *, system: str, context: str, max_tokens: int = 1024) -> str:
-        raise AssertionError("compose_structured must use structured decoding, not flat compose")
+# --- parse_tagged_answer: inline <technical_proof> tags -> ComposedAnswer (COMPOSE-R3, tags) ---
 
 
-async def test_compose_structured_drives_schema_constrained_decoding() -> None:
-    """compose_structured asks the model for a ComposedAnswer via structured decoding.
+def test_parse_prose_only_has_empty_evidence() -> None:
+    """No tag at all: the whole (stripped) text is the visible prose, evidence empty."""
+    out = parse_tagged_answer("  You're building steadily.\n")
+    assert out.visible_answer == "You're building steadily."
+    assert out.evidence_claims == ()
 
-    It must route through ``structured`` (schema-constrained), never the flat ``compose`` —
-    the visible + evidence layers arrive as one validated unit (COMPOSE-R3).
+
+def test_parse_splits_block_from_visible_and_extracts_number_claim() -> None:
+    """A closed block is stripped from the visible prose and parsed into a NUMBER claim.
+
+    Mirrors the owner's framing: technical proof inside the tag, warm prose outside.
+    The parenthetical ``as_of`` date maps onto EvidenceClaim.ref (no as_of field).
     """
-    expected = ComposedAnswer(
-        visible_answer="You're fresh and ready.",
-        evidence_claims=(
-            EvidenceClaim(kind=ClaimKind.NUMBER, text="form 4.8", metric="tsb", value=4.8),
-        ),
+    text = (
+        "<technical_proof>fitness is 5.7 (ctl, as_of 2026-06-15); "
+        "fatigue 4.8 (atl) — basis for the read</technical_proof>\n"
+        "You've been building steadily — fitness is climbing while fatigue stays manageable."
     )
-    model = _StructuredOnlyModel(expected)
-    got = await compose_structured(model, system="coach", context="fact sheet")
-    assert got is expected
-    assert model.seen_schema is ComposedAnswer
-    assert model.seen_data == "fact sheet"
+    out = parse_tagged_answer(text)
+    assert "technical_proof" not in out.visible_answer
+    assert out.visible_answer.startswith("You've been building steadily")
+    metrics = {(c.metric, c.value, c.ref) for c in out.evidence_claims}
+    assert ("ctl", 5.7, "2026-06-15") in metrics
+    assert ("atl", 4.8, None) in metrics
+    assert all(c.kind is ClaimKind.NUMBER for c in out.evidence_claims)
+
+
+def test_parse_unclosed_block_consumes_to_end_failclosed() -> None:
+    """An UNCLOSED opening tag consumes to end-of-text — the tail never leaks as visible."""
+    text = "You're recovered.\n<technical_proof>freshness is 6.0 (tsb) and the rest is cut off"
+    out = parse_tagged_answer(text)
+    assert out.visible_answer == "You're recovered."
+    assert "technical_proof" not in out.visible_answer
+    assert ("tsb", 6.0, None) in {(c.metric, c.value, c.ref) for c in out.evidence_claims}
+
+
+def test_parse_strips_every_block_and_stray_fragment() -> None:
+    """Duplicate blocks + an orphan closing fragment are all removed from the visible prose."""
+    text = (
+        "<technical_proof>load is 42 (tss)</technical_proof>"
+        "Lead prose.</technical_proof> more prose "
+        "<technical_proof>ramp is 1.1 (ramp_rate)</technical_proof>tail."
+    )
+    out = parse_tagged_answer(text)
+    assert "technical_proof" not in out.visible_answer
+    assert "<" not in out.visible_answer and ">" not in out.visible_answer
+    vals = {c.value for c in out.evidence_claims}
+    assert {42.0, 1.1} <= vals
+
+
+def test_parse_skips_malformed_claim_lines_failsoft() -> None:
+    """A segment with no parseable number is skipped (fail-soft), never raises."""
+    text = (
+        "<technical_proof>you are doing great; consistency matters; "
+        "load is 100 (tss)</technical_proof>Keep it up."
+    )
+    out = parse_tagged_answer(text)
+    assert out.visible_answer == "Keep it up."
+    assert {(c.metric, c.value) for c in out.evidence_claims} == {("tss", 100.0)}
+
+
+def test_parse_does_not_split_a_spaced_numeric_range() -> None:
+    """The em-dash/hyphen free-prose tail strip must NOT eat a spaced numeric range.
+
+    A range like ``5 - 7`` is not a clean single NUMBER claim, so the segment is skipped
+    rather than mis-parsed into the value ``5`` (which would silently drop the ``7``).
+    """
+    out = parse_tagged_answer("<technical_proof>weekly hours 5 - 7 (target)</technical_proof>ok")
+    # No claim fabricated with value 5 from the truncated range.
+    assert all(c.value != 5.0 for c in out.evidence_claims)
+
+
+def test_parse_output_round_trips_through_evidence_claim_model_validate() -> None:
+    """Each parsed claim's model_dump round-trips back through EvidenceClaim (slice-3 gate)."""
+    out = parse_tagged_answer(
+        "<technical_proof>fitness is 5.7 (ctl, as_of 2026-06-15)</technical_proof>hi"
+    )
+    for c in out.evidence_claims:
+        again = EvidenceClaim.model_validate(c.model_dump())
+        assert again.to_claim().metric == c.metric
+
+
+def test_parse_block_only_yields_empty_visible() -> None:
+    """A block with no surrounding prose yields empty visible prose (caller routes to abstain)."""
+    out = parse_tagged_answer("<technical_proof>form 4.8 (tsb)</technical_proof>")
+    assert out.visible_answer == ""
+    assert out.evidence_claims  # evidence still parsed
+
+
+def test_parse_attributed_opener_does_not_leak_block_body_as_prose() -> None:
+    """An attributed opener (`<technical_proof foo>`) must still have its body stripped, not leaked.
+
+    The model is instructed to emit a bare tag, but a deviating attributed opener MUST NOT spill the
+    evidence reasoning into the visible prose (the fail-closed premise defends against deviation).
+    """
+    text = (
+        '<technical_proof lang="en">secret internal reasoning; ctl 5.7'
+        "</technical_proof>You are fresh."
+    )
+    out = parse_tagged_answer(text)
+    assert "technical_proof" not in out.visible_answer
+    assert "secret internal reasoning" not in out.visible_answer
+    assert out.visible_answer == "You are fresh."
