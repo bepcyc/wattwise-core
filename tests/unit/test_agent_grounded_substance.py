@@ -44,6 +44,7 @@ from wattwise_core.agent.contracts import (
 )
 from wattwise_core.agent.graph import AgentServices, build_graph
 from wattwise_core.agent.graph_state import (
+    activity_refs_from_requests,
     build_caveat,
     gathered_metric_capability,
     grounded_survivor_count,
@@ -53,6 +54,7 @@ from wattwise_core.agent.graph_state import (
     turn_id,
 )
 from wattwise_core.agent.grounding_factsheet import render_capability_factsheet
+from wattwise_core.analytics.np_if_tss import LoadMetricsBundle, NormalizedPowerValue
 from wattwise_core.analytics.pmc import PmcDay
 from wattwise_core.analytics.result import Computed, Unavailable, UnavailableReason
 
@@ -117,6 +119,100 @@ def test_factsheet_single_scalar_metric_leads_with_current_value() -> None:
     body = sheets["critical_power"]
     assert "current critical power (critical_power_w) 312" in body
     assert "current anaerobic capacity (w_prime_j) 21000" in body
+
+
+# --- COMPOSE-R1a (#95): a per-ride load sheet names its activity + leads with activity_tss ---
+
+
+def _load_bundle(*, computed: bool = True) -> Computed[LoadMetricsBundle]:
+    """A per-ride load-metrics bundle (the ``coggan`` record shape).
+
+    ``computed=True`` is the power path with a Computed per-ride TSS; ``computed=False`` makes
+    every RENDERED field Unavailable so the sheet must fall to an honest "no value" line.
+    """
+    npv = Computed(
+        NormalizedPowerValue(
+            np_w=210.0, avg_power_w=190.0, mean_r_w=44100.0, analysis_window_s=3000
+        )
+    )
+    gap = Unavailable(UnavailableReason.INSUFFICIENT_DATA, "no valid power channel")
+    return Computed(
+        LoadMetricsBundle(
+            duration_valid_s=Computed(3600) if computed else gap,
+            np=npv if computed else gap,
+            if_=Computed(0.84) if computed else gap,
+            tss=Computed(78.0) if computed else gap,
+            hr_load=Unavailable(UnavailableReason.OUT_OF_DOMAIN, "power won"),
+            tss_per_hour=Computed(78.0) if computed else gap,
+            efficiency_factor=Unavailable(UnavailableReason.MISSING_REQUIRED_INPUT, "no hr"),
+            variability_index=Computed(1.1) if computed else gap,
+            intensity_class=Computed("threshold") if computed else gap,
+            load_model="power_tss",
+        )
+    )
+
+
+def test_factsheet_load_bundle_names_activity_and_leads_with_activity_tss() -> None:
+    """COMPOSE-R1a: a per-ride load sheet names its activity and leads with activity_tss.
+
+    The activity_id (from the planner's request) + the canonical ``activity_tss`` code are what
+    let the model author a per-ride claim the §7 grounder binds to the right activity (#47/#99).
+    """
+    sheets = render_capability_factsheet(
+        {"load_metrics": _load_bundle()}, {"load_metrics": "ride-42"}
+    )
+    body = sheets["load_metrics"]
+    assert body.startswith("for activity ride-42: ")
+    assert "current training stress score (activity_tss) 78" in body
+    assert "intensity factor (if) 0.84" in body
+    # Never a raw dataclass / Computed repr (COMPOSE-R1).
+    assert "LoadMetricsBundle(" not in body
+    assert "Computed(" not in body
+
+
+def test_factsheet_load_bundle_without_activity_ref_omits_activity_line() -> None:
+    """COMPOSE-R1a fail-closed: with no planned id, render the figures but never a guessed id."""
+    body = render_capability_factsheet({"load_metrics": _load_bundle()})["load_metrics"]
+    assert "for activity" not in body
+    # The per-ride TSS still leads (salience is independent of whether an id was recoverable).
+    assert body.startswith("current training stress score (activity_tss) 78")
+
+
+def test_factsheet_load_bundle_all_unavailable_states_no_value_not_zero() -> None:
+    """COMPOSE-R1a fail-closed: an all-Unavailable bundle is an honest line, never a 0 or a repr."""
+    body = render_capability_factsheet(
+        {"load_metrics": _load_bundle(computed=False)}, {"load_metrics": "ride-9"}
+    )["load_metrics"]
+    assert body == "for activity ride-9: no current value available"
+    assert "LoadMetricsBundle(" not in body
+
+
+def test_render_context_threads_activity_ref_into_per_ride_sheet() -> None:
+    """COMPOSE-R1a end-to-end: render_context carries activity_refs into the per-ride block."""
+    retrieved = {"load_metrics": _load_bundle()}
+    context, _trimmed = render_context(
+        "what was my TSS on that ride?",
+        retrieved,
+        activity_refs={"load_metrics": "ride-42"},
+    )
+    assert "for activity ride-42: current training stress score (activity_tss) 78" in context
+    assert "LoadMetricsBundle(" not in context
+
+
+def test_activity_refs_from_requests_maps_only_real_per_ride_ids() -> None:
+    """COMPOSE-R1a wiring: only requests carrying a real string activity_id map; last wins on a dup.
+
+    A non-activity capability (no activity_id) and an empty/blank id contribute NO entry
+    (fail-closed) — the fact sheet then renders those without a guessed activity line.
+    """
+    requests = [
+        RetrievalRequest(capability="weekly_load", params={}),  # range-scoped: no id
+        RetrievalRequest(capability="load_metrics", params={"activity_id": "ride-1"}),
+        RetrievalRequest(capability="decoupling", params={"activity_id": ""}),  # blank -> dropped
+        RetrievalRequest(capability="load_metrics", params={"activity_id": "ride-2"}),  # dup: wins
+    ]
+    refs = activity_refs_from_requests(requests)
+    assert refs == {"load_metrics": "ride-2"}
 
 
 # --- STATUS-R1: completed is coupled to grounded substance, not the routing decision -----

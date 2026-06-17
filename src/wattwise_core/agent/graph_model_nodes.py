@@ -93,6 +93,10 @@ def make_compose(
         """
         gs.athlete_id(state)
         retrieved = gs.read_retrieved(state)
+        # COMPOSE-R1a: recover the canonical activity_id each activity-scoped capability was
+        # planned for (PLAN-R3) so the fact sheet can name it and the model can author a
+        # per-ride claim the §7 grounder binds to the right activity (GROUND-R7 activity_tss).
+        activity_refs = gs.activity_refs_from_requests(gs.last_plan_requests(state))
         node_model = tiering.routed_model(
             routing,
             model,
@@ -107,6 +111,7 @@ def make_compose(
             retrieved,
             active_goals=state.get("active_goals"),
             recalled_memory=state.get("recalled_memory"),
+            activity_refs=activity_refs,
             token_counter=tiering.model_token_counter(node_model),
             token_budget=context_token_budget,
         )
