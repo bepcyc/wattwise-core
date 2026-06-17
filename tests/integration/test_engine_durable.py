@@ -325,10 +325,13 @@ async def test_followup_reveal_numbers_runs_on_same_thread(
 
     A ``reveal_numbers`` follow-up exercises the verbatim-citation reveal branch (VOICE-R9): it
     reuses the prior durable thread and completes, surfacing only numbers the graph already
-    grounded (the reveal merges grounded citations, never invents one). Here the answer carries no
-    grounded number, so the reveal simply completes on the same thread without fabricating one.
+    grounded (the reveal merges grounded citations, never invents one). The answer's model scripts
+    a single grounded CTL number, so the reveal surfaces EXACTLY that one citation — verbatim from
+    canonical analytics (GROUND-R7), value-equal to an independently computed live CTL, never a
+    fabricated or extra one.
     """
-    engine = _engine(canonical, state_db, _answer_model(await _live_ctl(canonical)))
+    expected_ctl = await _live_ctl(canonical)
+    engine = _engine(canonical, state_db, _answer_model(expected_ctl))
     first = await engine.answer(
         athlete_id=ATHLETE_A,
         question="What's my fitness?",
@@ -347,8 +350,12 @@ async def test_followup_reveal_numbers_runs_on_same_thread(
     )
     assert follow.thread_id == first.thread_id, "a reveal follow-up must reuse the SAME thread"
     assert follow.status is RunStatus.COMPLETED
-    # The reveal never fabricates a number: no citation appears that the graph did not ground.
-    assert all(c.record_id for c in follow.citations)
+    # The reveal surfaces EXACTLY the one grounded number, verbatim from canonical analytics: a
+    # fabricated/extra citation, a dropped one, or a recomputed value all fail (VOICE-R9/GROUND-R7).
+    assert len(follow.citations) == 1, "reveal must surface exactly the one grounded number"
+    (revealed,) = follow.citations
+    assert revealed.metric == "ctl"
+    assert revealed.value == pytest.approx(expected_ctl), "value must be verbatim canonical CTL"
 
 
 # --- F-MEMORY (MEM-R4 durable-memory recall + episode write on the run path) -------------

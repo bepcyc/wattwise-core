@@ -365,6 +365,11 @@ async def test_default_load_model_null_clears(seeded: Env) -> None:
     )
     assert cleared.status_code == 200
     assert cleared.json()["default_load_model"] is None
+    # Mutation-proof: a fresh GET re-reads the store — the seeded ``power_tss`` must be GONE,
+    # not merely echoed as null while the column still holds it (mirrors the round-trip test).
+    got = await seeded.client.get("/v1/user-settings/default-load-model")
+    assert got.status_code == 200
+    assert got.json()["default_load_model"] is None
 
 
 # --- AUTH-R11: write scope enforcement -------------------------------------------

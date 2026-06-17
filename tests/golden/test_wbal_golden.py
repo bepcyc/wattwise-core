@@ -88,19 +88,36 @@ def test_wbal_golden_skiba_differential_t6() -> None:
 
 
 def test_wbal_golden_tau_w_uses_published_constants() -> None:
-    """τ_W at the first recovery second equals 546·e^(-0.01·150)+316 exactly."""
+    """τ_W drives a NON-zero recovery delta, computed with the published Skiba constants.
+
+    The recovery delta is ``(W' - W'bal(t-1))·(1 - e^(-1/τ_W))``; from a FULL tank that
+    delta is identically zero, so τ_W (and the SKIBA_TAU constants) would be dead. We
+    first DEPLETE the tank with one expenditure second, then recover, so the delta is
+    non-zero and τ_W is load-bearing.
+
+    Hand derivation (CP=250, W'=1000, P=[700, 100]):
+      t0: P=700 ≥ CP → 1000 - (700-250)                    = 550.0
+      t1: P=100 < CP → d_cp=150, τ = 546·e^(-0.01·150)+316 = 437.8290674410427,
+          550 + (1000-550)·(1 - e^(-1/τ))                  = 551.0266255149958
+    The τ oracle uses the literal published Skiba values (546 / -0.01 / 316), NOT the
+    imported SKIBA_TAU_* symbols, so a wrong tau constant breaks production while this
+    oracle stays correct and the assertion fails (delta is ~1.03 J ≫ the ~5.5e-7 tol).
+    """
     cp = 250.0
-    w_prime = 20000.0
-    # Single recovery second from a full tank: P=100 ⇒ d_cp=150.
-    power = np.array([100.0], dtype=np.float64)
+    w_prime = 1000.0
+    power = np.array([700.0, 100.0], dtype=np.float64)
     result = wbal(power, cp, w_prime)
     assert isinstance(result, Computed)
 
-    tau = SKIBA_TAU_A * math.exp(SKIBA_TAU_B * 150.0) + SKIBA_TAU_C
-    expected = w_prime + (w_prime - w_prime) * (1.0 - math.exp(-1.0 / tau))
-    # From a full tank, recovery cannot exceed W', so the value stays W'.
-    assert math.isclose(result.value.series[0], expected, abs_tol=_abs_tol(expected))
-    assert math.isclose(result.value.series[0], w_prime, abs_tol=_abs_tol(w_prime))
+    # Independent oracle from the PUBLISHED Skiba constants (literals, not the imports).
+    prev = w_prime - (700.0 - cp)  # depleted to 550.0 by the expenditure second
+    tau = 546.0 * math.exp(-0.01 * (cp - 100.0)) + 316.0
+    expected = prev + (w_prime - prev) * (1.0 - math.exp(-1.0 / tau))
+    assert expected < w_prime  # recovery stays below W', so the W' clamp is inactive
+    assert math.isclose(result.value.series[1], expected, abs_tol=_abs_tol(expected))
+
+    # The published constants the production code imports must equal the Skiba literals.
+    assert (SKIBA_TAU_A, SKIBA_TAU_B, SKIBA_TAU_C) == (546.0, -0.01, 316.0)
 
 
 def test_wbal_golden_boundary_p_equals_cp_is_expenditure() -> None:

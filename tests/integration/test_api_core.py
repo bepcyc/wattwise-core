@@ -36,6 +36,7 @@ from wattwise_core.api.app import API_PREFIX, create_app
 from wattwise_core.api.auth import TOKEN_ALGORITHM, TOKEN_AUDIENCE, TOKEN_ISSUER
 from wattwise_core.api.errors import PROBLEM_BASE_URI, PROBLEM_MEDIA_TYPE
 from wattwise_core.api.middleware import DEFAULT_JSON_MAX_BYTES
+from wattwise_core.api.routers.connections import ApiKeyNextStep, FileUploadNextStep
 from wattwise_core.config import Settings, load_settings
 from wattwise_core.persistence.models import Athlete, Base
 
@@ -153,12 +154,26 @@ def test_every_operation_has_stable_operation_id_and_error_responses() -> None:
 
 def test_connection_next_step_union_is_discriminated() -> None:
     """The initiate response union carries an OpenAPI discriminator (SCHEMA-R10/DOC-R5)."""
+    # Independent oracle from the production models (never the schema we assert on):
+    # the propertyName is the single field both members share; the mapping must route
+    # each member's on-wire ``kind`` value to a $ref ending in that member's class name.
+    members = (ApiKeyNextStep, FileUploadNextStep)
+    (expected_property,) = set.intersection(*(set(m.model_fields) for m in members))
+    expected_mapping = {m.model_fields["kind"].default.value: m.__name__ for m in members}
+
     spec = create_app(_settings()).openapi()
     op = spec["paths"]["/v1/connections/{source}/initiate"]["post"]
     schema = op["responses"]["200"]["content"]["application/json"]["schema"]
-    # FastAPI emits the discriminated union as an allOf/$ref with a discriminator block.
-    flat = str(schema)
-    assert "discriminator" in flat
+
+    disc = schema["discriminator"]
+    assert disc["propertyName"] == expected_property
+    mapping = disc["mapping"]
+    assert set(mapping) == set(expected_mapping)
+    for wire_value, member_name in expected_mapping.items():
+        assert mapping[wire_value].endswith(f"/{member_name}"), wire_value
+    # The discriminator must tag the actual union members, not a stray sibling schema.
+    union_refs = {entry["$ref"].rsplit("/", 1)[-1] for entry in schema["oneOf"]}
+    assert union_refs == {m.__name__ for m in members}
 
 
 def test_no_request_schema_exposes_caller_identity_field() -> None:
@@ -232,10 +247,21 @@ def test_read_endpoint_emits_ratelimit_headers_on_success(
     """A served read carries the RateLimit-* headers for the post-debit state (LIMIT-R3)."""
     client, athlete_id = db_client
     headers = _owner_token(athlete_id, scopes=["read"])
-    resp = client.get(f"{API_PREFIX}/onboarding/status", headers=headers)
-    assert resp.status_code == 200
-    assert resp.headers["RateLimit-Limit"] == "120"
-    assert int(resp.headers["RateLimit-Remaining"]) <= 120
+    # The db_client fixture builds a fresh app -> a pristine, empty bucket map, so the
+    # FIRST served read is the very first debit on a full read bucket. The token-bucket
+    # caps at capacity, so after exactly one debit RateLimit-Remaining MUST be
+    # capacity - 1 (oracle independent of the header's own value). A second consecutive
+    # read MUST debit again -> strictly less. A regression that skips the debit (or emits
+    # a constant header) leaves Remaining == capacity / unchanged and is caught here.
+    first = client.get(f"{API_PREFIX}/onboarding/status", headers=headers)
+    assert first.status_code == 200
+    assert first.headers["RateLimit-Limit"] == "120"
+    capacity = int(first.headers["RateLimit-Limit"])
+    first_remaining = int(first.headers["RateLimit-Remaining"])
+    assert first_remaining == capacity - 1, "the first served read must debit exactly one token"
+    second = client.get(f"{API_PREFIX}/onboarding/status", headers=headers)
+    assert second.status_code == 200
+    assert int(second.headers["RateLimit-Remaining"]) < first_remaining
 
 
 def test_activities_list_is_rate_limited_per_athlete(db_client: tuple[TestClient, str]) -> None:
