@@ -96,22 +96,34 @@ def terminal_status(state: AgentState, decision: GroundDecision | None, ceiling:
 
     ``awaiting_approval`` is NEVER produced here (it is yielded by the durable interrupt at
     interrupt_gate). ``budget_exceeded`` on a refused admission; ``degraded`` on a ceiling
-    breach, a grounder abstain, a bound-exhausted non-PROCEED recovery, open gaps, OR a
-    data-grounded PROCEED that published ZERO grounded survivors (STATUS-R1); otherwise
-    ``completed``.
+    breach, a grounder abstain, a bound-exhausted recovery that could NOT publish a grounded
+    gap-free answer, open gaps, a data-grounded PROCEED that published ZERO grounded survivors
+    (STATUS-R1), or an empty visible body; otherwise ``completed``. A non-PROCEED recovery that
+    DID publish a grounded, gap-free, cited answer completes (#85), not degraded.
     """
     if budget_exceeded(state):
         return RunStatus.BUDGET_EXCEEDED
-    # DEGRADE on: a node-visit ceiling breach (GRAPH-R5); a non-PROCEED ground decision — a
-    # grounder abstain OR a bound-exhausted regenerate/replan recovery that could not be
-    # re-grounded (GROUND-R9/REFLECT-R4), never a complete-looking answer; open coverage gaps;
-    # or the STATUS-R1 honest refusal — a PROCEED whose request WAS data-grounded (gathered
-    # canonical capabilities) but published ZERO grounded survivors, a number-free non-answer
-    # masquerading as a completion (the inverted-honesty defect). A run that gathered no metric
-    # capability is number-free by design and exempt by construction.
+    # DEGRADE on: a node-visit ceiling breach (GRAPH-R5); a grounder ABSTAIN (an honest refusal,
+    # GROUND-R6); a bound-exhausted REGENERATE/REPLAN recovery that could NOT publish a clean
+    # answer (GROUND-R9/REFLECT-R4); open coverage gaps; the STATUS-R1 empty-survivor honest
+    # refusal; or an empty visible body. A run that gathered no metric capability is number-free by
+    # design and exempt by construction.
+    #
+    # #85 fix (the residual non-deterministic tail of #45): a non-PROCEED ground decision left by
+    # an EARLIER bounded-recovery cycle MUST NOT degrade an answer that nonetheless came out
+    # GROUNDED and gap-free. A REGENERATE/REPLAN that exhausted its bounds but still published a
+    # grounded answer (>=1 grounded survivor) with NO open coverage gap is a clean completion — the
+    # terminal status reads the PUBLISHED substance, not the stale recovery signal. ABSTAIN is
+    # always a refusal (no answer) and always degrades; the empty-survivor/empty-visible/gap/
+    # ceiling guards below still fire independently.
+    recovered_clean = grounded_survivor_count(state) > 0 and not open_gaps(state)
+    unrecovered_recovery = (
+        decision in (GroundDecision.REGENERATE, GroundDecision.REPLAN) and not recovered_clean
+    )
     degrade = (
         over_ceiling(state, ceiling)
-        or (decision is not None and decision is not GroundDecision.PROCEED)
+        or decision is GroundDecision.ABSTAIN
+        or unrecovered_recovery
         or open_gaps(state)
         or _empty_survivor_degrade(state, decision)
         or _empty_visible_body_degrade(state)
