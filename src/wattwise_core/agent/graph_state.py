@@ -204,6 +204,24 @@ def last_plan_requests(state: AgentState) -> list[RetrievalRequest]:
     return []
 
 
+def activity_refs_from_requests(requests: Sequence[RetrievalRequest]) -> dict[str, str]:
+    """Map each activity-scoped capability key -> the canonical ``activity_id`` it was planned for.
+
+    COMPOSE-R1a: the compose fact sheet names the activity a per-ride capability was computed for
+    so the model can author a per-ride claim the §7 grounder binds to the right activity (GROUND-R7
+    ``activity_tss``). The id comes ONLY from the planner's own request params (PLAN-R3) — never
+    fabricated; a request without a (non-empty, string) ``activity_id`` contributes no entry
+    (fail-closed). Capability-keyed like the gather map: when two requests share a capability key
+    the LAST wins (COMPOSE-R1a v1 limitation — one rendered activity per capability per turn).
+    """
+    refs: dict[str, str] = {}
+    for req in requests:
+        activity_id = req.params.get("activity_id")
+        if isinstance(activity_id, str) and activity_id:
+            refs[req.capability] = activity_id
+    return refs
+
+
 def retrieved_truncation_gaps(state: AgentState, incoming: Mapping[str, Any]) -> set[str]:
     """Surface a STATE-R6 retrieved-truncation as a coverage gap, once (pure read).
 
@@ -312,6 +330,7 @@ def render_context(
     *,
     active_goals: Sequence[Mapping[str, Any]] | None = None,
     recalled_memory: Sequence[Mapping[str, Any]] | None = None,
+    activity_refs: Mapping[str, str] | None = None,
     token_counter: TokenCounter | None = None,
     token_budget: int | None = None,
 ) -> tuple[str, bool]:
@@ -358,7 +377,10 @@ def render_context(
     # follows), never a raw repr dump whose warm-up zeros dominate the salience and steer the
     # answer away from the one claim that can ground. The grounder (§7) still verifies every
     # number the model then states — the fact sheet only steers salience, it certifies nothing.
-    sheets = render_capability_factsheet(dict(items))
+    # COMPOSE-R1a: an activity-scoped capability's sheet is prefixed with the canonical
+    # activity_id (from the planner's request) so the model can author a per-ride claim the
+    # grounder binds to the right activity (GROUND-R7 per-ride activity_tss).
+    sheets = render_capability_factsheet(dict(items), activity_refs)
     for key, _ in items:
         body = sheets.get(key, "no current value available")
         candidate = f"{key}:\n<untrusted-data>\n{body}\n</untrusted-data>"
@@ -464,6 +486,7 @@ __all__ = [
     "MAX_REDRAFTS",
     "MAX_REFLECTIONS",
     "InterruptRecorder",
+    "activity_refs_from_requests",
     "athlete_id",
     "budget_exceeded",
     "build_caveat",

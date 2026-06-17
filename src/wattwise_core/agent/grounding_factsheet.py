@@ -24,6 +24,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from wattwise_core.analytics.np_if_tss import LoadMetricsBundle
 from wattwise_core.analytics.pmc import PmcDay
 from wattwise_core.analytics.result import is_computed
 
@@ -106,25 +107,51 @@ _PMC_LEAD = (
 )
 
 
-def render_capability_factsheet(retrieved: Mapping[str, Any]) -> dict[str, str]:
-    """Render each gathered capability as a current-values-first fact sheet (COMPOSE-R1).
+def render_capability_factsheet(
+    retrieved: Mapping[str, Any], activity_refs: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Render each gathered capability as a current-values-first fact sheet (COMPOSE-R1/-R1a).
 
     Returns a ``{capability_key: rendered_text}`` mapping the compose context envelopes per
     capability. Each value LEADS with the capability's CURRENT canonical scalar(s) and a short
     trend, then (where a series exists) a compact bounded ``position: value`` tail — never a
     raw object repr. A capability whose record carries no computed value renders an honest
     "no current value available" line (fail-closed salience, never a fabricated number).
+
+    ``activity_refs`` maps a capability key -> the canonical ``activity_id`` the planner
+    requested it for (PLAN-R3). When present for an activity-scoped capability, the rendered
+    sheet LEADS with ``for activity <id>:`` so the model can author a per-ride claim the §7
+    grounder binds to the RIGHT activity (GROUND-R7 per-ride ``activity_tss``, COMPOSE-R1a) —
+    rather than a date-keyed snapshot. LIMITATION (v1): one activity per capability key — the
+    gather map is capability-keyed, so multiple distinct per-ride requests for the SAME
+    capability in one turn collapse to whatever the gather kept (a salience limit only; the
+    grounder still resolves each per-ride claim independently from canonical analytics).
     """
+    refs = activity_refs or {}
     out: dict[str, str] = {}
     for key, record in retrieved.items():
-        out[key] = _render_capability(record)
+        out[key] = _render_capability(record, refs.get(key))
     return out
 
 
-def _render_capability(record: Any) -> str:
-    """One gathered capability rendered current-values-first (COMPOSE-R1)."""
+def _render_capability(record: Any, activity_id: str | None = None) -> str:
+    """One gathered capability rendered current-values-first (COMPOSE-R1/-R1a).
+
+    When ``activity_id`` is given (an activity-scoped capability, COMPOSE-R1a) the body is
+    prefixed with ``for activity <id>:`` so the model can author a per-ride claim keyed to
+    that activity; a falsy id renders the body alone (fail-closed, never a guessed id).
+    """
+    body = _render_capability_body(record)
+    return f"for activity {activity_id}: {body}" if activity_id else body
+
+
+def _render_capability_body(record: Any) -> str:
+    """The capability body, dispatched by record shape (COMPOSE-R1)."""
     if _is_pmc_series(record):
         return _render_pmc_series(record)
+    bundle = _render_load_bundle(record)
+    if bundle is not None:
+        return bundle
     rendered = _render_single_metric(record)
     if rendered is not None:
         return rendered
@@ -190,6 +217,39 @@ def _trend_word(earliest: float, latest: float) -> str:
         return "steady"
     direction = "rising" if delta > 0 else "falling"
     return f"{direction} from {earliest:g}"
+
+
+def _render_load_bundle(record: Any) -> str | None:
+    """Render a per-activity load-metrics bundle current-values-first (COMPOSE-R1a), or ``None``.
+
+    The per-ride load family (``coggan`` -> ``MetricResult[LoadMetricsBundle]``) carries each
+    figure as an INDEPENDENT nested ``MetricResult``; an Unavailable field is simply not stated
+    (never a fabricated 0). The per-ride training-stress score is surfaced under its canonical
+    grounding code ``activity_tss`` (GROUND-R7, ``MetricName.ACTIVITY_TSS``) — the model states
+    it beside the plain words so the per-ride claim keys to the right resolver. Returns a string
+    for ANY ``LoadMetricsBundle`` value (so the generic path never repr-dumps the dataclass,
+    COMPOSE-R1) and ``None`` for every other record shape.
+    """
+    if not is_computed(record) or not isinstance(record.value, LoadMetricsBundle):
+        return None
+    bundle = record.value
+    parts: list[str] = []
+    for plain, code, field in (
+        ("training stress score", "activity_tss", bundle.tss),
+        ("intensity factor", "if", bundle.if_),
+        ("training stress per hour", "tss_per_hour", bundle.tss_per_hour),
+    ):
+        if is_computed(field) and _is_real_number(field.value):
+            parts.append(f"current {plain} ({code}) {float(field.value):g}")
+    np_result = bundle.np
+    if is_computed(np_result) and _is_real_number(np_result.value.np_w):
+        parts.append(f"normalized power (np_w) {float(np_result.value.np_w):g}")
+    return "; ".join(parts) if parts else "no current value available"
+
+
+def _is_real_number(value: Any) -> bool:
+    """True iff ``value`` is a real int/float (never a bool, which is an int subclass)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _render_single_metric(record: Any) -> str | None:
