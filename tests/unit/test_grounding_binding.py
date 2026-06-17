@@ -351,6 +351,20 @@ def test_rebind_pins_as_of_to_the_sentences_explicit_date() -> None:
     assert events == (BindingEvent.AS_OF_PINNED,)
 
 
+def test_rebind_keeps_activity_tss_ref_when_sentence_states_a_date() -> None:
+    """#99: a per-ride TSS claim's ref is an ACTIVITY id, NOT a date — a sentence ISO date MUST NOT
+    overwrite it (that would mis-key the per-activity lookup `(activity_tss, <date>)` and scrub a
+    valid claim). The AS_OF_PINNED rebind is skipped for ``activity_tss``.
+    """
+    guard = _guard()
+    draft = "On 2026-06-15 your ride scored 100 TSS."
+    rebound, events = guard.rebind(
+        draft, [_number("your ride scored 100 TSS", "activity_tss", 100.0, ref="act-1")]
+    )
+    assert rebound[0].ref == "act-1"  # the activity id survives, never rebound to 2026-06-15
+    assert BindingEvent.AS_OF_PINNED not in events
+
+
 def test_rebind_never_guesses_on_an_ambiguous_sentence() -> None:
     """A multi-metric sentence rebinds nothing; the residual check still fails it closed.
 
