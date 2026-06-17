@@ -242,8 +242,13 @@ class CoachBundle:
             allowed_hosts=frozenset(settings.agent__allowed_hosts),
             lookback_days=settings.agent__coach__latest_lookback_days,
             # Reverse the SAME loaded alias map into athlete-native labels (CFG-R1a): the
-            # presentation pass translates a surviving internal code back to a human word.
-            presentation=VoicePresentation.from_aliases(settings.agent__metric_aliases),
+            # presentation pass translates a surviving internal code back to a human word, and
+            # scrubs the VOICE-R2 forbidden vocabulary — the engine enum SCHEMA plus the optional
+            # config-loaded per-deployment ``forbidden_terms`` (#98).
+            presentation=VoicePresentation.from_aliases(
+                settings.agent__metric_aliases,
+                forbidden_terms=settings.agent__coach__forbidden_terms,
+            ),
             plan_system=settings.agent__coach__prompts["plan_system"],
             claim_system=settings.agent__coach__prompts["claim_system"],
             reflect_system=settings.agent__coach__prompts["reflect_system"],
