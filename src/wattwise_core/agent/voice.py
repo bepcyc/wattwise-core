@@ -27,42 +27,23 @@ Cited requirements: COACH-R7, COACH-R8, GROUND-R5/-R7, VOICE-R7/-R8/-R9, EVAL-R5
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+# The VOICE-R2/-R2a forbidden-vocabulary deny pass lives in a focused sub-leaf (QUAL-R9 size split);
+# it depends on NOTHING here (its scrub functions take the forbidden_terms frozenset directly), so
+# this is a strictly-downward import (no cycle). INTERNAL_ENUM_TOKENS is re-exported for callers.
+from wattwise_core.agent.voice_forbidden import (
+    INTERNAL_ENUM_TOKENS,
+    INTERNAL_METRIC_TOKENS,
+    normalize_after_scrub,
+    scrub_forbidden,
+    scrub_identifier_shapes,
+)
+
 # Athlete-facing verbosity (VOICE-R8); the persisted default is ``standard``.
 ResponseLength = Literal["short", "standard", "detailed"]
-
-# The closed set of INTERNAL metric CODES the athlete-facing voice must NEVER surface in prose
-# (VOICE-R2: "ctl/atl/tsb are internal tokens"). This is the engine's metric SCHEMA — the code
-# names it is structurally not allowed to read out — not a config value (CFG-R1a is about
-# models/URLs/budgets/ports/paths). Matched case-folded, word-bounded.
-#
-# DELIBERATELY EXCLUDED — athlete-native words the spec WANTS surfaced, NOT codes (VOICE-R4):
-#   * "form" / "freshness" — the athlete-native word for TSB (VOICE-R4 "freshness or form");
-#   * "hrv" — VOICE-R4 surfaces "your HRV" to the athlete directly;
-#   * "if" — the English word "if" is far too common to scrub safely (false positives).
-# The athlete-NATIVE label each canonical CODE translates TO is config-loaded (the reverse
-# [agent.metric_aliases] map on :class:`VoicePresentation`), so a deployment re-words
-# "fitness"/"fatigue"/"freshness" without an engine change; only the forbidden-CODE vocabulary
-# lives here as schema.
-INTERNAL_METRIC_TOKENS: frozenset[str] = frozenset(
-    {
-        "ctl",
-        "atl",
-        "tsb",
-        "tss",
-        "np",
-        "cp",
-        "critical_power_w",
-        "w_prime_j",
-        "wprime",
-        "w'",
-        "hrv_rmssd_ms",
-        "rmssd",
-    }
-)
 
 # Number-density CAP per response length (VOICE-R7 defaults; exact ceilings live in
 # the loaded persona config, so callers MAY override via ``number_cap``).
@@ -360,6 +341,13 @@ class VoicePresentation:
     #: Carries NO leading article/possessive so it reads cleanly after one ("your training
     #: load") AND on its own ("training load is high") without doubling ("your your …").
     neutral_term: str = "training load"
+    #: The OPTIONAL, deployment-/language-specific extension of the VOICE-R2 forbidden vocabulary
+    #: (empty default → fail-closed-by-emptiness, never a code literal). Operators add localized
+    #: internal jargon the engine cannot enumerate (DE "schnittstelle"/"modell", RU "модель"/
+    #: "токен") AND — only for a persona that never uses them as athlete words — the ambiguous
+    #: English homographs ("cap"/"pro"/"tool"/"model"/…) deliberately kept OUT of the hardcoded
+    #: schema set. Scrubbed (removed) as whole, word-bounded tokens alongside INTERNAL_ENUM_TOKENS.
+    forbidden_terms: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
     def from_aliases(
@@ -369,6 +357,7 @@ class VoicePresentation:
         fallback_lead: str | None = None,
         neutral_term: str | None = None,
         preferred: Mapping[str, str] | None = None,
+        forbidden_terms: Sequence[str] | None = None,
     ) -> VoicePresentation:
         """Build the policy by REVERSING the loaded ``[agent.metric_aliases]`` map (CFG-R1a).
 
@@ -400,6 +389,10 @@ class VoicePresentation:
             kwargs["fallback_lead"] = fallback_lead
         if neutral_term is not None:
             kwargs["neutral_term"] = neutral_term
+        if forbidden_terms is not None:
+            kwargs["forbidden_terms"] = frozenset(
+                str(t).strip().lower() for t in forbidden_terms if str(t).strip()
+            )
         return cls(**kwargs)
 
 
@@ -439,6 +432,7 @@ def enforce_presentation(
     response_length: ResponseLength,
     presentation: VoicePresentation,
     coach_numeric_detail_level: int = 3,
+    on_scrub: Callable[[str, str], None] | None = None,
 ) -> tuple[str, str]:
     """Hold the athlete-facing body to the voice contract AFTER grounding (VOICE-R2/-R7).
 
@@ -479,6 +473,30 @@ def enforce_presentation(
         html = _wrap_html(text, html)
     text = _translate_tokens(text, presentation)
     html = _translate_tokens(html, presentation)
+    # Step 1b (VOICE-R2/-R2a allow-list realization): AFTER metric-code translation, REMOVE any
+    # internal-enum / configured-forbidden term and any internal-identifier-shaped token, then tidy
+    # the gap. This realizes the VOICE-R2 "scrub anything outside the allow-list" as keep-by-default
+    # + a closed-vocabulary deny pass (the visible layer is a projection of grounded canonical
+    # content per COMPOSE-R3; this strip is the fail-closed backstop). Runs BEFORE lead repair so a
+    # lead emptied by a scrub falls through to the warm fallback opener.
+    #
+    # The passes treat the HTML body as free text (no tag awareness): SAFE because the coach HTML is
+    # always `<p>` + html.escape(prose) `</p>` (graph_state.safe_html) with NO links/attributes — a
+    # snake_case URL path could otherwise be hit, but GROUND-R4 strips model URLs and coach prose
+    # carries none. Likewise a deployment that configures a metric LABEL / neutral_term with an
+    # underscore would have its translated label re-scrubbed by the snake_case pass — keep config
+    # athlete-native labels space-separated (the defaults are). `on_scrub` is the AGT-OBS-R4
+    # observability seam (VOICE-R2a): the engine MAY pass it; the leaf stays observability-free.
+    text = normalize_after_scrub(
+        scrub_identifier_shapes(
+            scrub_forbidden(text, presentation.forbidden_terms, on_scrub), on_scrub
+        )
+    )
+    html = normalize_after_scrub(
+        scrub_identifier_shapes(
+            scrub_forbidden(html, presentation.forbidden_terms, on_scrub), on_scrub
+        )
+    )
     text, html = _repair_lead(text, html, presentation)
     return _enforce_number_cap(html, text, number_cap(response_length, coach_numeric_detail_level))
 
@@ -549,6 +567,7 @@ def _wrap_html(text: str, original_html: str) -> str:
 
 
 __all__ = [
+    "INTERNAL_ENUM_TOKENS",
     "INTERNAL_METRIC_TOKENS",
     "Citation",
     "Observation",
