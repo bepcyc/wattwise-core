@@ -381,6 +381,12 @@ class Settings(_GroundingSettings, _AnalyticsSettings, BaseSettings):
     agent__coach__grounding_abs_tolerance: float = Field(ge=0.0)
     agent__coach__grounding_display_decimals: int = Field(ge=0, le=6)
     agent__coach__latest_lookback_days: int = Field(ge=1)
+    # The OPTIONAL deployment/per-language extension of the VOICE-R2 forbidden vocabulary (#98):
+    # localized internal jargon the engine cannot enumerate (DE "schnittstelle", RU "модель") plus
+    # any ambiguous English homograph a given persona never uses as an athlete word. Empty default
+    # = fail-closed-by-emptiness (CFG-R1a/SKILL-R6); the engine-emittable enum SCHEMA lives in
+    # ``voice.INTERNAL_ENUM_TOKENS`` (not config, so spec<->code stays checkable).
+    agent__coach__forbidden_terms: list[str] = Field(default_factory=list)
     # The externalized skill/prompt bundle (SKILL-R1..R4 / CFG-R3): EVERY system/agent prompt is
     # loaded CONTENT here, never inline engine code (ARCH-R29). ``prompts`` is the name->fragment
     # map (the verbatim system prompts the verdict/compose nodes drive); ``grounding_rules`` the

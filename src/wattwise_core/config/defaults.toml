@@ -461,6 +461,17 @@ language_passthrough_directive = """Answer entirely in the language whose IETF l
 including caveats and any note about missing data — must be written in that language. Never \
 switch to another language mid-answer."""
 
+# The OPTIONAL per-deployment / per-language extension of the VOICE-R2 forbidden vocabulary (#98).
+# DEFAULT EMPTY (fail-closed-by-emptiness, never a code literal — CFG-R1a/SKILL-R6). The closed
+# engine-emittable enum/jargon set (api/endpoint/database/…/snake_case enums) is SCHEMA in
+# voice.INTERNAL_ENUM_TOKENS and is always scrubbed; this list ADDS deployment-specific terms the
+# engine cannot enumerate: localized internal jargon (DE "schnittstelle"/"modell"; RU "модель"/
+# "токен"/"запрос") AND the ambiguous English homographs ("cap"/"tool"/"model"/"pro"/"flash"/
+# "budget"/"cost"/"tier"/"thread"/"frontier"/"coverage") — but ONLY for a deployment whose persona
+# NEVER uses them as athlete words. They are NOT defaulted on precisely because "pro Woche" (German
+# "per week"), "weekly cap", and "a model athlete" are legitimate coach prose.
+forbidden_terms = []
+
 # The per-language surface packs (LANG-R1/-R3/-R4): the SUPPORTED language set IS the keys of
 # this table (EN/DE/RU out of the box), and ADDING a language is editing THIS config — never an
 # engine code change (LANG-R1). Each pack carries the localized prompt VARIANT layered into the
