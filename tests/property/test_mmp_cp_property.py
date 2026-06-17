@@ -321,9 +321,13 @@ def test_cp_wrong_sign_poor_fit(durations: list[int]) -> None:
     # Ensure powers stay finite/positive enough to be a valid input.
     assume(all(math.isfinite(p) and p > 0 for p in points.values()))
     fit = cp_wprime(points)
-    if not is_computed(fit):
-        assert isinstance(fit, Unavailable)
-        assert fit.reason == UnavailableReason.POOR_FIT
+    # power = 50000*(1/t) - 20, i.e. CP intercept = -20 < 0 for EVERY admitted input, so the sign
+    # gate MUST reject it. Assert UNCONDITIONALLY (#93): the previous `if not is_computed(fit):`
+    # guard let a regressed sign gate (a wrongly-Computed negative-CP fit) pass with ZERO
+    # assertions, hiding the exact bug this test guards.
+    assert not is_computed(fit), "a negative-CP work-time line MUST be rejected, not fit"
+    assert isinstance(fit, Unavailable)
+    assert fit.reason == UnavailableReason.POOR_FIT
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from wattwise_core.agent.memory import MemoryItem, MemoryItemKind, OssMemoryStore
@@ -39,6 +39,7 @@ from wattwise_core.persistence.models import (
     SourceDescriptor,
     Sport,
 )
+from wattwise_core.privacy.erasure import erase_athlete
 from wattwise_core.storage import LocalObjectStore, content_hash
 
 UTC = _dt.UTC
@@ -155,39 +156,22 @@ async def _seed_athlete(
 async def _erase_athlete(
     session: AsyncSession, store: LocalObjectStore, athlete_id: uuid.UUID
 ) -> None:
-    """Per-athlete erasure across EVERY store (PRIV-R8): objects, canonical rows, memory, state.
+    """Drive the REAL production erasure executor (PRIV-R8), NOT a re-implemented delete loop.
 
-    Order matters: delete the object bytes first (using the relational refs to find them), then
-    the athlete-scoped canonical rows, then the agent-state rows, then the athlete profile itself.
+    Previously this test asserted against a hand-rolled deletion loop, so a broken production
+    ``erase_athlete`` (wrong delete order → FK violation, a missed transitive table, an undeleted
+    object) still passed — it tested the test (issue #93). Now it calls the production executor
+    directly: this single-DB integration carries BOTH the canonical (``Base``) and agent-state
+    (``AgentStateBase``) tables on one engine, so the one session is passed as BOTH the canonical
+    and agent-state session; the production executor owns the children-first ordering, transitive
+    deletions, object-bytes-first sequencing, and its own commits.
     """
-    # 1. delete the underlying original-file OBJECT bytes (PRIV-R11.3) before dropping the refs.
-    refs = (
-        (
-            await session.execute(
-                select(ActivityFile.object_ref).where(ActivityFile.athlete_id == athlete_id)
-            )
-        )
-        .scalars()
-        .all()
+    await erase_athlete(
+        athlete_id,
+        canonical_session=session,
+        agent_state_session=session,
+        object_store=store,
     )
-    for ref in refs:
-        store.delete(ref)
-
-    # 2. delete every athlete-scoped canonical row (covers activity_file, source_candidate,
-    #    activity, ... — all athlete_id-bearing canonical tables).
-    for table_name in _ATHLETE_SCOPED_TABLES:
-        table = Base.metadata.tables[table_name]
-        await session.execute(delete(table).where(table.c.athlete_id == athlete_id))
-
-    # 3. delete the agent-state store rows (checkpoints/writes/threads + durable memory)
-    #    for the athlete — a SEPARATE store from canonical (MEM-R3/ARCH-R13, CKPT-R8).
-    await session.execute(delete(MemoryItem).where(MemoryItem.athlete_id == athlete_id))
-    await session.execute(delete(AgentCheckpoint).where(AgentCheckpoint.athlete_id == athlete_id))
-    await session.execute(delete(AgentThread).where(AgentThread.athlete_id == athlete_id))
-
-    # 4. delete the athlete profile last (FK anchor).
-    await session.execute(delete(Athlete).where(Athlete.athlete_id == athlete_id))
-    await session.commit()
 
 
 async def _count(session: AsyncSession, table_name: str, athlete_id: uuid.UUID) -> int:
