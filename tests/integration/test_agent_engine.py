@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from wattwise_core.agent.capabilities import CanonicalEvidence
@@ -53,6 +54,7 @@ from wattwise_core.domain.enums import Fidelity, HrvMethod, ReadinessVerdict, Si
 from wattwise_core.identity import OWNER_ATHLETE_ID, OWNER_SUBJECT
 from wattwise_core.ingestion.ingest import IngestService
 from wattwise_core.persistence.models import (
+    Activity,
     Athlete,
     Base,
     DailyWellness,
@@ -238,6 +240,81 @@ async def test_claimgrounder_grounds_number_against_canonical(
     assert grounded, "the canonical NUMBER claim must survive grounded with a citation"
     assert grounded[0].citation["metric"] == "ctl"
     assert grounded[0].citation["value"] == ctl  # verbatim canonical value, never re-derived
+
+
+async def test_claimgrounder_grounds_per_ride_tss_with_activity_citation(
+    seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
+) -> None:
+    """#47: a per-ride TSS claim grounds VERBATIM against svc.coggan, cited by activity id.
+
+    Drives the REAL analytics service: recover a seeded ride's canonical activity id, compute its
+    Coggan TSS, then ground a NUMBER claim whose ``ref`` is that activity id (the per-ride path,
+    keyed by activity not date). The grounder must PROCEED with a citation carrying the activity id.
+    """
+    svc, _, session = seeded
+    rows = await session.execute(select(Activity.activity_id).order_by(Activity.start_time))
+    aid = rows.scalars().first()
+    assert aid is not None
+    bundle = await svc.coggan(str(aid))
+    tss = bundle.value.tss.value  # the canonical per-ride TSS for the 250W/FTP-250 fixture ride
+    model = FakeModel(
+        scripted={
+            "_ClaimSchema": _ClaimSchema(
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text=f"your ride scored {tss:.0f} TSS",
+                        metric="activity_tss",
+                        value=tss,
+                        as_of=str(aid),
+                    )
+                ]
+            )
+        }
+    )
+    grounder = ClaimGrounder(model, svc)
+    result = await grounder.ground(
+        athlete_id=str(OWNER_ATHLETE_ID),
+        draft=f"Your ride scored {tss:.0f} TSS.",
+        retrieved={},
+    )
+    assert result.decision is GroundDecision.PROCEED
+    grounded = [c for c in result.survivors if c.citation is not None]
+    assert grounded, "the per-ride TSS claim must survive grounded with an activity citation"
+    assert grounded[0].citation["metric"] == "activity_tss"
+    assert grounded[0].citation["value"] == tss  # verbatim canonical TSS, never re-derived
+
+
+async def test_claimgrounder_scrubs_per_ride_tss_for_ungathered_activity(
+    seeded: tuple[AnalyticsService, _DatabaseStub, AsyncSession],
+) -> None:
+    """#47 fail-closed: a per-ride TSS claim for an UNKNOWN activity id scrubs, never grounds."""
+    svc, _, _ = seeded
+    unknown = "00000000-0000-0000-0000-0000000000ff"
+    model = FakeModel(
+        scripted={
+            "_ClaimSchema": _ClaimSchema(
+                claims=[
+                    _ExtractedClaim(
+                        kind=ClaimKind.NUMBER,
+                        text="your ride scored 21 TSS",
+                        metric="activity_tss",
+                        value=21.0,
+                        as_of=unknown,
+                    )
+                ]
+            )
+        }
+    )
+    grounder = ClaimGrounder(model, svc)
+    result = await grounder.ground(
+        athlete_id=str(OWNER_ATHLETE_ID),
+        draft="Your ride scored 21 TSS.",
+        retrieved={},
+    )
+    assert not result.survivors, "an unknown-activity per-ride TSS claim must NOT ground"
+    assert "21" not in result.scrubbed_text, "the unverifiable per-ride number must be scrubbed"
+    assert result.decision is not GroundDecision.PROCEED
 
 
 async def test_claimgrounder_uses_evidence_layer_as_authoritative_claim_source(

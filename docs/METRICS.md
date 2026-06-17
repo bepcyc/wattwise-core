@@ -2399,6 +2399,25 @@ them gradually builds fitness, ramping them sharply builds fatigue.
 **Caveats.** Only as good as your FTP. Genuine non-moving seconds (stops, long gaps) reduce
 the valid duration and so reduce TSS, which is intended.
 
+### Per-ride training load — grounding selector (`activity_tss`)
+
+**Units:** load points (the same scale as `tss`).
+
+The agent-grounding **selector** for a single ride's training load: it names the per-activity
+Coggan TSS (the `tss` analytic above) so the coach's grounder can verify a per-ride load claim
+(e.g. *"each ride was about 100 TSS"*) against the canonical value. It is NOT a second
+computation — it resolves verbatim to `AnalyticsService.coggan(activity_id).tss`.
+
+**How it differs from `tss`.** `tss` is the computed analytic; `activity_tss` is the closed
+`MetricName` the agent uses to ground a per-ride claim. It is keyed by the **activity id** (not an
+athlete+date cell — multiple rides in a day make a date key ambiguous), so a grounded per-ride TSS
+claim carries the canonical activity id as its reference and its citation.
+
+**Inputs & when unavailable.** Resolves only when the named activity was gathered and its power
+`tss` is computable. Fails closed (the claim is scrubbed, never a placeholder) when the claim names
+no activity, the activity is unknown/ungathered, or the ride is HR-based / a non-power sport whose
+power TSS is unavailable — an HR-load is never relabeled as power TSS.
+
 ### HR-based load (`hr_load`)
 
 **Units:** load points (commensurate with TSS).
