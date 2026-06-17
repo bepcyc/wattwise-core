@@ -34,6 +34,13 @@ class MetricName(StrEnum):
     # a model-invented number).
     WEEKLY_LOAD_TARGET = "weekly_load_target"
     MONTHLY_LOAD_TARGET = "monthly_load_target"
+    # Per-ACTIVITY training load: the Coggan TSS of a SINGLE ride
+    # (AnalyticsService.coggan(activity_id).value.tss), keyed by ACTIVITY ID carried in the
+    # claim's ``ref`` (NOT athlete+date) — distinct from the CTL-derived weekly/monthly aggregate
+    # load TARGETS above. metric_value treats the ``as_of`` argument as the activity id, not a
+    # date (#47). Per-day ambiguous by construction (multiple rides/day), so it is NEVER resolved
+    # against a date — a per-ride TSS claim with no activity ref fails closed (GROUND-R7).
+    ACTIVITY_TSS = "activity_tss"
     CRITICAL_POWER_W = "critical_power_w"
     W_PRIME_J = "w_prime_j"
     HRV_RMSSD_MS = "hrv_rmssd_ms"

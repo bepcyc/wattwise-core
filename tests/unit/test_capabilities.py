@@ -435,3 +435,62 @@ def test_url_allowed_with_no_configured_hosts_rejects_all() -> None:
     """
     ev = CanonicalEvidence(_svc(), _ATHLETE)
     assert ev.url_allowed("https://wattwise.app/training/load") is False
+
+
+# --------------------------------------------------------------------------- #
+# Per-ride TSS resolver (#47): activity-keyed, double-unwrapped, fail-closed   #
+# --------------------------------------------------------------------------- #
+
+
+class _Bundle:
+    """A minimal LoadMetricsBundle-shaped object: only the ``tss`` MetricResult is read."""
+
+    def __init__(self, tss: MetricResult[float]) -> None:
+        self.tss = tss
+
+
+class _CogganService:
+    """Analytics stub whose ``coggan`` returns a double-wrapped per-activity load bundle.
+
+    ``act-power`` -> Computed bundle with Computed TSS (the power path); ``act-hr`` -> Computed
+    bundle whose TSS is Unavailable (HR path / non-power sport); any other id -> Unavailable
+    (unknown/ungathered activity). Records the activity ids it was asked for.
+    """
+
+    def __init__(self) -> None:
+        self.activity_calls: list[str] = []
+
+    async def coggan(self, activity_id: str) -> MetricResult[Any]:
+        self.activity_calls.append(activity_id)
+        if activity_id == "act-power":
+            return Computed(value=_Bundle(Computed(value=100.0)))
+        if activity_id == "act-hr":
+            return Computed(
+                value=_Bundle(Unavailable(UnavailableReason.OUT_OF_DOMAIN, "hr_load not power tss"))
+            )
+        return Unavailable(UnavailableReason.MISSING_REQUIRED_INPUT, "unknown activity")
+
+
+def _tss_evidence() -> CanonicalEvidence:
+    eq = MetricEquivalence({"tss": "activity_tss", "training stress score": "activity_tss"})
+    return CanonicalEvidence(_CogganService(), _ATHLETE, equivalence=eq)  # type: ignore[arg-type]
+
+
+async def test_metric_value_resolves_per_ride_tss_via_coggan() -> None:
+    """#47: a per-ride TSS claim resolves verbatim via svc.coggan(activity_id).value.tss.
+
+    The ``as_of`` argument is the ACTIVITY id (the claim's ref), not a date — proving the
+    ACTIVITY_TSS branch fires BEFORE _resolve_as_of (a non-ISO id would otherwise scrub as INVALID).
+    """
+    ev = _tss_evidence()
+    assert await ev.metric_value("tss", "act-power") == 100.0
+    # The alias surface resolves too, and the same non-date ref keys the lookup.
+    assert await ev.metric_value("training stress score", "act-power") == 100.0
+
+
+async def test_metric_value_per_ride_tss_fails_closed() -> None:
+    """#47 fail-closed (GROUND-R7): HR-based, unknown, ref-less per-ride TSS all resolve None."""
+    ev = _tss_evidence()
+    assert await ev.metric_value("tss", "act-hr") is None  # HR path: tss Unavailable -> scrub
+    assert await ev.metric_value("tss", "act-unknown") is None  # ungathered activity -> scrub
+    assert await ev.metric_value("tss", None) is None  # no activity ref -> per-day ambiguous scrub
