@@ -12,7 +12,7 @@ Your power meter never lies. Your analytics shouldn't either.
 [![Code style: Ruff](https://img.shields.io/badge/code%20style-Ruff-261230?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff)
 [![Typed: mypy --strict](https://img.shields.io/badge/typed-mypy%20--strict-2A6DB2.svg)](https://mypy-lang.org/)
 
-**[What this is](#what-this-is)** · **[Why it is useful](#why-it-is-useful)** · **[Quick start](#quick-start)** · **[How it works](#how-it-works)** · **[For developers](#for-developers)**
+**[What this is](#what-this-is)** · **[Why it is useful](#why-it-is-useful)** · **[Quick start](#quick-start)** · **[How it works](#how-it-works)** · **[Roadmap](#roadmap)** · **[For developers](#for-developers)**
 
 </div>
 
@@ -146,6 +146,62 @@ A few rules hold the whole thing together:
 
 Storage is a single connection string: SQLite by default, or PostgreSQL or MariaDB by
 changing that one setting, with no code changes.
+
+## Roadmap
+
+Releases are named after the people who changed how endurance sport is measured and
+coached. Each name marks what that release is *about*. Every open issue is tagged with the
+milestone it belongs to (`v0.0.1-banister`, `v0.0.2-coggan`, `future`, or `backlog`), so it
+is always clear whether a piece of work is shipping in a named version, is on the longer-term
+frontier, or is parked for triage.
+
+### v0.0.1 — **Banister** · the honest foundation
+
+Named for **Eric W. Banister**, who in the 1970s introduced the impulse-response
+(fitness–fatigue) model and TRIMP — the mathematical ancestor of every fitness/fatigue/form
+chart wattwise computes. This release is the bedrock: one de-duplicated record of truth, the
+established sports-science metrics, and a coach that refuses to invent a number. The work
+here makes the core honesty promise something we can actually *prove*.
+
+- **#93** — Remove false-confidence tests (including GDPR-erasure tests that never exercise
+  the production erase path) so "you can trust it" is a tested guarantee, not a hope.
+- **#98** — VOICE-R2: turn the presentation strip into an allow-list so no internal metric
+  code can ever leak into athlete-facing prose.
+- **#95** — Surface the gathered activity id into the compose fact sheet so per-ride TSS
+  claims are genuinely citable in production, not just in theory.
+- **#103** — Scope the slow CI tiers to the change: a docs/text-only PR shouldn't pay the
+  database, e2e, and image-build tax, while any DDL or source change still runs the full gate.
+
+### v0.0.2 — **Coggan** · the metrics vocabulary
+
+Named for **Andrew Coggan**, who turned the fitness–fatigue model into the power-meter
+language the world now speaks: Normalized Power, Intensity Factor, TSS, and the Performance
+Management Chart. This release widens the set of metrics the coach can compute *and cite*,
+and makes the conversation layer sturdier.
+
+- **#39** — Wire durability (fatigue resistance) all the way onto the service and agent
+  surface, with `work_above_cp_j` persisted on ingest so the number can be retrieved and cited.
+- **#87** — Two-layer coach answer: a verifiable evidence layer the grounder reads, plus warm
+  visible prose for the athlete, split fail-closed so honesty and tone stop fighting.
+
+### Future — **Seiler** · the training-science frontier
+
+Named for **Stephen Seiler**, whose polarized-training research reframed how endurance
+athletes balance easy and hard work. This is the direction wattwise is heading: understanding
+not just *how much* you trained but *how*, and reasoning about the athlete as a human rather
+than a row of numbers.
+
+- **#76** — Training Intensity Distribution + Polarization Index: the easy/hard mix the
+  engine doesn't yet see.
+- **#78** — A pluggable feasibility-model registry that *falsifies* a prescription per
+  (sport, goal) instead of pretending to predict an outcome.
+- **#79** — Model the athlete as a human — life-state, real availability, motivation — and
+  close the observe→adapt loop instead of optimizing open-loop.
+
+### Backlog — triaged, not yet scheduled
+
+- **#97** — Make the checkpoint `interrupt_id` stable across pause/resume (a known LangGraph
+  re-run quirk; the fix may be a deterministic id or a documented spec carve-out).
 
 ## For developers
 
