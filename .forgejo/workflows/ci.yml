@@ -119,8 +119,7 @@ jobs:
         uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
-      - run: just install
-      - run: just lint-commits     # CI-R1 item 15
+      - run: just lint-commits     # CI-R1 item 15 (pure git/bash; no `just install` needed)
 
   precommit-config:
     name: Pre-commit config validity
@@ -136,9 +135,7 @@ jobs:
       - if: steps.setup_uv.outcome == 'failure'
         uses: https://github.com/astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
-      - run: bash scripts/ci_tools.sh just
-      - run: just install
-      - run: uv run pre-commit validate-config   # CI-R1 item 19
+      - run: uvx pre-commit validate-config   # CI-R1 item 19; uvx avoids a full `uv sync --all-extras`
 
   fast-tests:
     name: Fast tiers (unit+property+golden+contract+fuzz+logging)
@@ -367,7 +364,7 @@ jobs:
 
   e2e:
     name: E2E smoke
-    needs: [changes, integration]
+    needs: [changes, lint, type-check, fast-tests]   # parallel with integration (each provisions its own DB)
     runs-on: docker
     services:
       postgres:
