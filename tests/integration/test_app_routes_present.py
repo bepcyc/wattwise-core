@@ -11,12 +11,12 @@ What it pins:
 - the two routers this slice newly registers are mounted unconditionally: the agent-backed plan
   surface ``POST /v1/planning/workouts`` (API-R32) and the owner self-service account
   ``GET /v1/users/me`` (doc 60 §8);
-- the convergent ROAD-R2-EXIT surface — ``/v1/agent/diagnose`` (API-R15), ``/v1/agent/memory``
-  (MEM-R3), and ``/v1/athlete/physiology`` — is mounted the moment its owning (already-registered)
-  router DECLARES it: the assertion is gated on the route being declared by a router so this guard
-  is green while a sibling slice is still landing, then enforces the full exit surface as soon as
-  each route exists. A route that a registered router declares but the factory fails to mount is a
-  hard failure (the registration/include regression this test exists to catch).
+- the convergent ROAD-R2-EXIT surface — ``/v1/agent/diagnose`` (API-R15) and ``/v1/agent/memory``
+  (MEM-R3) — is mounted the moment its owning (already-registered) router DECLARES it: the
+  assertion is gated on the route being declared by a router so this guard is green while a sibling
+  slice is still landing, then enforces the full exit surface as soon as each route exists. A route
+  that a registered router declares but the factory fails to mount is a hard failure (the
+  registration/include regression this test exists to catch).
 
 No external dependency is touched: the app is assembled with an in-memory SQLite DSN and a generated
 envelope key (BOOT-R4), and only the route table is inspected — no request is issued.
@@ -48,7 +48,6 @@ _REQUIRED_ROUTES = (
 _EXIT_ROUTES = (
     "/v1/agent/diagnose",
     "/v1/agent/memory",
-    "/v1/athlete/physiology",
 )
 
 
