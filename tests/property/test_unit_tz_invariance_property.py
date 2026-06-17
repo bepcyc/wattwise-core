@@ -24,10 +24,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from wattwise_core.analytics.decoupling import aerobic_decoupling
 from wattwise_core.analytics.pmc import pmc
-from wattwise_core.analytics.result import Computed, is_computed
-from wattwise_core.analytics.series import Stream
+from wattwise_core.analytics.result import is_computed
 from wattwise_core.persistence.localdate import project_local_date
 
 pytestmark = pytest.mark.property
@@ -38,8 +36,6 @@ CI_SETTINGS = settings(
     suppress_health_check=[HealthCheck.too_slow],
 )
 
-_KMH_PER_MPS = 3.6
-
 
 @dataclass
 class _Athlete:
@@ -49,35 +45,12 @@ class _Athlete:
     reference_timezone_effective_from: _dt.datetime | None = None
 
 
-# --- unit equivalence: km/h normalized to m/s leaves the metric unchanged ----------
-@CI_SETTINGS
-@given(
-    base=st.floats(min_value=2.0, max_value=7.0, allow_nan=False),
-    deltas=st.lists(
-        st.floats(min_value=-0.5, max_value=0.5, allow_nan=False), min_size=1, max_size=20
-    ),
-    hr=st.floats(min_value=90.0, max_value=180.0, allow_nan=False),
-)
-def test_metric_invariant_under_equivalent_speed_units(
-    base: float, deltas: list[float], hr: float
-) -> None:
-    """Decoupling from a km/h-authored speed series normalized to m/s equals the
-    m/s-direct computation within float tolerance (ANL-T-R1.10 unit equivalence)."""
-    # Tile a small generated pattern to a valid decoupling duration (>= 1300 s @ 1 Hz)
-    # so hypothesis shrinks over the pattern, not a 1400-element list.
-    pattern = [base + d for d in deltas]
-    speeds = (pattern * (1400 // len(pattern) + 1))[:1400]
-    mps_direct = aerobic_decoupling(
-        Stream.from_values(speeds), Stream.from_values([hr] * len(speeds)), "running"
-    )
-    normalized = [v * _KMH_PER_MPS / _KMH_PER_MPS for v in speeds]
-    via_kmh = aerobic_decoupling(
-        Stream.from_values(normalized), Stream.from_values([hr] * len(speeds)), "running"
-    )
-    assert type(mps_direct) is type(via_kmh)
-    if isinstance(mps_direct, Computed):
-        assert isinstance(via_kmh, Computed)
-        assert via_kmh.value == pytest.approx(mps_direct.value, rel=1e-9, abs=1e-9)
+# NOTE (#93): a former `test_metric_invariant_under_equivalent_speed_units` was REMOVED here — it
+# built `normalized = [v * 3.6 / 3.6 for v in speeds]` (≡ v) and compared `aerobic_decoupling` to
+# itself on the identical series. `aerobic_decoupling` takes no unit argument and does no km/h↔m/s
+# normalization, so the "unit equivalence" property exercised NOTHING (a tautology giving false
+# confidence). Genuine unit-equivalence belongs at the ingest/mapping seam (raw source units →
+# canonical m/s), not at this analytics function; assert it there if/when needed.
 
 
 # --- source-timezone invariance: only the canonical instant matters ----------------
