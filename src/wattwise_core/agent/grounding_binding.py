@@ -40,6 +40,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
+from wattwise_core.agent.capabilities_metrics import MetricName
 from wattwise_core.agent.contracts import Claim, ClaimKind
 from wattwise_core.agent.grounding_match import (
     _THOUSANDS_AWARE_NUMBER_RE,
@@ -301,7 +302,14 @@ class BindingGuard:
         return replace(claim, metric=canonical), BindingEvent.METRIC_REBOUND
 
     def _rebind_as_of(self, sentence: str, claim: Claim) -> tuple[Claim, BindingEvent | None]:
-        """Bind ``as_of`` to the sentence's explicit date, or drop a stale one (R10b)."""
+        """Bind ``as_of`` to the sentence's explicit date, or drop a stale one (R10b).
+
+        Per-ride TSS (``activity_tss``, #47/#99) is exempt: its ``ref`` is an ACTIVITY id, NOT a
+        date, so a date stated in the sentence MUST NOT overwrite it (doing so would mis-key the
+        per-activity lookup ``(activity_tss, <date>)`` and scrub a valid per-ride claim).
+        """
+        if self._claim_key(claim) == _fold_key(MetricName.ACTIVITY_TSS.value):
+            return claim, None
         stated = {match.group(0) for match in _ISO_DATE_RE.finditer(sentence)}
         if len(stated) == 1:
             (date_token,) = stated
