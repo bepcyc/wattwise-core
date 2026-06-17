@@ -6,6 +6,10 @@
 # (CI-R1 item 18) fails the build if they diverge. Adding a gate to one forge's
 # file REQUIRES adding it to the other.
 #
+# Path-scoping (issue #103) is mirrored from the GitHub file: the `changes` job
+# no-ops the heavy DB-/build-bound STEPS on docs/text-only PRs. It is scheduling
+# (which steps run), not gate logic (the recipes are untouched).
+#
 # Forgejo-specific plumbing (NOT gates):
 #   * actions are referenced by full URL so the runner needs no GitHub mirror config;
 #   * upload-artifact uses the PATCHED Forgejo fork — the upstream
@@ -30,6 +34,37 @@ env:
   PYTHON_VERSION: "3.13"
 
 jobs:
+  # ---------------------------------------------------------------- CHANGE SCOPE
+  # Path-scoping (issue #103), IDENTICAL intent to the GitHub file. Heavy DB-/build-
+  # bound tiers stay REQUIRED (their jobs always run + report); only their expensive
+  # STEPS no-op when a PR touches docs/text ONLY. Never job-`if`-skip a required job.
+  # Fail safe: skip_heavy is true ONLY for a pull_request whose EVERY changed path is
+  # docs/text; any src/**, migrations/** (DDL), dep, Docker, or CI change runs the gate.
+  changes:
+    name: Detect change scope
+    runs-on: docker
+    outputs:
+      skip_heavy: ${{ steps.decide.outputs.skip_heavy }}
+    steps:
+      - uses: https://github.com/dorny/paths-filter@v3
+        id: filter
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            docs_only:
+              - '**/*.md'
+              - 'docs/**'
+              - 'assets/**'
+              - 'LICENSE'
+              - 'NOTICE'
+      - id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ steps.filter.outputs.docs_only }}" = "true" ]; then
+            echo "skip_heavy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip_heavy=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ----------------------------------------------------------------- FAST STAGE
   lint:
     name: Lint
@@ -223,7 +258,7 @@ jobs:
   # ----------------------------------------------------------------- SLOW STAGE
   integration:
     name: Integration (T-INT)
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     runs-on: docker
     services:
       postgres:
@@ -252,6 +287,7 @@ jobs:
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
           SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
@@ -260,11 +296,13 @@ jobs:
           echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
           echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
+        if: needs.changes.outputs.skip_heavy != 'true'
       - run: just test-integration      # CI-R1 item 4
+        if: needs.changes.outputs.skip_heavy != 'true'
 
   db-portability:
     name: Bootstrap & DB portability (SQLite+PostgreSQL+MariaDB)
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     runs-on: docker
     services:
       postgres:
@@ -305,6 +343,7 @@ jobs:
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
           SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
@@ -313,6 +352,7 @@ jobs:
           echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
           echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - name: Bootstrap acceptance (health endpoint serves)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           just migrate
           WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-ci.sqlite" \
@@ -323,10 +363,11 @@ jobs:
           done
           curl -fsS http://127.0.0.1:8000/healthz
       - run: just test-db-portable      # CI-R1 item 13
+        if: needs.changes.outputs.skip_heavy != 'true'
 
   e2e:
     name: E2E smoke
-    needs: [integration]
+    needs: [changes, integration]
     runs-on: docker
     services:
       postgres:
@@ -355,6 +396,7 @@ jobs:
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
           SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
@@ -363,7 +405,9 @@ jobs:
           echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
           echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
+        if: needs.changes.outputs.skip_heavy != 'true'
       - run: just test-e2e              # CI-R1 item 12
+        if: needs.changes.outputs.skip_heavy != 'true'
 
   # Advisory PR-stage mutation testing (T-MUT, issue #35 / ADR 0006): diff-scoped,
   # time-boxed, warm-started from the cached mutants/ dir. IDENTICAL recipe to the
@@ -405,7 +449,7 @@ jobs:
   image-scan-sbom:
     name: Container image scan + SBOM
     runs-on: docker
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
       - uses: https://github.com/astral-sh/setup-uv@v8.2.0
@@ -420,13 +464,14 @@ jobs:
       - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
       - run: just sbom                  # CI-R1 item 10 (CONT-R1: builds the image, no Critical + SBOM)
+        if: needs.changes.outputs.skip_heavy != 'true'
       - uses: https://code.forgejo.org/forgejo/upload-artifact@v4   # CI-R6
-        if: always()
+        if: always() && needs.changes.outputs.skip_heavy != 'true'
         with: { name: image-scan-sbom, path: .scan/ }
 
   package-build:
     name: Package build & install-boot
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
@@ -442,7 +487,9 @@ jobs:
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just install-boot-check    # CI-R1 item 20
+        if: needs.changes.outputs.skip_heavy != 'true'
       - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        if: needs.changes.outputs.skip_heavy != 'true'
         with: { name: dist, path: dist/ }
 
   # ----------------------------------------------------------------- NIGHTLY (non-mutation)

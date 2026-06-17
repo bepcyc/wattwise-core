@@ -6,6 +6,11 @@
 # mirror (.forgejo/workflows/ci.yml) MUST reference the IDENTICAL recipe set
 # (`just test-forge-portable`, CI-R1 item 18 / CI-R9 / DELIV-R8).
 #
+# Path-scoping (issue #103) is the one workflow-level decision that is NOT a gate:
+# the `changes` job classifies the PR diff and the heavy DB-/build-bound steps
+# no-op on docs/text-only PRs. It changes WHICH steps run (scheduling), never the
+# pass/fail CRITERIA (the recipes are untouched), and it is mirrored on both forges.
+#
 # Runner plumbing (not gates): checkout, setup-uv, and `scripts/ci_tools.sh`,
 # which installs `just` (NOT preinstalled on ubuntu-latest) and, where a job
 # needs them, the scanner binaries (gitleaks/trivy/syft) from their official
@@ -39,6 +44,42 @@ env:
   PYTHON_VERSION: "3.13"
 
 jobs:
+  # ---------------------------------------------------------------- CHANGE SCOPE
+  # Path-scoping (issue #103). The heavy DB- and build-bound tiers below stay
+  # REQUIRED checks — their JOBS always run and report green — but their expensive
+  # STEPS no-op when a PR touches docs/text ONLY. We never job-level-`if`-skip a
+  # required job (a skipped required check blocks the merge); we gate the costly
+  # steps instead. Fail safe: skip_heavy is true ONLY for a pull_request whose
+  # EVERY changed path is docs/text. Any src/**, migrations/** (DDL), dependency,
+  # Docker, or CI/build change leaves skip_heavy=false and runs the full gate.
+  changes:
+    name: Detect change scope
+    runs-on: ubuntu-latest
+    outputs:
+      skip_heavy: ${{ steps.decide.outputs.skip_heavy }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # 'every': the filter matches only when EVERY changed file matches one
+          # of its patterns — i.e. a genuine docs/text-only change. DDL lives in
+          # migrations/** and is deliberately absent from the allow-list.
+          predicate-quantifier: 'every'
+          filters: |
+            docs_only:
+              - '**/*.md'
+              - 'docs/**'
+              - 'assets/**'
+              - 'LICENSE'
+              - 'NOTICE'
+      - id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ steps.filter.outputs.docs_only }}" = "true" ]; then
+            echo "skip_heavy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip_heavy=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ----------------------------------------------------------------- FAST STAGE
   lint:
     name: Lint
@@ -329,7 +370,7 @@ jobs:
   # ----------------------------------------------------------------- SLOW STAGE
   integration:
     name: Integration (T-INT)
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     runs-on: ubuntu-latest
     services:
       # Ephemeral master store on a NON-DEFAULT host port (hermetic, TIER-R2).
@@ -367,6 +408,7 @@ jobs:
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
           SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
@@ -375,11 +417,13 @@ jobs:
           echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
           echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
+        if: needs.changes.outputs.skip_heavy != 'true'
       - run: just test-integration      # CI-R1 item 4
+        if: needs.changes.outputs.skip_heavy != 'true'
 
   db-portability:
     name: Bootstrap & DB portability (SQLite+PostgreSQL+MariaDB)
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     runs-on: ubuntu-latest
     services:
       # 3-backend matrix on NON-DEFAULT host ports so nothing collides (TIER-R2).
@@ -432,6 +476,7 @@ jobs:
       # health-serving instance. The bootstrap recipe runs uvicorn in the
       # foreground, so here we start it backgrounded, poll health, then tear down.
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
           SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
@@ -440,6 +485,7 @@ jobs:
           echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
           echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - name: Bootstrap acceptance (health endpoint serves)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           just migrate
           WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-ci.sqlite" \
@@ -450,10 +496,11 @@ jobs:
           done
           curl -fsS http://127.0.0.1:8000/healthz
       - run: just test-db-portable      # CI-R1 item 13 (BOOT-R1/R2/R3)
+        if: needs.changes.outputs.skip_heavy != 'true'
 
   e2e:
     name: E2E smoke
-    needs: [integration]
+    needs: [changes, integration]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -490,6 +537,7 @@ jobs:
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           ROOT_KEY="$(python3 -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
           SIGNING_KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
@@ -498,7 +546,9 @@ jobs:
           echo "WATTWISE_ENCRYPTION_ROOT_KEY=$ROOT_KEY" >> "$GITHUB_ENV"
           echo "WATTWISE_TOKEN_SIGNING_KEY=$SIGNING_KEY" >> "$GITHUB_ENV"
       - run: just migrate
+        if: needs.changes.outputs.skip_heavy != 'true'
       - run: just test-e2e              # CI-R1 item 12
+        if: needs.changes.outputs.skip_heavy != 'true'
 
   # Advisory PR-stage mutation testing (T-MUT, issue #35 / ADR 0006): diff-scoped,
   # time-boxed, warm-started from the cached mutants/ dir. continue-on-error keeps
@@ -548,7 +598,7 @@ jobs:
 
   image-scan-sbom:
     name: Container image scan + SBOM
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -587,17 +637,18 @@ jobs:
       - run: bash scripts/ci_tools.sh just trivy syft
       - run: just install
       - run: just sbom                  # CI-R1 item 10 (CONT-R1: builds the image, no Critical + SBOM)
+        if: needs.changes.outputs.skip_heavy != 'true'
         env:
           # --load: the container driver builds in an isolated BuildKit; load the
           # result into the local daemon so trivy/syft can scan the tag.
           WW_BUILDX_CACHE: "--cache-from=type=gha --cache-to=type=gha,mode=max --load"
       - uses: actions/upload-artifact@v4   # retained image-scan report + SBOM (CI-R6)
-        if: always()
+        if: always() && needs.changes.outputs.skip_heavy != 'true'
         with: { name: image-scan-sbom, path: .scan/ }
 
   package-build:
     name: Package build & install-boot
-    needs: [lint, type-check, fast-tests]
+    needs: [changes, lint, type-check, fast-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -621,7 +672,9 @@ jobs:
       - run: bash scripts/ci_tools.sh just
       - run: just install
       - run: just install-boot-check    # CI-R1 item 20 (uv build + boot from wheel)
+        if: needs.changes.outputs.skip_heavy != 'true'
       - uses: actions/upload-artifact@v4
+        if: needs.changes.outputs.skip_heavy != 'true'
         with: { name: dist, path: dist/ }
 
   # ----------------------------------------------------------------- NIGHTLY (non-mutation)
