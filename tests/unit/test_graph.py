@@ -131,7 +131,14 @@ class FakeCoverage:
 
 
 class FakeGrounder:
-    """Grounder returning a scripted aggregate decision; counts invocations."""
+    """Grounder returning a scripted aggregate decision; counts invocations.
+
+    Published substance is COUPLED to the decision (realistic, #85): only PROCEED grounds a
+    surviving citation and keeps the draft; a non-PROCEED (an unconverged REGENERATE/REPLAN that
+    spends its bounds, or an ABSTAIN) publishes NO survivor and an EMPTY body — so an exhausted
+    unconverged recovery degrades honestly, never the impossible "always-regenerate yet always
+    grounded" state that masked the #85 false-degraded defect.
+    """
 
     def __init__(self, decision: GroundDecision) -> None:
         self._decision = decision
@@ -148,6 +155,8 @@ class FakeGrounder:
         evidence_claims: object = None,
     ) -> GroundingResult:
         self.calls += 1
+        if self._decision is not GroundDecision.PROCEED:
+            return GroundingResult(decision=self._decision, claims=(), scrubbed_text="")
         claim = Claim(kind=ClaimKind.NUMBER, text="42", value=42.0)
         survivor = GroundedClaim(
             claim=claim, verdict=GroundVerdict.GROUNDED, citation={"metric": "pmc"}

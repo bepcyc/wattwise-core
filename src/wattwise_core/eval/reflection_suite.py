@@ -124,7 +124,15 @@ class _GapCoverage:
 
 
 class _ScriptedGrounder:
-    """Grounder returning a FIXED aggregate decision on every pass (drives the bound)."""
+    """Grounder returning a FIXED aggregate decision on every pass (drives the bound).
+
+    The published substance is COUPLED to the decision (realistic, #85): only a PROCEED grounds a
+    surviving citation and keeps the draft; a non-PROCEED (an always-REGENERATE/-REPLAN recovery
+    that never converges, or an ABSTAIN) publishes NO grounded survivor and an EMPTY body — so an
+    exhausted unconverged recovery degrades honestly. The prior fixture grounded a survivor on EVERY
+    decision, the impossible "always-regenerate yet always-grounded" state that masked the #85
+    false-degraded defect (a non-PROCEED with a real grounded, gap-free answer must complete).
+    """
 
     def __init__(self, decision: GroundDecision) -> None:
         self._decision = decision
@@ -139,6 +147,11 @@ class _ScriptedGrounder:
         active_constraints: Sequence[Mapping[str, Any]] | None = None,
         evidence_claims: Sequence[Mapping[str, Any]] | None = None,
     ) -> GroundingResult:
+        if self._decision is not GroundDecision.PROCEED:
+            # An unconverged recovery / abstain grounded nothing publishable: no survivor, empty
+            # body. The bounded loop still spends its budget (routing keys on the decision), then
+            # degrades honestly (empty survivors + empty visible body).
+            return GroundingResult(decision=self._decision, claims=(), scrubbed_text="")
         claim = Claim(kind=ClaimKind.NUMBER, text="1", value=1.0, metric="ctl")
         survivor = GroundedClaim(
             claim=claim, verdict=GroundVerdict.GROUNDED, citation={"metric": "ctl"}

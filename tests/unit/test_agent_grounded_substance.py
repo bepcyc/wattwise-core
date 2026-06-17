@@ -157,6 +157,34 @@ def test_status_r1_proceed_with_survivors_completes() -> None:
     assert status is RunStatus.COMPLETED
 
 
+def test_exhausted_recovery_with_grounded_gapfree_answer_completes() -> None:
+    """#85: a bounded-recovery decision (REGENERATE/REPLAN) that ran out of retries but published
+    a GROUNDED, gap-free, CITED answer finalizes COMPLETED — not a trust-eroding degraded.
+
+    The residual non-deterministic tail of #45: an earlier recovery cycle left a non-PROCEED
+    ground decision in state, yet the final published answer grounded cleanly (citations>0) with no
+    open coverage gap. terminal_status must read the published substance, not the stale recovery
+    signal. A non-PROCEED decision only degrades when the answer did NOT come out grounded+gap-free.
+    """
+    state = _data_grounded_state(citations=[{"metric": "ctl", "value": 1.81}])
+    assert grounded_survivor_count(state) == 1
+    for decision in (GroundDecision.REGENERATE, GroundDecision.REPLAN):
+        assert terminal_status(state, decision, ceiling=99) is RunStatus.COMPLETED
+
+
+def test_exhausted_recovery_without_survivors_still_degrades() -> None:
+    """#85 guard: a non-PROCEED recovery that published NO grounded survivor still degrades."""
+    state = _data_grounded_state(citations=[])
+    assert grounded_survivor_count(state) == 0
+    assert terminal_status(state, GroundDecision.REGENERATE, ceiling=99) is RunStatus.DEGRADED
+
+
+def test_abstain_always_degrades_even_with_citations() -> None:
+    """#85 guard: an ABSTAIN is an honest refusal and degrades regardless of any citations."""
+    state = _data_grounded_state(citations=[{"metric": "ctl", "value": 1.81}])
+    assert terminal_status(state, GroundDecision.ABSTAIN, ceiling=99) is RunStatus.DEGRADED
+
+
 def test_empty_visible_body_degrades_even_with_grounded_survivors() -> None:
     """COMPOSE-R3 point 1: an EMPTY athlete-visible body never ships as completed.
 
