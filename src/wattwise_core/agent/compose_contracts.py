@@ -91,6 +91,11 @@ _CLAIM_RE = re.compile(
     r"(?:\((?P<paren>[^)]*)\))?",
 )
 _AS_OF_RE = re.compile(r"as_of\s+(?P<as_of>\d{4}-\d{2}-\d{2})", flags=re.IGNORECASE)
+#: A per-ACTIVITY reference token in the parenthetical (``activity <id>``) for a per-ride TSS
+#: claim (#47): the activity id maps onto :attr:`EvidenceClaim.ref` (the grounder resolves the
+#: single ride's TSS by activity id). Mutually exclusive with ``as_of`` — a claim is dated OR
+#: activity-scoped, never both.
+_ACTIVITY_REF_RE = re.compile(r"activity\s+(?P<aid>[A-Za-z0-9][\w.-]*)", flags=re.IGNORECASE)
 #: A free-prose tail after an em/en-dash or spaced hyphen (" — basis for the read") that must be
 #: dropped before claim parsing — but ONLY when the tail is non-numeric prose, so a spaced numeric
 #: range ("5 - 7") is left intact (and then skipped as a non-single-number segment, never halved).
@@ -126,14 +131,25 @@ def _parse_claim_lines(block_body: str) -> list[EvidenceClaim]:
         if match is None:
             continue
         paren = match.group("paren") or ""
+        # ref is a DATE (``as_of <ISO>``) OR an ACTIVITY id (``activity <id>``, per-ride TSS,
+        # #47) — mutually exclusive; the date takes precedence if (wrongly) both appear.
         as_of_match = _AS_OF_RE.search(paren)
-        ref = as_of_match.group("as_of") if as_of_match else None
-        # Canonical-metric override: the first non-``as_of`` token in the parenthetical (e.g.
-        # "ctl"), preferred over the prose label; MetricEquivalence canonicalizes either downstream.
+        activity_match = _ACTIVITY_REF_RE.search(paren)
+        if as_of_match:
+            ref: str | None = as_of_match.group("as_of")
+        elif activity_match:
+            ref = activity_match.group("aid")
+        else:
+            ref = None
+        # Canonical-metric override: the first parenthetical token that is neither the ``as_of``
+        # date marker NOR the ``activity <id>`` ref marker (e.g. "ctl"/"activity_tss"), preferred
+        # over the prose label; MetricEquivalence canonicalizes it downstream. Skipping ``activity``
+        # prevents the ref marker from being mis-picked as the metric.
         override = ""
         for raw_token in paren.split(","):
             token = raw_token.strip()
-            if token and not token.lower().startswith("as_of"):
+            low = token.lower()
+            if token and not low.startswith("as_of") and not low.startswith("activity "):
                 override = token.split()[0]
                 break
         metric = (override or match.group("metric")).strip()

@@ -617,7 +617,7 @@ max_infra_error_rate = 0.1
 # emits, mapped to the canonical metric key the grounder verifies against (GROUND-R2/-R7).
 # This is DATA, not code (CFG-R1a) — extend it here (or in the private bundle) without an
 # engine change. Keys are case/whitespace-folded before lookup; values MUST be a canonical
-# MetricName member (ctl/atl/tsb/form/critical_power_w/w_prime_j/hrv_rmssd_ms). A natural
+# MetricName member (ctl/atl/tsb/form/activity_tss/critical_power_w/w_prime_j/hrv_rmssd_ms). A natural
 # claim that maps to a canonical metric the analytics exposes therefore grounds instead of
 # being scrubbed as an unknown metric.
 "fitness" = "ctl"
@@ -657,6 +657,16 @@ max_infra_error_rate = 0.1
 "4-week load" = "monthly_load_target"
 "four-week load" = "monthly_load_target"
 "28-day load" = "monthly_load_target"
+# Per-ACTIVITY training load (#47): a SINGLE ride's Coggan TSS (activity_tss), keyed by the
+# activity id carried in the claim's ref. Distinct from the weekly/monthly aggregate load
+# TARGETS above. Deliberately NO bare "training load" alias — it would collide with the
+# "... training load" aggregate aliases; only unambiguous per-ride phrasings are mapped.
+"tss" = "activity_tss"
+"training stress score" = "activity_tss"
+"training stress score (tss)" = "activity_tss"
+"tss (training stress score)" = "activity_tss"
+"ride tss" = "activity_tss"
+"per-ride training load" = "activity_tss"
 
 [retention]
 # 0 = retain indefinitely; >0 = per-athlete retention window in days (PRIV-R*).

@@ -159,6 +159,41 @@ def test_parse_block_only_yields_empty_visible() -> None:
     assert out.evidence_claims  # evidence still parsed
 
 
+def test_parse_per_ride_tss_maps_activity_to_ref() -> None:
+    """#47: a per-ride TSS claim maps its ``activity <id>`` paren token onto EvidenceClaim.ref.
+
+    The technical block writes ``each ride 21 (activity_tss, activity act-123)``; the parser keys
+    the claim by the ACTIVITY id in ref (not a date), with metric overridden to ``activity_tss``,
+    and the ``activity`` ref marker is NOT mis-picked as the metric override.
+    """
+    out = parse_tagged_answer(
+        "<technical_proof>each ride 21 (activity_tss, activity act-123)</technical_proof>"
+        "Your ride was hard."
+    )
+    assert out.visible_answer == "Your ride was hard."
+    perride = [c for c in out.evidence_claims if c.metric == "activity_tss"]
+    assert perride and perride[0].value == 21.0 and perride[0].ref == "act-123"
+
+
+def test_parse_per_ride_tss_without_activity_ref_has_none_ref() -> None:
+    """#47 fail-closed: a per-ride claim with no ``activity <id>`` token carries ref=None.
+
+    Per-ride TSS is per-day ambiguous, so a claim that names no activity must NOT fall back to a
+    date — it keeps ref=None and the grounder scrubs it (an empty-ref activity_tss resolves None).
+    """
+    out = parse_tagged_answer("<technical_proof>each ride 21 (activity_tss)</technical_proof>hi")
+    perride = [c for c in out.evidence_claims if c.metric == "activity_tss"]
+    assert perride and perride[0].ref is None
+
+
+def test_parse_dated_claim_still_maps_as_of_not_activity() -> None:
+    """#47 mutual-exclusion: a dated claim still maps as_of -> ref, never an activity id."""
+    out = parse_tagged_answer(
+        "<technical_proof>fitness is 5.7 (ctl, as_of 2026-06-15)</technical_proof>hi"
+    )
+    assert ("ctl", 5.7, "2026-06-15") in {(c.metric, c.value, c.ref) for c in out.evidence_claims}
+
+
 def test_parse_attributed_opener_does_not_leak_block_body_as_prose() -> None:
     """An attributed opener (`<technical_proof foo>`) must still have its body stripped, not leaked.
 

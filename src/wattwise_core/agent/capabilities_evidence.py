@@ -135,11 +135,20 @@ class CanonicalEvidence:
         canonical = self._equivalence.canonical_key(metric)
         if canonical is None:
             return None
+        name = MetricName(canonical)
+        if name is MetricName.ACTIVITY_TSS:
+            # Per-ride TSS (#47): the ``as_of`` argument is the claim's ACTIVITY ID (carried in
+            # ref), NOT a date. Branch BEFORE _resolve_as_of — which would parse a non-ISO activity
+            # id as INVALID and return None — and resolve the single ride's TSS by activity id.
+            return await self._activity_tss(as_of)
         resolved = self._resolve_as_of(as_of)
         if resolved.invalid:
             # The claim carried a date token we could not parse: do NOT fall back to latest.
             return None
-        name = MetricName(canonical)
+        return await self._dated_metric(name, resolved)
+
+    async def _dated_metric(self, name: MetricName, resolved: _AsOf) -> float | None:
+        """Resolve a DATE-keyed canonical metric (PMC scalars, aggregate targets, CP/W', HRV)."""
         if name in (MetricName.CTL, MetricName.ATL, MetricName.TSB, MetricName.FORM):
             return await self._pmc_scalar(name, resolved)
         if name in _AGGREGATE_TARGET_DAYS:
@@ -194,6 +203,28 @@ class CanonicalEvidence:
         if not is_computed(result):
             return None
         return _scalar_of(name, result.value)
+
+    async def _activity_tss(self, activity_id: str | None) -> float | None:
+        """The Coggan TSS of a SINGLE ride, resolved by activity id, fail-closed (#47, GROUND-R7).
+
+        DOUBLE-unwrapped: ``svc.coggan`` returns ``MetricResult[LoadMetricsBundle]`` whose ``tss``
+        is itself a ``MetricResult[float]`` (Computed on the cycling-power path, Unavailable on the
+        HR path / a non-power sport, LM-R2). Every fail-closed edge resolves to ``None`` so the
+        grounder scrubs the claimed number — never a placeholder, never an HR-load value relabeled
+        as power TSS, never a per-day fabrication:
+        * no activity id (a per-ride claim with no ref — per-day ambiguous) -> None;
+        * unknown / ungathered activity (``coggan`` -> Unavailable) -> None;
+        * HR-based / non-power-sport ride (``bundle.tss`` Unavailable) -> None.
+        """
+        if not activity_id:
+            return None
+        bundle = await self._svc.coggan(activity_id)
+        if not is_computed(bundle):
+            return None
+        tss = bundle.value.tss
+        if not is_computed(tss):
+            return None
+        return float(tss.value)
 
     @staticmethod
     def _resolve_as_of(as_of: str | None) -> _AsOf:
