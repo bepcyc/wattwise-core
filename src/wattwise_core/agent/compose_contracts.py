@@ -9,9 +9,11 @@ surface so existing import sites are unchanged.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel
 
-from wattwise_core.agent.contracts import ChatModel, Claim, ClaimKind
+from wattwise_core.agent.contracts import Claim, ClaimKind
 
 
 class EvidenceClaim(BaseModel):
@@ -60,20 +62,111 @@ class ComposedAnswer(BaseModel):
     evidence_claims: tuple[EvidenceClaim, ...] = ()
 
 
-async def compose_structured(
-    model: ChatModel, *, system: str, context: str, max_tokens: int = 1024
-) -> ComposedAnswer:
-    """Compose the two-layer answer (COMPOSE-R3) over any ``ChatModel`` via its structured seam.
+# --- inline <technical_proof> tag parsing (COMPOSE-R3, owner's tag framing, #87) -----------
+#
+# The model emits ONE plain-text answer: a `<technical_proof>…</technical_proof>` block carrying
+# the evidence layer (numbers + reasoning), and the warm visible prose OUTSIDE it. A SIMPLE regex
+# (owner-approved) splits that into the same internal ComposedAnswer the grounder already consumes.
+# Fail-closed at every edge: an unclosed tag consumes to end-of-text (its tail never leaks as
+# visible prose); duplicate/nested blocks are all removed; a stray tag fragment is scrubbed; a
+# malformed claim line is skipped (the downstream grounder + deterministic sweep are the final
+# authority). The function NEVER raises and NEVER returns raw tag text as the visible layer.
 
-    A free function (not a ``ChatModel`` protocol member) so every existing model/fake satisfies
-    the seam unchanged: it drives the provider's schema-constrained decoding (``structured``) to
-    return a validated :class:`ComposedAnswer` — the visible prose and the evidence layer as ONE
-    unit, never a flat blob split heuristically. A model that cannot enforce structured output
-    raises here (STRUCT-R2), which the compose node handles as a validation failure, not a
-    free-text fallback. ``max_tokens`` is accepted for signature parity with
-    :meth:`ChatModel.compose` and reserved for a future budget-aware structured call.
+#: A `<technical_proof>` block. The opener TOLERATES attributes (``<technical_proof foo="x">``) —
+#: the model is instructed to emit the bare tag, but a deviating attributed opener MUST still have
+#: its body captured-and-stripped (never leaked as prose), so the opener is ``\btechnical_proof\b``
+#: with an optional ``[^>]*`` attribute run. An unclosed opener matches to end-of-text via the
+#: ``|$`` alternation (fail-closed: the unterminated tail is treated as evidence and stripped).
+_TECH_PROOF_BLOCK_RE = re.compile(
+    r"<\s*technical_proof\b[^>]*>(.*?)(?:<\s*/\s*technical_proof\s*>|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+#: Any residual opening/closing tag fragment the block regex did not consume (orphan close tag,
+#: an inner nested tag left inside a captured body, a malformed opener).
+_TECH_PROOF_FRAGMENT_RE = re.compile(r"<\s*/?\s*technical_proof\b[^>]*>?", flags=re.IGNORECASE)
+#: A single NUMBER claim: an optional metric label, an optional ``is``, then a signed decimal,
+#: with an optional ``(canonical_metric, as_of YYYY-MM-DD)`` parenthetical.
+_CLAIM_RE = re.compile(
+    r"(?P<metric>[A-Za-z][A-Za-z ]*?)\s+(?:is\s+)?(?P<value>-?\d+(?:\.\d+)?)\s*"
+    r"(?:\((?P<paren>[^)]*)\))?",
+)
+_AS_OF_RE = re.compile(r"as_of\s+(?P<as_of>\d{4}-\d{2}-\d{2})", flags=re.IGNORECASE)
+#: A free-prose tail after an em/en-dash or spaced hyphen (" — basis for the read") that must be
+#: dropped before claim parsing — but ONLY when the tail is non-numeric prose, so a spaced numeric
+#: range ("5 - 7") is left intact (and then skipped as a non-single-number segment, never halved).
+_PROSE_TAIL_RE = re.compile(r"\s+[—–-]\s+(?=\D*$)")  # noqa: RUF001 (em/en dash intended)
+
+
+def _parse_claim_lines(block_body: str) -> list[EvidenceClaim]:
+    """Extract NUMBER EvidenceClaims from a technical-proof block body (SIMPLE regex, fail-soft).
+
+    The block is a ``;``-separated list of claims in the owner's style
+    ``"fitness is 5.7 (ctl, as_of 2026-06-15); fatigue 4.8 (atl) — basis for the read"``. Each
+    segment is reduced to its claim head (a trailing free-prose ``— …`` tail is dropped) and matched
+    for ``metric value (paren)``. The parenthetical's leading non-``as_of`` token is the canonical
+    metric override (e.g. ``ctl``); ``as_of <ISO>`` maps onto :attr:`EvidenceClaim.ref`. A segment
+    that is not a single clean NUMBER (no number, a spaced range, multiple numbers) is SKIPPED —
+    the grounder re-validates and the deterministic sweep still governs the visible draft, so a
+    skipped line only means that claim is absent from the evidence layer (fail-closed: when in
+    doubt, drop the claim). Never raises.
     """
-    return await model.structured(system=system, data=context, schema=ComposedAnswer)
+    claims: list[EvidenceClaim] = []
+    for raw_segment in block_body.split(";"):
+        head = _PROSE_TAIL_RE.split(raw_segment.strip(), maxsplit=1)[0].strip()
+        if not head:
+            continue
+        # Reject a spaced numeric range ("5 - 7") outright: more than one number OUTSIDE the
+        # parenthetical is not a single clean NUMBER claim, so skip rather than mis-parse it into
+        # the first value. The parenthetical (which may carry an ``as_of`` ISO date full of digits)
+        # is removed before counting so a dated claim is not mistaken for a multi-number segment.
+        head_outside_paren = re.sub(r"\([^)]*\)", "", head)
+        if len(re.findall(r"-?\d+(?:\.\d+)?", head_outside_paren)) != 1:
+            continue
+        match = _CLAIM_RE.search(head)
+        if match is None:
+            continue
+        paren = match.group("paren") or ""
+        as_of_match = _AS_OF_RE.search(paren)
+        ref = as_of_match.group("as_of") if as_of_match else None
+        # Canonical-metric override: the first non-``as_of`` token in the parenthetical (e.g.
+        # "ctl"), preferred over the prose label; MetricEquivalence canonicalizes either downstream.
+        override = ""
+        for raw_token in paren.split(","):
+            token = raw_token.strip()
+            if token and not token.lower().startswith("as_of"):
+                override = token.split()[0]
+                break
+        metric = (override or match.group("metric")).strip()
+        try:
+            value = float(match.group("value"))
+        except ValueError:  # pragma: no cover - regex already constrains the shape
+            continue
+        claims.append(
+            EvidenceClaim(
+                kind=ClaimKind.NUMBER, text=head, metric=metric or None, value=value, ref=ref
+            )
+        )
+    return claims
 
 
-__all__ = ["ComposedAnswer", "EvidenceClaim", "compose_structured"]
+def parse_tagged_answer(text: str) -> ComposedAnswer:
+    """Split a tagged model answer into the two-layer :class:`ComposedAnswer` (COMPOSE-R3, tags).
+
+    ``visible_answer`` is the text with EVERY ``<technical_proof>`` block (closed or unclosed-to-
+    end) and any stray tag fragment removed, whitespace-normalized. ``evidence_claims`` is union of
+    NUMBER claims parsed from every block body. Totality: this never raises and never returns raw
+    tag text as the visible layer — a block-only answer yields an EMPTY ``visible_answer`` (the
+    caller routes empty-visible to the fail-closed degrade/abstain path, never ships it).
+    """
+    blocks = [m.group(1) for m in _TECH_PROOF_BLOCK_RE.finditer(text)]
+    visible = _TECH_PROOF_BLOCK_RE.sub("", text)
+    visible = _TECH_PROOF_FRAGMENT_RE.sub("", visible)
+    visible = re.sub(r"[ \t]{2,}", " ", visible)
+    visible = re.sub(r"\n{3,}", "\n\n", visible).strip()
+    claims: list[EvidenceClaim] = []
+    for body in blocks:
+        claims.extend(_parse_claim_lines(body))
+    return ComposedAnswer(visible_answer=visible, evidence_claims=tuple(claims))
+
+
+__all__ = ["ComposedAnswer", "EvidenceClaim", "parse_tagged_answer"]

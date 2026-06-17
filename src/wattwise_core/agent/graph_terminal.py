@@ -64,6 +64,17 @@ def _empty_survivor_degrade(state: AgentState, decision: GroundDecision | None) 
     )
 
 
+def _empty_visible_body_degrade(state: AgentState) -> bool:
+    """True iff the athlete-visible body is empty/whitespace (COMPOSE-R3 point 1 fail-closed).
+
+    A blank deliverable is NEVER a completion — e.g. a compose answer that was ALL evidence layer
+    (a ``<technical_proof>`` block with no surrounding prose) parses to an empty ``visible_answer``;
+    even if its evidence claims grounded, an empty body must degrade to the honest fail-closed
+    outcome, never ship a blank ``completed`` answer.
+    """
+    return not (state.get("grounded_text") or "").strip()
+
+
 def is_honest_refusal(
     state: AgentState, status: RunStatus, decision: GroundDecision | None
 ) -> bool:
@@ -75,7 +86,9 @@ def is_honest_refusal(
     """
     if decision is GroundDecision.ABSTAIN:
         return True
-    return status is RunStatus.DEGRADED and _empty_survivor_degrade(state, decision)
+    return status is RunStatus.DEGRADED and (
+        _empty_survivor_degrade(state, decision) or _empty_visible_body_degrade(state)
+    )
 
 
 def terminal_status(state: AgentState, decision: GroundDecision | None, ceiling: int) -> RunStatus:
@@ -101,6 +114,7 @@ def terminal_status(state: AgentState, decision: GroundDecision | None, ceiling:
         or (decision is not None and decision is not GroundDecision.PROCEED)
         or open_gaps(state)
         or _empty_survivor_degrade(state, decision)
+        or _empty_visible_body_degrade(state)
     )
     return RunStatus.DEGRADED if degrade else RunStatus.COMPLETED
 
