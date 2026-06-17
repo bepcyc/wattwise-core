@@ -133,7 +133,14 @@ class _GapCoverage:
 
 
 class _ScriptedGrounder:
-    """Grounder returning a FIXED aggregate decision on every pass (drives the bound)."""
+    """Grounder returning a FIXED aggregate decision on every pass (drives the bound).
+
+    Published substance is COUPLED to the decision (realistic, #85): only PROCEED grounds a
+    surviving citation and keeps the draft; a non-PROCEED (an always-REGENERATE/-REPLAN recovery
+    that never converges, or ABSTAIN) publishes NO survivor and an EMPTY body, so the exhausted
+    unconverged recovery degrades honestly — never the impossible "always-regenerate yet always
+    grounded" state that masked the #85 false-degraded defect.
+    """
 
     def __init__(self, decision: GroundDecision) -> None:
         self._decision = decision
@@ -150,6 +157,8 @@ class _ScriptedGrounder:
         evidence_claims: object = None,
     ) -> GroundingResult:
         self.calls += 1
+        if self._decision is not GroundDecision.PROCEED:
+            return GroundingResult(decision=self._decision, claims=(), scrubbed_text="")
         claim = Claim(kind=ClaimKind.NUMBER, text="1", value=1.0, metric="ctl")
         survivor = GroundedClaim(
             claim=claim, verdict=GroundVerdict.GROUNDED, citation={"metric": "ctl"}
