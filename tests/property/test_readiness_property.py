@@ -10,8 +10,9 @@ Per-metric property IDs:
   READINESS_FATIGUE_FLOOR`` (HRV absent) yields REST, and NEVER GO.
 * RDY-T4 -- HRV is fail-safe: an HRV nudge never INCREASES aggressiveness vs the
   no-HRV verdict (it is monotone-cautious).
-* RDY-T5 -- consistency round-trip (EVAL-R5 / COACH-R3): whenever the deterministic
-  verdict is not None, ``readiness_consistent(assess(...).verdict, ...)`` is True.
+* RDY-T5 -- consistency-gate discrimination (EVAL-R5 / COACH-R3): the gate certifies
+  ONLY the correct verdict, REJECTS every other verdict in the closed vocab, and never
+  certifies any verdict against a missing (None) form (GROUND-R6 fail-closed).
 
 Generators (TEST-R2): finite forms over a wide TSB span (well past every band edge),
 HRV rmssd/baseline over realistic ranges, with shrinking.
@@ -114,8 +115,23 @@ def test_t4_hrv_never_increases_aggressiveness(form: float, hrv: float, baseline
 
 @_SETTINGS
 @given(form=_form, hrv=st.none() | _hrv, baseline=st.none() | _baseline)
-def test_t5_consistent_roundtrip(form: float, hrv: float | None, baseline: float | None) -> None:
-    """A non-None deterministic verdict always certifies itself (round-trip)."""
+def test_t5_consistency_gate_discriminates(
+    form: float, hrv: float | None, baseline: float | None
+) -> None:
+    """The consistency gate certifies ONLY the correct verdict, and never a missing form.
+
+    Discriminating, not self-comparing: the WRONG verdicts and the missing-form case are
+    derived independently (from the closed enum) — never from the gate's own output. A gate
+    mutated to certify unconditionally, or to certify against a None form, fails here.
+    """
     v = assess_readiness(form=form, hrv_rmssd=hrv, hrv_baseline=baseline).verdict
     assert v is not None  # finite form here => always assessable
+    # 1) The correct verdict certifies.
     assert readiness_consistent(v, form=form, hrv_rmssd=hrv, hrv_baseline=baseline) is True
+    # 2) EVERY OTHER verdict in the closed vocab is rejected (the gate actually compares).
+    for wrong in ReadinessVerdict:
+        if wrong is v:
+            continue
+        assert readiness_consistent(wrong, form=form, hrv_rmssd=hrv, hrv_baseline=baseline) is False
+    # 3) No verdict can be certified against a missing form (GROUND-R6, fail-closed).
+    assert readiness_consistent(v, form=None, hrv_rmssd=hrv, hrv_baseline=baseline) is False

@@ -124,11 +124,14 @@ def test_single_spike_is_damped_by_smoothing(spike_pos: int, spike_mag: float) -
 
     assert isinstance(result, Computed)
     assert np.isfinite(result.value)
-    # One spike of magnitude M over a ~900 s half, smoothed across 30 s, perturbs a
-    # half-mean by at most ~M*30/(30*900) = M/900 of a watt-equivalent; the resulting
-    # decoupling magnitude stays bounded well under what a raw-power injection (M/200/900)
-    # would imply blowing up. Just assert it stays a small, finite, bounded number.
-    assert abs(result.value) < 50.0
+    # Independent analytic ceiling (DEC-R3): a single spike of magnitude M, 30 s smoothed,
+    # contributes (M-200)/30 to each of at most 30 seeded windows; even fully concentrated
+    # in one ~900 s half its perturbation to that half-mean is <= 30*(M-200)/30/900 < M/900
+    # watt-equivalent, and the decoupling % (base ~200 W) is bounded by that. The empirical
+    # worst case here is ~0.46*M/900, so M/900 is a tight, real bound (vs a vacuous < 50.0).
+    # A regression that fed raw / under-smoothed power (DEC-R3 violated) would skip the 1/30
+    # damping and perturb the half-mean ~30x more, blowing past M/900 — caught here.
+    assert abs(result.value) < spike_mag / 900.0
 
 
 # --- DEC-T5: sign convention -------------------------------------------------------

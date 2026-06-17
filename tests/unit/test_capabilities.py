@@ -42,6 +42,7 @@ from wattwise_core.analytics.result import (
     Unavailable,
     UnavailableReason,
 )
+from wattwise_core.analytics.service import AnalyticsService
 
 pytestmark = pytest.mark.unit
 
@@ -159,8 +160,11 @@ def test_registry_has_the_phase1_set_with_unique_keys() -> None:
 def test_each_capability_maps_1to1_to_a_real_service_method() -> None:
     for cap in CAPABILITIES:
         assert cap.service_method == _EXPECTED_METHOD_BY_KEY[cap.key]
-        # PLAN-R3: the named method exists on the canonical service surface.
-        assert hasattr(FakeAnalyticsService, cap.service_method)
+        # PLAN-R3: the named method must exist (and be callable) on the REAL canonical
+        # service surface, not merely the test double — a capability remapped to a method
+        # missing or renamed on AnalyticsService must fail here, never pass on the fake.
+        method = getattr(AnalyticsService, cap.service_method, None)
+        assert callable(method), f"{cap.key} -> AnalyticsService.{cap.service_method} not callable"
 
 
 def test_capability_by_key_indexes_every_capability() -> None:
