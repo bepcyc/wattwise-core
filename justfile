@@ -277,17 +277,37 @@ _migrate_dev:
 # WATTWISE_PG_DSN / WATTWISE_MARIADB_DSN are set by the CI matrix; when absent the
 # corresponding leg is skipped (the SQLite leg always runs).
 test-db-portable:
-    @echo "portability: SQLite leg (always available)"
-    WATTWISE_DATABASE_DSN="sqlite+aiosqlite:///./.wattwise-portable.sqlite" \
-        {{uv}} pytest -m "portability or integration"
-    @if [ -n "${WATTWISE_PG_DSN:-}" ]; then \
-        echo "portability: PostgreSQL leg"; \
-        WATTWISE_DATABASE_DSN="$WATTWISE_PG_DSN" {{uv}} pytest -m "portability or integration"; \
-    else echo "portability: PostgreSQL leg SKIPPED (WATTWISE_PG_DSN unset)"; fi
-    @if [ -n "${WATTWISE_MARIADB_DSN:-}" ]; then \
-        echo "portability: MariaDB leg"; \
-        WATTWISE_DATABASE_DSN="$WATTWISE_MARIADB_DSN" {{uv}} pytest -m "portability or integration"; \
-    else echo "portability: MariaDB leg SKIPPED (WATTWISE_MARIADB_DSN unset)"; fi
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Run every available backend leg CONCURRENTLY (CI long pole: the three legs ran
+    # serially before). Each leg is fully isolated — a distinct DSN/database plus its
+    # own pytest basetemp and a disabled cache plugin — so they cannot interfere;
+    # `uv run --no-sync` avoids a venv-lock race between the parallel processes (the
+    # env is already synced by `just install`). SQLite always runs; PG/MariaDB legs
+    # run only when their DSN is set (the CI matrix), exactly as before. Exit non-zero
+    # if ANY leg fails; every leg's log is printed at the end so failures are legible.
+    run_leg() {
+      local name="$1" dsn="$2" rc=0
+      echo "portability: ${name} leg starting"
+      WATTWISE_DATABASE_DSN="${dsn}" {{uv}} --no-sync pytest -m "portability or integration" \
+        -p no:cacheprovider --basetemp=".pytest-db-${name}" >"reports/portable-${name}.log" 2>&1 || rc=$?
+      echo "${rc}" >"reports/portable-${name}.rc"
+    }
+    mkdir -p reports
+    rm -f reports/portable-*.rc reports/portable-*.log
+    pids=""
+    run_leg sqlite "sqlite+aiosqlite:///./.wattwise-portable.sqlite" & pids="${pids} $!"
+    if [ -n "${WATTWISE_PG_DSN:-}" ]; then run_leg postgres "${WATTWISE_PG_DSN}" & pids="${pids} $!"; else echo "portability: PostgreSQL leg SKIPPED (WATTWISE_PG_DSN unset)"; fi
+    if [ -n "${WATTWISE_MARIADB_DSN:-}" ]; then run_leg mariadb "${WATTWISE_MARIADB_DSN}" & pids="${pids} $!"; else echo "portability: MariaDB leg SKIPPED (WATTWISE_MARIADB_DSN unset)"; fi
+    for p in ${pids}; do wait "${p}" || true; done
+    rc=0
+    for f in reports/portable-*.rc; do
+      [ -f "${f}" ] || continue
+      legrc="$(cat "${f}")"
+      [ "${legrc}" = "0" ] || { echo "portability: ${f} -> exit ${legrc}"; rc=1; }
+    done
+    for f in reports/portable-*.log; do [ -f "${f}" ] && { echo "===== ${f} ====="; cat "${f}"; }; done
+    exit "${rc}"
 
 # =====================================================================
 # 6. Supply-chain + commits + logging (CI-R1 items 8, 9, 10, 11, 15)
