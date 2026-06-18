@@ -49,8 +49,9 @@ for rest. A refusal you can trust beats a guess you cannot.
   Power, Intensity Factor, TSS, Critical Power and W′, W′bal, aerobic decoupling, HRV,
   TRIMP, session-RPE load, a durability measure, and more — all computed from your record.
   [docs/METRICS.md](docs/METRICS.md) explains what every number means.
-- **Works with what you already have.** Upload FIT, FIT.GZ, GPX, or TCX files
-  (including Strava bulk exports), or sync directly from intervals.icu. No new gadget to buy.
+- **Works with what you already have.** Upload FIT, FIT.GZ, GPX, or TCX files exported from
+  your device or any service — Garmin, Strava ("Export Original"), intervals.icu. No new
+  gadget to buy.
 
 ## Quick start
 
@@ -100,16 +101,31 @@ TOKEN=$(curl -fsS -X POST "$BASE/v1/auth/token" \
   -d "{\"owner_secret\":\"$SIGNING_KEY\"}" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
 AUTH="Authorization: Bearer $TOKEN"
+```
 
-# 2. Upload a ride (FIT / FIT.GZ / GPX / TCX) and bring it in
-curl -fsS -X POST "$BASE/v1/imports" -H "$AUTH" -F file=@ride.fit
-curl -fsS -X POST "$BASE/v1/sync/run" -H "$AUTH"
+**Bring your data in.** Upload an activity file — anything you exported from your watch /
+head-unit, Garmin Connect, Strava ("Export Original"), or intervals.icu, in
+**FIT / FIT.GZ / GPX / TCX**. Point the command at your own file:
 
+```sh
+# 2. Upload a file you exported (use your own path, not a literal "ride.fit")
+#    The upload ingests the activity in place — no extra sync step for files.
+curl -fsS -X POST "$BASE/v1/imports" -H "$AUTH" -F file=@/path/to/your-activity.fit
+```
+
+File upload is the supported way to get data in on this self-hosted image. The engine also
+ships an **intervals.icu** api-key connector (`/v1/connections`), but its connect path is
+intentionally inert here — it returns `422` until a credential probe is configured — so it
+will not pull data in the stock OSS container. Stick with file upload above.
+
+Now read your data back and ask the coach:
+
+```sh
 # 3. Read your activities and your fitness chart
 curl -fsS "$BASE/v1/activities" -H "$AUTH"
 curl -fsS "$BASE/v1/performance/load-fitness?from=2024-01-01&to=2024-01-08" -H "$AUTH"
 
-# 4. Ask the coach (a streamed answer; needs WATTWISE_LLM_API_KEY)
+# 4. Ask the coach (a streamed answer; needs a real WATTWISE_LLM_API_KEY, not the sk-... placeholder)
 curl -N -X POST "$BASE/v1/agent/ask" \
   -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"question":"How much training load have I done recently?","stream":true}'
