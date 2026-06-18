@@ -30,8 +30,13 @@ jobs:
     steps:
       - name: build + scan + push image, create Forgejo release
         run: |
-          set -euo pipefail
+          exec > /tmp/ww-release-job.log 2>&1   # mirror to a host file (Forgejo log API is awkward to read)
+          set -xeuo pipefail
+          # host-mode jobs get a minimal PATH; restore nix + the user profile (just/uv).
+          export PATH="/etc/profiles/per-user/bepcyc/bin:/run/current-system/sw/bin:/run/wrappers/bin:${PATH:-}"
           export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          command -v nix just uv git docker
           work="$(mktemp -d)"
           git clone --quiet "http://bepcyc:${FORGEJO_TOKEN}@localhost:3000/bepcyc/wattwise-core.git" "$work"
           cd "$work"
