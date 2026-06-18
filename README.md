@@ -58,13 +58,17 @@ for rest. A refusal you can trust beats a guess you cannot.
 You need [Docker](https://docs.docker.com/get-docker/), two random secrets (one command
 each), and an LLM key for the coach (any OpenAI-compatible endpoint —
 [OpenRouter](https://openrouter.ai/), or a local [Ollama](https://ollama.com/) if you want
-to keep everything on your LAN). Build the image, then start it:
+to keep everything on your LAN). Build the image from this repo, then start it:
 
 ```sh
-# Build the image yourself, OR skip the build and use the released one:
-#   docker pull ghcr.io/bepcyc/wattwise-core:v0.0.1
-# (if you pull, use that image name below instead of wattwise-core:local)
+# Build from source — matches these docs and works on any CPU (amd64 OR arm64).
+# On Apple Silicon, a Raspberry Pi, or any ARM box, build locally (this is the path to use).
 docker build -t wattwise-core:local .
+
+# Prefer not to build? A released image exists, but note it is the pinned v0.0.1 snapshot,
+# is linux/amd64 only, and may trail these docs:
+#   docker pull ghcr.io/bepcyc/wattwise-core:v0.0.1    # amd64 only; if you use it, put this
+#                                                       # name in the `docker run` below.
 
 # Two secrets — keep SIGNING_KEY in your shell, it is also your login secret below
 ENCRYPTION_KEY=$(python3 -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())')
@@ -76,8 +80,9 @@ docker run -d --name wattwise \
   -e WATTWISE_DATABASE_DSN='sqlite+aiosqlite:////var/lib/wattwise/wattwise.sqlite' \
   -e WATTWISE_ENCRYPTION_ROOT_KEY="$ENCRYPTION_KEY" \
   -e WATTWISE_TOKEN_SIGNING_KEY="$SIGNING_KEY" \
-  -e WATTWISE_LLM_API_KEY='sk-...' \
   wattwise-core:local
+# (Upload + analytics need no LLM key. The coach in step 4 does — add
+#  -e WATTWISE_LLM_API_KEY=<your real key> and restart when you want it.)
 
 # Wait for it — first boot sets up the database, then this returns {"status":"ready", ...}
 curl --retry 15 --retry-delay 2 --retry-all-errors -fsS http://127.0.0.1:8000/readyz
@@ -132,11 +137,15 @@ configured — so it will not pull data in the stock OSS container. Stick with f
 Now read your data back and ask the coach:
 
 ```sh
-# 3. Read your activities and your fitness chart
+# 3. Confirm it landed — the file you just uploaded should now appear here:
 curl -fsS "$BASE/v1/activities" -H "$AUTH"
-curl -fsS "$BASE/v1/performance/load-fitness?from=2024-01-01&to=2024-01-08" -H "$AUTH"
 
-# 4. Ask the coach (a streamed answer; needs a real WATTWISE_LLM_API_KEY, not the sk-... placeholder)
+# Your fitness chart. Use a date window that covers the rides you uploaded
+# (from/to are required — substitute the year(s) your activities are from):
+curl -fsS "$BASE/v1/performance/load-fitness?from=2026-01-01&to=2026-12-31" -H "$AUTH"
+
+# 4. Ask the coach (a streamed answer). The coach needs an LLM key — add
+#    -e WATTWISE_LLM_API_KEY=<your real key> to the `docker run` above and restart first:
 curl -N -X POST "$BASE/v1/agent/ask" \
   -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"question":"How much training load have I done recently?","stream":true}'
