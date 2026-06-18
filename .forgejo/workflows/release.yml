@@ -46,6 +46,11 @@ jobs:
           # regardless of HOME inside the nix-shell subshell (host-mode HOME differs).
           export DOCKER_CONFIG="${work}/.docker"; mkdir -p "$DOCKER_CONFIG"
           echo "${FORGEJO_TOKEN}" | docker login "${WW_REGISTRY}" -u bepcyc --password-stdin
-          # trivy + syft are not on the host PATH; provide them for scan.sh / sbom.sh.
-          # DOCKER_CONFIG/DOCKER_HOST are exported, so the push inside the shell reuses the login.
+          # --- diagnostics: prove whether registry push works in THIS job context ---
+          echo "DIAG whoami=$(whoami) id=$(id -u) HOME=$HOME DOCKER_CONFIG=$DOCKER_CONFIG"
+          echo "DIAG token_len=${#FORGEJO_TOKEN}"
+          python3 -c "import json;print('DIAG auths:',list(json.load(open('$DOCKER_CONFIG/config.json')).get('auths',{}).keys()))" || echo "DIAG no config.json"
+          docker tag hello-world:latest "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe" 2>/dev/null || { docker pull -q hello-world:latest; docker tag hello-world:latest "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe"; }
+          echo "DIAG probe push:"; docker push "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe" 2>&1 | tail -3; echo "DIAG probe exit=$?"
+          # --- end diagnostics ---
           nix shell nixpkgs#trivy nixpkgs#syft -c just release
