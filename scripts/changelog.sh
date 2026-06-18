@@ -74,7 +74,13 @@ render_with_git_log() {
   # always render the not-yet-released delta so the file is correct between releases too.
   local range=""
   local last_tag
-  last_tag="$(git -C "${WW_REPO_ROOT}" describe --tags --abbrev=0 2>/dev/null || true)"
+  # At release time the version being released (VERSION) is already tagged on HEAD; exclude it so the
+  # range becomes "previous tag .. HEAD" (or the WHOLE history for the first release) instead of an
+  # empty "vX.Y.Z..HEAD" that produced a blank "no release-relevant changes recorded yet" changelog.
+  local _excl=""
+  [ -n "${VERSION:-}" ] && _excl="--exclude=${VERSION} --exclude=v${VERSION#v} --exclude=${VERSION#v}"
+  # shellcheck disable=SC2086  # intentional word-splitting of the --exclude flags
+  last_tag="$(git -C "${WW_REPO_ROOT}" describe --tags --abbrev=0 ${_excl} 2>/dev/null || true)"
   [ -n "${last_tag}" ] && range="${last_tag}..HEAD"
 
   # %s = subject; %b = body (for BREAKING CHANGE trailer). Use an unambiguous record separator.
@@ -120,13 +126,17 @@ render_with_git_log() {
     esac
   done <<< "${raw}"
 
+  # Stamp the release version + date when cutting a tag (VERSION set); otherwise the running
+  # not-yet-released delta stays under [Unreleased].
+  local _heading="## [Unreleased]"
+  [ -n "${VERSION:-}" ] && _heading="## [${VERSION#v}] - $(date -u +%Y-%m-%d)"
   header="# Changelog
 
 All notable changes to \`wattwise-core\` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses automated
 semver derived from Conventional Commits.
 
-## [Unreleased]
+${_heading}
 "
 
   # Emit only the non-empty sections, in Keep-a-Changelog canonical order, with stable sorting so

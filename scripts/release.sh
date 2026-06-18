@@ -86,7 +86,9 @@ if ww_is_dry_run; then
   ww_log "DRY-RUN would generate changelog: just changelog"
 else
   ww_log "generating changelog..."
-  ( cd "${WW_REPO_ROOT}" && just changelog ) || ww_warn "changelog recipe unavailable; continuing"
+  # Pass VERSION so changelog.sh stamps "[X.Y.Z] - date" and excludes the just-cut tag from the
+  # range (otherwise the release changelog renders an empty [Unreleased] block).
+  ( cd "${WW_REPO_ROOT}" && VERSION="${VERSION}" just changelog ) || ww_warn "changelog recipe unavailable; continuing"
 fi
 
 # ---- step 5 (build) + step 4 (sbom) + scan: the deployable image (CI-R12) ------------------------
