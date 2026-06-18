@@ -48,7 +48,9 @@ jobs:
           echo "${FORGEJO_TOKEN}" | docker login "${WW_REGISTRY}" -u bepcyc --password-stdin
           # --- diagnostics: prove whether registry push works in THIS job context ---
           echo "DIAG whoami=$(whoami) id=$(id -u) HOME=$HOME DOCKER_CONFIG=$DOCKER_CONFIG"
-          echo "DIAG token_len=${#FORGEJO_TOKEN}"
+          echo "DIAG token_len=${#FORGEJO_TOKEN} prefix=${FORGEJO_TOKEN:0:6}"
+          echo "DIAG api /user -> $(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token ${FORGEJO_TOKEN}" http://localhost:3000/api/v1/user)  (403=no read:user, expected for the API token)"
+          echo "DIAG registry token scope grant:"; curl -s -u "bepcyc:${FORGEJO_TOKEN}" "http://localhost:3000/v2/token?scope=repository:bepcyc/wattwise-core:pull,push&service=container_registry" | python3 -c "import sys,json;d=json.load(sys.stdin);import base64;t=d.get('token','');p=t.split('.')[1] if t.count('.')>=2 else '';p+='='*(-len(p)%4);print('DIAG bearer access:', json.loads(base64.urlsafe_b64decode(p)).get('access') if p else 'n/a')" 2>&1 | head -3
           python3 -c "import json;print('DIAG auths:',list(json.load(open('$DOCKER_CONFIG/config.json')).get('auths',{}).keys()))" || echo "DIAG no config.json"
           docker tag hello-world:latest "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe" 2>/dev/null || { docker pull -q hello-world:latest; docker tag hello-world:latest "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe"; }
           echo "DIAG probe push:"; docker push "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe" 2>&1 | tail -3; echo "DIAG probe exit=$?"
