@@ -148,14 +148,26 @@ ww_create_forgejo_release() {
   [ -n "${GITHUB_SERVER_URL:-}${FORGEJO_API_URL:-}" ] || ww_die "FORGEJO_API_URL or GITHUB_SERVER_URL is required to reach the Forgejo API."
   [ -n "${repo}" ] || ww_die "GITHUB_REPOSITORY is required to create the Forgejo release."
   [ -n "${FORGEJO_TOKEN:-}" ] || ww_die "FORGEJO_TOKEN is required to create the Forgejo release."
-  local release_id
-  release_id="$(curl -fsS -X POST \
+  local release_id resp http_code
+  # Create the release; capture body + HTTP status. The body is multi-key JSON with
+  # several "id" fields (release, author, …), so parse the release id with a JSON
+  # reader — a greedy regex would grab the wrong one and 404 the asset upload.
+  resp="$(curl -sS -w $'\n%{http_code}' -X POST \
     -H "Authorization: token ${FORGEJO_TOKEN}" \
     -H 'Content-Type: application/json' \
     -d "{\"tag_name\":\"${VERSION}\",\"name\":\"${VERSION}\",\"body\":\"Release ${VERSION} (image digest: ${digest:-unknown})\"}" \
-    "${api_base}/repos/${repo}/releases" \
-    | sed -E 's/.*"id": *([0-9]+).*/\1/; q')"
-  [ -n "${release_id}" ] || ww_die "Forgejo release creation returned no release id."
+    "${api_base}/repos/${repo}/releases")"
+  http_code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
+  if [ "${http_code}" = "201" ]; then
+    release_id="$(printf '%s' "${resp}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')"
+  else
+    # Already exists (re-run) or transient: fetch the existing release by tag so the
+    # asset upload is idempotent rather than fail-closed on a second run.
+    release_id="$(curl -fsS -H "Authorization: token ${FORGEJO_TOKEN}" \
+      "${api_base}/repos/${repo}/releases/tags/${VERSION}" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')"
+  fi
+  [ -n "${release_id}" ] || ww_die "Forgejo release creation returned no release id (http ${http_code})."
   local asset
   for asset in "${release_assets[@]}"; do
     curl -fsS -X POST \
