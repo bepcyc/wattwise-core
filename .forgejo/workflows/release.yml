@@ -42,6 +42,10 @@ jobs:
           cd "$work"
           git fetch --quiet origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
           git checkout --quiet "tags/${VERSION}"
+          # Pin a job-local docker config so the login the push uses is the SAME one,
+          # regardless of HOME inside the nix-shell subshell (host-mode HOME differs).
+          export DOCKER_CONFIG="${work}/.docker"; mkdir -p "$DOCKER_CONFIG"
           echo "${FORGEJO_TOKEN}" | docker login "${WW_REGISTRY}" -u bepcyc --password-stdin
           # trivy + syft are not on the host PATH; provide them for scan.sh / sbom.sh.
+          # DOCKER_CONFIG/DOCKER_HOST are exported, so the push inside the shell reuses the login.
           nix shell nixpkgs#trivy nixpkgs#syft -c just release
