@@ -20,7 +20,12 @@ jobs:
     env:
       FORGE_PROVIDER: forgejo
       VERSION: ${{ github.ref_name }}
-      FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      # NOTE: do NOT name this env var FORGEJO_TOKEN / GITHUB_TOKEN / GITEA_TOKEN —
+      # Forgejo injects its own auto per-job token under those reserved names and
+      # overrides the workflow value (that auto token has repo access but NOT
+      # write:package, so the image push fails with "unauthorized: reqPackageAccess").
+      # Use a neutral name and re-export FORGEJO_TOKEN from it inside the script.
+      WW_FORGE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
       # Forgejo's built-in OCI registry, reached directly (the public host uses an
       # ACME cert for a different name; localhost:3000 avoids the TLS mismatch).
       WW_REGISTRY: homeassistant:3000
@@ -32,27 +37,20 @@ jobs:
         run: |
           exec > /tmp/ww-release-job.log 2>&1   # mirror to a host file (Forgejo log API is awkward to read)
           set -xeuo pipefail
+          # the real release token (write:repository + write:package), shadowing any
+          # reserved auto token Forgejo may have set in the environment.
+          export FORGEJO_TOKEN="${WW_FORGE_TOKEN}"
           # host-mode jobs get a minimal PATH; restore nix + the user profile (just/uv).
           export PATH="/etc/profiles/per-user/bepcyc/bin:/run/current-system/sw/bin:/run/wrappers/bin:${PATH:-}"
           export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-          command -v nix just uv git docker
           work="$(mktemp -d)"
           git clone --quiet "http://bepcyc:${FORGEJO_TOKEN}@localhost:3000/bepcyc/wattwise-core.git" "$work"
           cd "$work"
           git fetch --quiet origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
           git checkout --quiet "tags/${VERSION}"
-          # Pin a job-local docker config so the login the push uses is the SAME one,
-          # regardless of HOME inside the nix-shell subshell (host-mode HOME differs).
+          # pin a job-local docker config so login + push (inside the nix-shell subshell) share creds.
           export DOCKER_CONFIG="${work}/.docker"; mkdir -p "$DOCKER_CONFIG"
           echo "${FORGEJO_TOKEN}" | docker login "${WW_REGISTRY}" -u bepcyc --password-stdin
-          # --- diagnostics: prove whether registry push works in THIS job context ---
-          echo "DIAG whoami=$(whoami) id=$(id -u) HOME=$HOME DOCKER_CONFIG=$DOCKER_CONFIG"
-          echo "DIAG token_len=${#FORGEJO_TOKEN} prefix=${FORGEJO_TOKEN:0:6}"
-          echo "DIAG api /user -> $(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token ${FORGEJO_TOKEN}" http://localhost:3000/api/v1/user)  (403=no read:user, expected for the API token)"
-          echo "DIAG registry token scope grant:"; curl -s -u "bepcyc:${FORGEJO_TOKEN}" "http://localhost:3000/v2/token?scope=repository:bepcyc/wattwise-core:pull,push&service=container_registry" | python3 -c "import sys,json;d=json.load(sys.stdin);import base64;t=d.get('token','');p=t.split('.')[1] if t.count('.')>=2 else '';p+='='*(-len(p)%4);print('DIAG bearer access:', json.loads(base64.urlsafe_b64decode(p)).get('access') if p else 'n/a')" 2>&1 | head -3
-          python3 -c "import json;print('DIAG auths:',list(json.load(open('$DOCKER_CONFIG/config.json')).get('auths',{}).keys()))" || echo "DIAG no config.json"
-          docker tag hello-world:latest "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe" 2>/dev/null || { docker pull -q hello-world:latest; docker tag hello-world:latest "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe"; }
-          echo "DIAG probe push:"; docker push "${WW_REGISTRY}/bepcyc/wattwise-core:jobprobe" 2>&1 | tail -3; echo "DIAG probe exit=$?"
-          # --- end diagnostics ---
+          # trivy + syft are not on the host PATH; provide them for scan.sh / sbom.sh.
           nix shell nixpkgs#trivy nixpkgs#syft -c just release
