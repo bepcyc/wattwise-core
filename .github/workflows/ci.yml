@@ -60,6 +60,11 @@ jobs:
     steps:
       - uses: dorny/paths-filter@v3
         id: filter
+        # paths-filter needs a git checkout on push/tag events, and its output is
+        # consumed ONLY for pull_request docs-only skipping (see `decide` below).
+        # Gate it to PRs so push/tag runs don't fail with "not a git repository"
+        # (git exit 128) and cascade-skip the heavy tiers + release. (CI-R / #106 fix)
+        if: ${{ github.event_name == 'pull_request' }}
         with:
           # 'every': the filter matches only when EVERY changed file matches one
           # of its patterns — i.e. a genuine docs/text-only change. DDL lives in
