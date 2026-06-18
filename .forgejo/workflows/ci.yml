@@ -549,7 +549,10 @@ jobs:
       FORGE_PROVIDER: forgejo
       VERSION: ${{ github.ref_name }}   # the pushed v* tag drives release.sh
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+      # Forgejo reserves the FORGEJO_/GITHUB_/GITEA_ secret-name prefixes ("invalid
+      # secret name"), so the release token is stored as the secret RELEASE_TOKEN and
+      # mapped onto the FORGEJO_TOKEN env that release.sh + the registry login read.
+      FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
         with: { fetch-depth: 0 }
