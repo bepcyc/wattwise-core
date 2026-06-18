@@ -61,7 +61,10 @@ each), and an LLM key for the coach (any OpenAI-compatible endpoint —
 to keep everything on your LAN). Build the image, then start it:
 
 ```sh
-docker build -t wattwise-core:local .    # or use a released image
+# Build the image yourself, OR skip the build and use the released one:
+#   docker pull ghcr.io/bepcyc/wattwise-core:v0.0.1
+# (if you pull, use that image name below instead of wattwise-core:local)
+docker build -t wattwise-core:local .
 
 # Two secrets — keep SIGNING_KEY in your shell, it is also your login secret below
 ENCRYPTION_KEY=$(python3 -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())')
@@ -103,20 +106,28 @@ TOKEN=$(curl -fsS -X POST "$BASE/v1/auth/token" \
 AUTH="Authorization: Bearer $TOKEN"
 ```
 
-**Bring your data in.** Upload an activity file — anything you exported from your watch /
-head-unit, Garmin Connect, Strava ("Export Original"), or intervals.icu, in
-**FIT / FIT.GZ / GPX / TCX**. Point the command at your own file:
+**Bring your data in.** wattwise reads activity files you already own — no new gadget needed.
+Export one (or many) in **FIT / FIT.GZ / GPX / TCX** from wherever you train:
+
+- **Garmin Connect** — open an activity → the **⋯** menu → *Export to FIT* (or *Export to GPX*).
+- **Strava** — open an activity → **⋯** → *Export Original* (the file you uploaded). For your
+  whole history, request a bulk archive under *Settings → My Account → Download or Delete Your Account*.
+- **intervals.icu** — open an activity → *Download original file*.
+- **Your watch / head-unit** — copy the `.fit` files straight off the device over USB
+  (e.g. the `GARMIN/Activity` folder).
+
+Then upload the file you exported:
 
 ```sh
-# 2. Upload a file you exported (use your own path, not a literal "ride.fit")
+# 2. Upload your exported file (use your own path, not a literal "ride.fit")
 #    The upload ingests the activity in place — no extra sync step for files.
 curl -fsS -X POST "$BASE/v1/imports" -H "$AUTH" -F file=@/path/to/your-activity.fit
 ```
 
 File upload is the supported way to get data in on this self-hosted image. The engine also
-ships an **intervals.icu** api-key connector (`/v1/connections`), but its connect path is
-intentionally inert here — it returns `422` until a credential probe is configured — so it
-will not pull data in the stock OSS container. Stick with file upload above.
+ships an **intervals.icu** api-key connector (its catalog is `GET /v1/connections/available`),
+but its connect path is intentionally inert here — it returns `422` until a credential probe is
+configured — so it will not pull data in the stock OSS container. Stick with file upload above.
 
 Now read your data back and ask the coach:
 

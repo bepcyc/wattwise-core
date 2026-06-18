@@ -141,32 +141,20 @@ surfaces, so it is a safe "make sure everything landed" step, not a required act
 
 ```sh
 AUTH="Authorization: Bearer <your access token>"
-curl -X POST http://127.0.0.1:8000/v1/imports -H "$AUTH" -F file=@ride.fit
+curl -X POST http://127.0.0.1:8000/v1/imports -H "$AUTH" -F file=@/path/to/your-activity.fit
 curl -X POST http://127.0.0.1:8000/v1/sync/run -H "$AUTH"
 ```
 
-**Connect intervals.icu.** This is done at runtime through the API, not through
-configuration — your intervals.icu API key is stored as a per-athlete credential, not
-an environment variable. List the available connectors, then initiate and complete the
-connection with your key:
+**intervals.icu connector — inert in the stock OSS image.** The engine ships an
+intervals.icu api-key connector (it shows up in `GET /v1/connections/available`), but the
+self-hosted OSS image deliberately leaves its credential probe fail-closed: completing the
+connection (`POST /v1/connections/intervals_icu/complete` with your key) returns
+`422 credential-invalid` for any key, and no connection is created. **So api-key sync does
+not pull data in the stock container — file upload (above) is the supported ingestion path.**
 
-```sh
-curl http://127.0.0.1:8000/v1/connections -H "$AUTH"
-```
-
-Follow the steps the connector returns to supply your intervals.icu API key. Once
-connected, syncs pull your history on demand.
-
-If you started in development without `WATTWISE_ENCRYPTION_ROOT_KEY`, completing an
-API-key connector returns `credential-storage-disabled`. Restart with a real
-encryption root key to enable encrypted credential storage; file uploads remain
-available without it.
-
-You do not normally touch any configuration for this. If intervals.icu rate-limits
-your account or you want to pace requests differently, the connector's retry and
-request-rate behavior is tunable under
-`WATTWISE_ADAPTERS__INTERVALS_ICU__*` (see the
-[reference](#data-sources-and-syncing) below) — most people leave these alone.
+The connector's retry / request-rate knobs (`WATTWISE_ADAPTERS__INTERVALS_ICU__*`, see the
+[reference](#data-sources-and-syncing) below) exist for a build that wires a probe; on the
+stock OSS image they have nothing to act on.
 
 ### Privacy: raw GPS
 
