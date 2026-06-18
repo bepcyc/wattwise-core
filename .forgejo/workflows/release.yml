@@ -1,0 +1,42 @@
+# Forgejo-only release workflow.
+#
+# WHY THIS EXISTS (and is not in .github): the shared ci.yml release job needs the
+# full heavy gate and GitHub-style hosted runners. The self-hosted Forgejo instance
+# has a single act_runner; running the whole gate there is unreliable, and Forgejo
+# does not fire a tag event when `on.push` lists both `branches` and `tags`. This
+# dedicated workflow triggers ONLY on a v* tag and runs in host mode (runs-on: native)
+# so `docker build` can use the host's rootless Docker. The artifact it ships is the
+# same `just release` (FORGE_PROVIDER=forgejo) that ci.yml would run; the code was
+# already gated green on the GitHub mirror for the same commit.
+name: release-forgejo
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: native
+    env:
+      FORGE_PROVIDER: forgejo
+      VERSION: ${{ github.ref_name }}
+      FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      # Forgejo's built-in OCI registry, reached directly (the public host uses an
+      # ACME cert for a different name; localhost:3000 avoids the TLS mismatch).
+      WW_REGISTRY: homeassistant:3000
+      WW_OWNER: bepcyc
+      FORGEJO_API_URL: http://localhost:3000/api/v1
+      GITHUB_REPOSITORY: bepcyc/wattwise-core
+    steps:
+      - name: build + scan + push image, create Forgejo release
+        run: |
+          set -euo pipefail
+          export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+          work="$(mktemp -d)"
+          git clone --quiet "http://bepcyc:${FORGEJO_TOKEN}@localhost:3000/bepcyc/wattwise-core.git" "$work"
+          cd "$work"
+          git fetch --quiet origin "refs/tags/${VERSION}:refs/tags/${VERSION}"
+          git checkout --quiet "tags/${VERSION}"
+          echo "${FORGEJO_TOKEN}" | docker login "${WW_REGISTRY}" -u bepcyc --password-stdin
+          # trivy + syft are not on the host PATH; provide them for scan.sh / sbom.sh.
+          nix shell nixpkgs#trivy nixpkgs#syft -c just release
