@@ -206,7 +206,9 @@ def test_import_upload_then_list_and_detail(tmp_path: Path) -> None:
         assert job_id in [j["import_job_id"] for j in listed.json()["data"]]
         got = client.get(f"/v1/imports/{job_id}", headers=auth)
         assert got.status_code == 200
-        assert got.json()["status"] in {"queued", "processing", "done"}
+        # The OSS import ingests synchronously, so the job is already TERMINAL "done" by the
+        # time the 202 lands — never stranded at "queued"/"processing" (API-R33a, #115).
+        assert got.json()["status"] == "done"
         assert got.json()["status_text"]  # athlete-native copy (API-R21)
         missing = client.get("/v1/imports/definitely-not-a-job", headers=auth)
         assert missing.status_code == 404

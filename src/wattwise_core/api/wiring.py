@@ -37,7 +37,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from wattwise_core.api.connection_catalog import FILE_IMPORT_SOURCE_KEY
 from wattwise_core.api.errors import ProblemError
 from wattwise_core.api.routers.connections import CredentialSink
-from wattwise_core.api.routers.imports import ImportJob, ImportProcessor, ImportRejected, queued_job
+from wattwise_core.api.routers.imports import (
+    ImportJob,
+    ImportProcessor,
+    ImportRejected,
+    done_job,
+    failed_job,
+)
 from wattwise_core.api.routers.sync import SyncRun as RouterSyncRun
 from wattwise_core.api.routers.sync import SyncTarget, started_run
 from wattwise_core.config import Settings
@@ -48,7 +54,7 @@ from wattwise_core.ingestion.base import (
     FileImportError,
     SourceDescriptorRef,
 )
-from wattwise_core.ingestion.ingest import IngestService, OriginalFile
+from wattwise_core.ingestion.ingest import IngestResult, IngestService, OriginalFile
 from wattwise_core.ingestion.registry import AdapterRegistry, load_registry
 from wattwise_core.ingestion.sync import SyncOrchestrator
 from wattwise_core.persistence import Database
@@ -151,59 +157,134 @@ def _make_import_processor(
         return store_cache[0]
 
     async def process(athlete_id: str, data: bytes, filename: str | None) -> ImportJob:
-        adapter = _file_import_adapter(registry)
+        # This OSS path ingests SYNCHRONOUSLY in-request, so the returned job's status is
+        # already TERMINAL by the time the 202 lands (API-R33a): ``done`` once the canonical
+        # activity is written. A decode/validation rejection BEFORE acceptance stays a 422
+        # (``ImportRejected``, no job row), and an operator/config fault (``ProblemError``,
+        # e.g. the seed descriptor missing) stays a 5xx — neither is an ingest failure. Only a
+        # failure of the INGEST itself, AFTER acceptance, is fail-closed to ``failed``: by then
+        # the engine session has rolled back (the exception left the ``sessions.session``
+        # context, EngineSessionProvider rolls back on error) and ``_ImportIngestFailed`` carries
+        # the stable, decode-derived ``failed_job_id`` out, so we return ``failed`` and the router
+        # persists a terminal, pollable job rather than stranding it at ``queued`` or surfacing a
+        # bare 5xx with nothing to poll. ``ImportRejected``/``ProblemError`` propagate as-is.
         ctx = FetchContext(ingest_run_id=str(uuid7()), fetched_at=utcnow(), connection_id=None)
-        async with sessions.session(subject=athlete_id) as session:
-            descriptor = await _file_import_descriptor(session)
-            ref = SourceDescriptorRef(
-                source_descriptor_id=str(descriptor.source_descriptor_id),
-                source_key=FILE_IMPORT_SOURCE_KEY,
-                kind=SourceKind(descriptor.kind),
-            )
-            try:
-                # PERF-R3: FIT/GPX/TCX decode is CPU-bound; run it on a worker thread so
-                # a large-file parse never blocks the event loop mid-request.
-                decoded = await asyncio.to_thread(
-                    adapter.decode_upload,
-                    data,
+        try:
+            async with sessions.session(subject=athlete_id) as session:
+                result = await _decode_map_ingest(
+                    session,
+                    adapter=_file_import_adapter(registry),
+                    object_store=_object_store,
+                    settings=settings,
+                    athlete_id=athlete_id,
+                    data=data,
                     filename=filename,
-                    source_descriptor=ref,
-                    fetch_context=ctx,
+                    ctx=ctx,
                 )
-            except FileImportError as exc:
-                raise ImportRejected(
-                    code="unreadable_file", reason="We couldn't read that file."
-                ) from exc
-            if not decoded.candidates:
-                raise ImportRejected(
-                    code="no_activity", reason="That file had no activity we could read."
-                )
-            original = OriginalFile(
-                data=data,
-                file_format=decoded.file_format,
-                source_native_id=decoded.candidates[0].source_native_id,
-            )
-            result = await IngestService(
-                session,
-                object_store=_object_store(),
-                batch_size=settings.ingestion__batch_size,
-                store_raw_gps=settings.privacy__store_raw_gps,
-            ).ingest(
-                athlete_id,
-                descriptor.source_descriptor_id,
-                decoded.candidates,
-                ingest_run_id=uuid.UUID(ctx.ingest_run_id),
-                original_files=[original],
-                # ADP-R3: the import path enforces the same declared-type contract —
-                # the engine refuses any candidate type the adapter did not declare.
-                declared_gbo_types=getattr(adapter, "capability", None)
-                and adapter.capability.supported_gbo_types,  # type: ignore[attr-defined]
-                source_key=FILE_IMPORT_SOURCE_KEY,
-            )
+        except _ImportIngestFailed as failure:
+            return failed_job(failure.failed_job_id, filename)
+        # A single file import lands exactly one canonical activity, so this set holds one
+        # element and ``next(iter(...))`` is the stable resolved activity id (idempotent across
+        # re-uploads of the same file); the ingest-run-id fallback covers the no-op re-import.
         job_id = next(iter(result.activities_written), ctx.ingest_run_id)
-        return queued_job(job_id, filename)
+        return done_job(job_id, filename)
 
     return process
+
+
+class _ImportIngestFailed(Exception):
+    """A post-acceptance ingest failure carrying the deterministic ``failed`` job id (API-R33a).
+
+    Raised ONLY for a failure of the ingest itself (after the upload is accepted), so the
+    caller returns a terminal ``failed`` job rather than letting a bare 5xx escape. The
+    ``failed_job_id`` is decode-derived so a same-file retry converges to one row. A
+    pre-acceptance ``ImportRejected`` (422) and an operator-fault ``ProblemError`` (5xx) are
+    NOT wrapped — they propagate unchanged.
+    """
+
+    def __init__(self, failed_job_id: str) -> None:
+        self.failed_job_id = failed_job_id
+        super().__init__(failed_job_id)
+
+
+async def _decode_map_ingest(
+    session: AsyncSession,
+    *,
+    adapter: FileImportAdapter,
+    object_store: Callable[[], ObjectStore],
+    settings: Settings,
+    athlete_id: str,
+    data: bytes,
+    filename: str | None,
+    ctx: FetchContext,
+) -> IngestResult:
+    """Decode → map → land one upload in the open session; the synchronous import core (API-R33).
+
+    Resolves the seeded ``file_import`` descriptor (a missing one is an operator fault → a
+    propagating ``ProblemError``), decodes on a worker thread (PERF-R3; a parse failure or an
+    empty file → a propagating ``ImportRejected`` 422), then lands the candidate through
+    :class:`IngestService`. A failure of the INGEST itself is re-raised as
+    :class:`_ImportIngestFailed` carrying the deterministic, decode-derived ``failed`` job id so
+    the caller returns a terminal ``failed`` job (API-R33a) — ``CancelledError`` (a
+    ``BaseException``) is intentionally not caught. ``object_store`` is a factory invoked only
+    once a candidate is in hand, so a descriptor/decode fault never provisions the store (the
+    LAZY-on-first-upload contract — the app factory never touches the filesystem at boot).
+    """
+    descriptor = await _file_import_descriptor(session)
+    ref = SourceDescriptorRef(
+        source_descriptor_id=str(descriptor.source_descriptor_id),
+        source_key=FILE_IMPORT_SOURCE_KEY,
+        kind=SourceKind(descriptor.kind),
+    )
+    try:
+        decoded = await asyncio.to_thread(
+            adapter.decode_upload, data, filename=filename, source_descriptor=ref, fetch_context=ctx
+        )
+    except FileImportError as exc:
+        raise ImportRejected(code="unreadable_file", reason="We couldn't read that file.") from exc
+    if not decoded.candidates:
+        raise ImportRejected(code="no_activity", reason="That file had no activity we could read.")
+    native_id = decoded.candidates[0].source_native_id
+    original = OriginalFile(data=data, file_format=decoded.file_format, source_native_id=native_id)
+    try:
+        return await IngestService(
+            session,
+            object_store=object_store(),
+            batch_size=settings.ingestion__batch_size,
+            store_raw_gps=settings.privacy__store_raw_gps,
+        ).ingest(
+            athlete_id,
+            descriptor.source_descriptor_id,
+            decoded.candidates,
+            ingest_run_id=uuid.UUID(ctx.ingest_run_id),
+            original_files=[original],
+            # ADP-R3: the import path enforces the same declared-type contract — the engine
+            # refuses any candidate type the adapter did not declare.
+            declared_gbo_types=getattr(adapter, "capability", None)
+            and adapter.capability.supported_gbo_types,  # type: ignore[attr-defined]
+            source_key=FILE_IMPORT_SOURCE_KEY,
+        )
+    except Exception as exc:
+        # Post-acceptance INGEST failure: carry the deterministic failed-job id out so the caller
+        # returns a terminal ``failed`` (the session rolls back as this leaves the context).
+        raise _ImportIngestFailed(_deterministic_failed_job_id(native_id)) from exc
+
+
+#: Namespace for the deterministic ``failed`` import-job id (a fixed app-internal UUID). UUID5
+#: over it + the upload's ``source_native_id`` yields the SAME id for the same failing file, so
+#: a retry converges to one ``failed`` row rather than orphaning a new row per attempt (API-R33a).
+_FAILED_IMPORT_JOB_NAMESPACE = uuid.UUID("6f1d3b1e-0c2a-5e7a-9b4d-7c1f0a2e8d34")
+
+
+def _deterministic_failed_job_id(source_native_id: str) -> str:
+    """A stable ``failed`` import-job id derived from the upload's ``source_native_id``.
+
+    Re-uploading the same file that fails the same way re-derives the SAME id, so the router's
+    id-idempotent ``_record_job`` (ING-R6 / FIL-R5) converges to one ``failed`` row instead of
+    accumulating an orphan per retry — the convergence ``done`` already gets from the stable
+    resolved activity id (API-R33a).
+    """
+    return str(uuid.uuid5(_FAILED_IMPORT_JOB_NAMESPACE, source_native_id))
 
 
 def _file_import_adapter(registry: AdapterRegistry) -> FileImportAdapter:

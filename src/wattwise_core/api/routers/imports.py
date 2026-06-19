@@ -21,7 +21,7 @@ app factory overrides with the registered file-upload adapter + ingest service, 
 this router never imports a concrete source adapter (ARCH-R22 / ONB-R4). Acting
 identity is server-derived (AUTH-R3); the upload carries no caller-identity field.
 
-Requirement IDs: API-R33, AUTH-R3, AUTH-R11, ERR-R6, ERR-R8, LIMIT-R5, LIN-R1.1.
+Requirement IDs: API-R33, API-R33a, AUTH-R3, AUTH-R11, ERR-R6, ERR-R8, LIMIT-R5, LIN-R1.1.
 """
 
 from __future__ import annotations
@@ -367,10 +367,14 @@ async def _record_job(session: AsyncSession, athlete_id: str, job: ImportJob) ->
 
 
 def queued_job(import_job_id: str, filename: str | None) -> ImportJob:
-    """Build a freshly-queued :class:`ImportJob` (the processor's accept return).
+    """Build a freshly-queued :class:`ImportJob` (a non-terminal accept return).
 
     A small constructor the processor seam reuses so the queued status + athlete copy
-    are defined once here (API-R21), not at the wiring site.
+    are defined once here (API-R21), not at the wiring site. ``queued`` is the
+    non-terminal state an ASYNCHRONOUS ingest dispatch (a commercial sync-orchestration
+    build) transitions through before reaching a terminal status (API-R33a); the OSS
+    synchronous import path reaches its terminal status in one step via
+    :func:`done_job` / :func:`failed_job` and never persists this non-terminal value.
     """
     return ImportJob(
         import_job_id=import_job_id,
@@ -381,12 +385,49 @@ def queued_job(import_job_id: str, filename: str | None) -> ImportJob:
     )
 
 
+def done_job(import_job_id: str, filename: str | None) -> ImportJob:
+    """Build a TERMINAL ``done`` :class:`ImportJob` — the ingest landed (API-R33a).
+
+    Returned by the synchronous OSS import processor once :class:`IngestService` has
+    landed the canonical activity, so the persisted job (and the ``GET /v1/imports/{id}``
+    read surface) reads ``done`` and never strands at ``queued``. Status copy lives once
+    here (API-R21), not at the wiring site.
+    """
+    return ImportJob(
+        import_job_id=import_job_id,
+        status="done",
+        filename=filename,
+        received_at=datetime.now(UTC),
+        status_text="Your file is in — your ride is ready to view.",
+    )
+
+
+def failed_job(import_job_id: str, filename: str | None) -> ImportJob:
+    """Build a TERMINAL ``failed`` :class:`ImportJob` — a post-acceptance ingest error.
+
+    Fail-closed (API-R33a): when the synchronous ingest raises AFTER the upload was
+    accepted (``202``), the processor returns this so the router persists a job reading
+    ``failed`` — the polling athlete reads a definite terminal outcome rather than a
+    stranded ``queued`` job or a bare ``5xx`` with nothing to poll. The ``status_text``
+    is jargon-free and carries no blame or raw error detail (API-R21, ERR-R5).
+    """
+    return ImportJob(
+        import_job_id=import_job_id,
+        status="failed",
+        filename=filename,
+        received_at=datetime.now(UTC),
+        status_text="We couldn't finish bringing that file in. Please try uploading it again.",
+    )
+
+
 __all__ = [
     "ACCEPTED_EXTENSIONS",
     "ImportJob",
     "ImportJobList",
     "ImportProcessor",
     "ImportRejected",
+    "done_job",
+    "failed_job",
     "import_processor",
     "queued_job",
     "router",
