@@ -3957,6 +3957,7 @@
               "connect_a_source",
               "run_first_sync",
               "waiting_for_data",
+              "set_ftp",
               "all_set"
             ],
             "title": "Suggested Next Step",
@@ -14468,7 +14469,7 @@
     },
     "/v1/onboarding/status": {
       "get": {
-        "description": "Return the composed, derived first-setup status for the owner (API-R46).\n\nReads the owner's connections and whether any canonical activity has landed, then\nderives the first-sync progress and the suggested next step. The OSS carve-out\nholds: a fresh ``api_key`` connection with no manual sync yet reports\n``first_sync_state=\"not_started\"`` (no auto-enqueue, API-R46).",
+        "description": "Return the composed, derived first-setup status for the owner (API-R46).\n\nReads the owner's connections, whether any canonical activity has landed, and\nwhether the current-sport FTP signature is set, then derives the first-sync\nprogress and the suggested next step. The OSS carve-out holds: a fresh ``api_key``\nconnection with no manual sync yet reports ``first_sync_state=\"not_started\"`` (no\nauto-enqueue, API-R46). When data is ready but FTP is unset, the next step is\n``set_ftp`` so the first chart is not a silent zero (API-R46b).",
         "operationId": "getOnboardingStatus",
         "responses": {
           "200": {
