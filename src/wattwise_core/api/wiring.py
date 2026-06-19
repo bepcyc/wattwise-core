@@ -45,7 +45,7 @@ from wattwise_core.api.routers.imports import (
     failed_job,
 )
 from wattwise_core.api.routers.sync import SyncRun as RouterSyncRun
-from wattwise_core.api.routers.sync import SyncTarget, started_run
+from wattwise_core.api.routers.sync import SyncTarget, nothing_to_sync_run, started_run
 from wattwise_core.config import Settings
 from wattwise_core.domain.enums import SourceKind
 from wattwise_core.ingestion.base import (
@@ -324,6 +324,14 @@ def _make_sync_orchestrator(
 
     async def run(target: SyncTarget) -> RouterSyncRun:
         result = await orchestrator.run(target.athlete_id, connection_id=target.connection_id)
+        # Honesty keyed on whether there was a connected SOURCE to sync, not on what the
+        # results say (API-R46c, issue #118): the orchestrator yields exactly one result
+        # per resolved connection, so an empty result set means NO connected source was
+        # touched — the run did nothing, and must NOT show the "we're pulling your
+        # training" reassurance. A source that was reached but had nothing to pull (e.g. a
+        # skipped/degraded result) DID exist, so it keeps the started-run handle.
+        if not result.results:
+            return nothing_to_sync_run(result.sync_run_id)
         return started_run(result.sync_run_id)
 
     return run

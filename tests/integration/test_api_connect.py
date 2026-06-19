@@ -820,6 +820,31 @@ def test_sync_run_both_scopes_is_422(harness: _Harness) -> None:
     assert resp.json()["type"].endswith("/validation-error")
 
 
+def test_sync_run_no_connected_source_serializes_honest_status(harness: _Harness) -> None:
+    """The route serializes the HONEST no-connected-source handle verbatim (API-R46c, #118).
+
+    When the orchestrator resolves NO connected source, it returns a ``nothing_to_sync``
+    handle; the route MUST surface that distinct status + its honest ``status_text`` on the
+    ``202``, never the falsely-reassuring "we're pulling your training" copy.
+    """
+    app = harness.client.app
+    app.dependency_overrides[sync_router.sync_orchestrator] = lambda: _nothing_to_sync
+    try:
+        resp = harness.client.post("/v1/sync/run", headers=_auth())
+    finally:
+        app.dependency_overrides[sync_router.sync_orchestrator] = lambda: harness.orchestrator
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "nothing_to_sync"
+    assert body["status_text"] != "We're pulling in your latest training now."
+    assert "nothing to bring in" in body["status_text"].lower()
+
+
+async def _nothing_to_sync(target: sync_router.SyncTarget) -> sync_router.SyncRun:
+    """A sync orchestrator that resolved no connected source (the #118 honest path)."""
+    return sync_router.nothing_to_sync_run("sync_none")
+
+
 # --------------------------------------------------------------------------- onboarding
 
 

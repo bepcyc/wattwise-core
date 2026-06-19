@@ -262,11 +262,14 @@ def test_journey_a_connect_sync_lands_canonical_data(journey: _Journey) -> None:
     # time the 202 lands: it reads "done", never a stranded "queued" (API-R33a, #115).
     assert upload.json()["status"] == "done"
 
-    # A manual sync is the only OSS trigger and is accepted (API-R46); the file-upload
-    # source has nothing to pull, so the run starts and reports accepted.
+    # A manual sync is the only OSS trigger (API-R46). The file upload is CONNECTIONLESS
+    # (LIN-R1.1) — it created no connection — so there is no connected source to pull from:
+    # the run honestly reports "nothing_to_sync" rather than falsely claiming a sync is
+    # happening (API-R46c, #118). The upload's data already landed via the import path above.
     run = journey.client.post("/v1/sync/run", headers=journey.auth)
     assert run.status_code == 202, run.text
-    assert run.json()["status"] == "accepted"
+    assert run.json()["status"] == "nothing_to_sync"
+    assert run.json()["status_text"] != "We're pulling in your latest training now."
 
     # The uploaded ride (2024-01-02) is now a canonical activity on the analytics surface.
     after = journey.client.get(
