@@ -11146,7 +11146,7 @@
     },
     "/v1/connections/{source}/complete": {
       "post": {
-        "description": "Complete an ``api_key`` connection: probe, then store, then persist (API-R44).\n\nOrder is load-bearing (AUTH-R17): the MANDATORY read-only probe runs FIRST against\nthe raw key; only on success is the key envelope-encrypted into an opaque\n``credential_ref`` (the raw value is discarded, AUTH-R16) and a ``connected`` row\nwritten. A failed probe \u2192 ``422 credential-invalid`` and NO half-connected row is\ncreated. A non-``api_key`` source (e.g. ``file_upload``) \u2192 ``422`` (it has no\n``complete`` step). An unknown source \u2192 ``404``.",
+        "description": "Complete an ``api_key`` connection: probe, then store, then persist (API-R44).\n\nOrder is load-bearing (AUTH-R17): the MANDATORY read-only probe runs FIRST against\nthe raw key; only on success is the key envelope-encrypted into an opaque\n``credential_ref`` (the raw value is discarded, AUTH-R16) and a ``connected`` row\nwritten. A wired probe that rejects the key \u2192 ``422 credential-invalid``; an UNWIRED\nprobe \u2192 the DISTINCT ``422 connector-unavailable`` (QUAL-R13(d)/(e)); either way NO\nhalf-connected row is created. A non-``api_key`` source (e.g. ``file_upload``) \u2192\n``422`` (no ``complete`` step). An unknown source \u2192 ``404``.",
         "operationId": "completeConnection",
         "parameters": [
           {

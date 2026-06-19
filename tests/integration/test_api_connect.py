@@ -47,6 +47,7 @@ from wattwise_core.api.auth import Principal, Scope, authenticate
 from wattwise_core.api.deps import get_agent_state_session, get_db, get_settings
 from wattwise_core.api.errors import install_error_handlers
 from wattwise_core.api.ratelimit import RateLimiter
+from wattwise_core.api.routers import connection_seams
 from wattwise_core.api.routers import connections as connections_router
 from wattwise_core.api.routers import connections_management as connections_mgmt_router
 from wattwise_core.api.routers import imports as imports_router
@@ -389,6 +390,58 @@ def test_complete_bad_key_is_422_with_no_half_connected_row(harness: _Harness) -
     assert resp.status_code == 422
     assert resp.json()["type"].endswith("/credential-invalid")
     # The probe rejected it, so nothing was stored and no half-connected row exists.
+    assert harness.sink.stored == []
+    assert _connection_count(harness) == 0
+
+
+def test_complete_with_unwired_probe_is_connector_unavailable_not_credential_invalid(
+    harness: _Harness,
+) -> None:
+    """An UNWIRED probe -> 422 connector-unavailable with NON-BLAMING title, not credential-invalid.
+
+    Issue #119 / API-R44 / QUAL-R13(d)(e): the OSS build ships the PRODUCTION
+    ``_unconfigured_probe`` (the fail-closed default the app factory leaves in place when
+    no adapter probe is registered), which rejects EVERY key — including a perfectly valid
+    one. That failure is the connector being inert in this build, NOT a bad credential, so
+    it MUST surface the DISTINCT ``connector-unavailable`` type with copy that does not
+    blame the athlete's key, and MUST NOT leave a half-connected row. The blaming string
+    lives in the catalog TITLE (``body['title']``), so the no-blame guarantee is asserted
+    THERE — the old ``credential-invalid`` title ("Those sign-in details didn't work …")
+    must not appear, and the connector-unavailable title must.
+    """
+    app = harness.client.app
+    # Swap the in-test fake probe for the REAL production unwired default seam, so this
+    # exercises the shipped fail-closed path — not a mock that passes or a mock that
+    # rejects as a bad credential.
+    previous = app.dependency_overrides[connections_router.credential_probe]
+    app.dependency_overrides[connections_router.credential_probe] = lambda: (
+        connection_seams._unconfigured_probe
+    )
+    try:
+        resp = harness.client.post(
+            "/v1/connections/intervals_icu/complete",
+            headers=_auth(),
+            # A syntactically valid key (a real self-hoster's correct key would look the
+            # same): the point is the connector is inert, not that the key is malformed.
+            json={"api_key": "a-perfectly-valid-looking-key"},
+        )
+    finally:
+        app.dependency_overrides[connections_router.credential_probe] = previous
+
+    assert resp.status_code == 422
+    body = resp.json()
+    # The DISTINCT type — a not-enabled connector is never reported as a bad credential.
+    assert body["type"].endswith("/connector-unavailable")
+    assert not body["type"].endswith("/credential-invalid")
+    # The TITLE carries no blame (the QUAL-R13(e) bug lived in the catalog title).
+    assert body["title"] == "This source isn't available to connect here"
+    assert "didn't work" not in body["title"].lower()
+    assert "sign-in details" not in body["title"].lower()
+    # The field error branches on the distinct machine code, and the detail points at
+    # file upload rather than re-checking the key.
+    assert body["errors"][0]["code"] == "connector_unavailable"
+    assert "upload" in body["detail"].lower()
+    # Fail-closed is unchanged: nothing stored, NO half-connected row (AUTH-R17).
     assert harness.sink.stored == []
     assert _connection_count(harness) == 0
 

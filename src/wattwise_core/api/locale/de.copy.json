@@ -19,6 +19,11 @@
     "code": "invalid_credential",
     "text": "Der Schlüssel hat nicht funktioniert — prüf ihn und versuch es noch einmal."
   },
+  "connection.connector_unavailable_detail": {
+    "kind": "error",
+    "code": "connector_unavailable",
+    "text": "Die API-Schlüssel-Synchronisierung ist in dieser Version nicht aktiviert. Lade stattdessen eine Aktivitätsdatei hoch, um deine Fahrten einzulesen."
+  },
   "connection.key_archetype_only": {
     "kind": "validation",
     "code": "unsupported_archetype",
