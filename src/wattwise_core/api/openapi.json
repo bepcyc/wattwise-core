@@ -4797,7 +4797,7 @@
         "type": "object"
       },
       "SyncRun": {
-        "description": "A started sync-run handle (``202``, API-R46a).\n\n``status`` reflects that the run was accepted and is in flight; ``status_text`` is\njargon-free athlete copy (API-R21/HLT-R7). No secret, watermark, or adapter\ninternal is exposed.",
+        "description": "A sync-run handle (``202``, API-R46a/API-R46c).\n\n``status`` is a stable machine token a client branches on (QUAL-R13(d), never the\nsentence): ``accepted`` when a connected source was actually started, ``nothing_to_sync``\nwhen the owner has NO connected source to pull from so the run did nothing (API-R46c \u2014\nno false \"we're pulling your training\" reassurance). ``status_text`` is the matching\njargon-free athlete copy (API-R21/HLT-R7). No secret, watermark, or adapter internal is\nexposed.",
         "properties": {
           "started_at": {
             "format": "date-time",
@@ -4807,7 +4807,8 @@
           "status": {
             "enum": [
               "accepted",
-              "running"
+              "running",
+              "nothing_to_sync"
             ],
             "title": "Status",
             "type": "string"
