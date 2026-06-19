@@ -258,7 +258,9 @@ def test_journey_a_connect_sync_lands_canonical_data(journey: _Journey) -> None:
         files={"file": ("ride.fit", _RIDE_FIT.read_bytes(), "application/octet-stream")},
     )
     assert upload.status_code == 202, upload.text
-    assert upload.json()["status"] == "queued"
+    # The OSS import ingests SYNCHRONOUSLY in-request, so the job is already TERMINAL by the
+    # time the 202 lands: it reads "done", never a stranded "queued" (API-R33a, #115).
+    assert upload.json()["status"] == "done"
 
     # A manual sync is the only OSS trigger and is accepted (API-R46); the file-upload
     # source has nothing to pull, so the run starts and reports accepted.

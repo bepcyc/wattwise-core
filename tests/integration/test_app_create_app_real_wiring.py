@@ -33,6 +33,8 @@ Requirement IDs: API-R4, API-R14, API-R15, API-R15a, API-R32, AUTH-R3, MEM-R3, P
 
 from __future__ import annotations
 
+import datetime as _dt
+import sys
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -44,10 +46,21 @@ from starlette.testclient import TestClient
 from wattwise_core.agent.memory import MemoryItem, MemoryItemKind
 from wattwise_core.agent.state_db import build_agent_state_database
 from wattwise_core.api.app import create_app
+from wattwise_core.api.connection_catalog import FILE_IMPORT_SOURCE_KEY
 from wattwise_core.config import Settings, load_settings
+from wattwise_core.domain.enums import SourceKind
 from wattwise_core.identity import OWNER_ATHLETE_ID
-from wattwise_core.persistence.models import Athlete, Base, Sport
+from wattwise_core.persistence.models import Athlete, Base, SourceDescriptor, Sport
 from wattwise_core.security.crypto import EnvelopeCipher
+
+# ``tools`` lives at the repo root (not an installed package); forge a REAL decodable FIT the
+# same way test_fit_forge does (sys.path bootstrap, any import-mode) so the import below drives
+# the REAL file-import adapter + IngestService — not a stub the fake processor would accept.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.fit_forge import forge_ride  # noqa: E402  (after the sys.path bootstrap)
 
 pytestmark = pytest.mark.integration
 
@@ -89,6 +102,15 @@ async def _seed(app: FastAPI, settings: Settings) -> None:
         await conn.run_sync(Base.metadata.create_all)
     async with database.session() as session:
         session.add(Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True))
+        # The built-in file_import descriptor the initial migration seeds (LIN-R1.1) — required
+        # for the real import processor to land an upload; create_all builds the schema only.
+        session.add(
+            SourceDescriptor(
+                source_key=FILE_IMPORT_SOURCE_KEY,
+                display_name="Activity files",
+                kind=SourceKind.FILE_UPLOAD,
+            )
+        )
         await session.flush()  # the sport row must exist before the athlete's current_sport FK
         session.add(
             Athlete(
@@ -261,6 +283,95 @@ def test_no_advertised_endpoint_500s_on_no_llm(
             resp.request.url,
             resp.status_code,
         )
+
+
+def test_import_job_reaches_done_after_synchronous_ingest(
+    no_llm: tuple[TestClient, dict[str, str]],
+) -> None:
+    """API-R33a regression (#115): a successful import reaches the TERMINAL ``done`` status.
+
+    Drives the REAL factory-wired import processor (api.wiring) over a REAL decodable FIT, so
+    the synchronous decode→ingest actually runs in-request and lands a canonical activity. The
+    persisted job (the ``GET /v1/imports/{id}`` read surface) MUST then read ``done`` — never the
+    non-terminal ``queued`` the bug stranded it at, even though the activity was already written.
+    Asserts the OBSERVABLE behavior end-to-end: the 202 body's terminal status AND the
+    polled-after read both report ``done`` (and the imported ride is canonically present).
+    """
+    client, auth = no_llm
+    fit = forge_ride(start=_dt.datetime(2026, 6, 1, 10, 0, tzinfo=_dt.UTC))
+
+    created = client.post(
+        "/v1/imports",
+        headers=auth,
+        files={"file": ("ride.fit", fit, "application/octet-stream")},
+    )
+    assert created.status_code == 202, created.text
+    body = created.json()
+    # The synchronous OSS path reaches its terminal status in one step (API-R33a): NOT queued.
+    assert body["status"] == "done", body
+    job_id = body["import_job_id"]
+
+    # The polled read surface — the exact route the tester reported stuck at "queued" — agrees.
+    polled = client.get(f"/v1/imports/{job_id}", headers=auth)
+    assert polled.status_code == 200, polled.text
+    assert polled.json()["status"] == "done", polled.json()
+
+    # And the work the "done" claims is real: the imported ride landed as a canonical activity.
+    activities = client.get("/v1/activities", headers=auth)
+    assert activities.status_code == 200, activities.text
+    assert activities.json()["data"], "the imported ride must be canonically present"
+
+
+def test_import_job_reaches_failed_when_ingest_raises_post_acceptance(
+    no_llm: tuple[TestClient, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API-R33a fail-closed (#115): a post-acceptance ingest failure reaches TERMINAL ``failed``.
+
+    The upload passes extension/size/decode validation (so it is ACCEPTED, 202), then the real
+    factory-wired processor's synchronous ``IngestService.ingest`` raises an INTERNAL error. The
+    job MUST be persisted reading ``failed`` — never stranded at ``queued`` and never a bare 5xx
+    with no job row to poll. Asserts the OBSERVABLE behavior: the 202 body AND the polled read
+    surface both report ``failed``. ``IngestService.ingest`` is patched (not the seam) so the REAL
+    ``api.wiring`` exception handling is exercised.
+    """
+    client, auth = no_llm
+
+    async def _boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("ingest blew up mid-write")
+
+    # Patch the engine method the real processor calls; the wiring's except-branch must catch it.
+    monkeypatch.setattr("wattwise_core.ingestion.ingest.IngestService.ingest", _boom, raising=True)
+    fit = forge_ride(start=_dt.datetime(2026, 6, 2, 10, 0, tzinfo=_dt.UTC))
+
+    created = client.post(
+        "/v1/imports",
+        headers=auth,
+        files={"file": ("ride.fit", fit, "application/octet-stream")},
+    )
+    # Accepted (passed pre-ingest validation), then the ingest failed -> terminal "failed".
+    assert created.status_code == 202, created.text
+    body = created.json()
+    assert body["status"] == "failed", body
+    job_id = body["import_job_id"]
+
+    polled = client.get(f"/v1/imports/{job_id}", headers=auth)
+    assert polled.status_code == 200, polled.text
+    assert polled.json()["status"] == "failed", polled.json()
+
+    # Idempotency (API-R33a): the "please try again" the failed copy invites must CONVERGE,
+    # not orphan a new row each retry. Re-uploading the SAME failing file re-derives the SAME
+    # deterministic job id, so the list shows exactly one failed job, not two.
+    retry = client.post(
+        "/v1/imports",
+        headers=auth,
+        files={"file": ("ride.fit", fit, "application/octet-stream")},
+    )
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["import_job_id"] == job_id, "a same-file retry must converge to one row"
+    listed = client.get("/v1/imports", headers=auth)
+    assert listed.status_code == 200, listed.text
+    assert [j["import_job_id"] for j in listed.json()["data"]] == [job_id], listed.json()
 
 
 # --- the WITH-LLM path: the SAME factory binds the live engine without 500-ing the wiring ---
