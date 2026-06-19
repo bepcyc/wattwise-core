@@ -1,5 +1,6 @@
 {
   "de": {
+    "connection.connector_unavailable_detail": "Die API-Schlüssel-Synchronisierung ist in dieser Version nicht aktiviert. Lade stattdessen eine Aktivitätsdatei hoch, um deine Fahrten einzulesen.",
     "connection.credential_rejected": "Der Schlüssel hat nicht funktioniert — prüf ihn und versuch es noch einmal.",
     "connection.credential_storage_disabled": "Die Speicherung von Zugangsdaten ist deaktiviert, bis ein Verschlüsselungsschlüssel konfiguriert ist.",
     "connection.credential_storage_disabled_detail": "Konfiguriere WATTWISE_ENCRYPTION_ROOT_KEY und starte neu, bevor du Quellen verbindest, die API-Schlüssel speichern. Datei-Uploads funktionieren weiter ohne Zugangsdatenspeicher.",
@@ -11,6 +12,7 @@
     "validation.signature_type_required": "Sag uns, um welche Art von Signatur es sich handelt, und versuch es noch einmal."
   },
   "en": {
+    "connection.connector_unavailable_detail": "API-key sync isn't turned on in this build. Upload an activity file to bring in your rides instead.",
     "connection.credential_rejected": "That key didn't work — double-check it and try again.",
     "connection.credential_storage_disabled": "Credential storage is disabled until an encryption root key is configured.",
     "connection.credential_storage_disabled_detail": "Configure WATTWISE_ENCRYPTION_ROOT_KEY and restart before connecting sources that store API keys. File upload/import still works without credential storage.",
@@ -22,6 +24,7 @@
     "validation.signature_type_required": "Tell us which kind of signature this is and try again."
   },
   "ru": {
+    "connection.connector_unavailable_detail": "Синхронизация по API-ключу не включена в этой сборке. Загрузи файл активности, чтобы добавить свои поездки.",
     "connection.credential_rejected": "Этот ключ не подошёл — проверь его и попробуй ещё раз.",
     "connection.credential_storage_disabled": "Хранилище ключей отключено, пока не настроен ключ шифрования.",
     "connection.credential_storage_disabled_detail": "Настрой WATTWISE_ENCRYPTION_ROOT_KEY и перезапусти сервис перед подключением источников, которые хранят API-ключи. Загрузка файлов работает и без хранилища ключей.",

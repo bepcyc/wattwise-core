@@ -19,6 +19,11 @@
     "code": "invalid_credential",
     "text": "Этот ключ не подошёл — проверь его и попробуй ещё раз."
   },
+  "connection.connector_unavailable_detail": {
+    "kind": "error",
+    "code": "connector_unavailable",
+    "text": "Синхронизация по API-ключу не включена в этой сборке. Загрузи файл активности, чтобы добавить свои поездки."
+  },
   "connection.key_archetype_only": {
     "kind": "validation",
     "code": "unsupported_archetype",

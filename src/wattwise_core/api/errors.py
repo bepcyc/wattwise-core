@@ -21,8 +21,8 @@ Requirements realized here (doc 60):
   populated ``errors[]`` using a JSON Pointer (``pointer``) into the body or a
   ``parameter`` name for query/path violations.
 - **ERR-R7** Status-code usage table (the catalog binds a default status per type).
-- **ERR-R8** Closed problem-type catalog (21 slugs); new types are additive, existing
-  meaning frozen.
+- **ERR-R8** Closed problem-type catalog (the spec's 21 canonical slugs plus the
+  additive engine extras built below); new types are additive, existing meaning frozen.
 - **AUTH-R9** Auth failures expose no object contents/internal ids/stack traces/token
   contents (the ``unauthenticated``/``insufficient-scope`` documents carry only the
   generic catalog copy, never the rejected credential).
@@ -110,6 +110,7 @@ def _catalog() -> dict[str, ProblemType]:
         ProblemType("import-rejected", 422, "We couldn't read that file"),
         ProblemType("decision-conflict", 409, "That plan was already decided"),
         ProblemType("credential-invalid", 422, "Those sign-in details didn't work"),
+        ProblemType("connector-unavailable", 422, "This source isn't available to connect here"),
         ProblemType("credential-storage-disabled", 422, "Credential storage is not enabled"),
         ProblemType("internal-error", 500, "Something went wrong on our side"),
     )
