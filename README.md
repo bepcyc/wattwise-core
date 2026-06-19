@@ -134,6 +134,22 @@ ships an **intervals.icu** api-key connector (its catalog is `GET /v1/connection
 but its connect path is intentionally inert here — it returns `422` until a credential probe is
 configured — so it will not pull data in the stock OSS container. Stick with file upload above.
 
+Set your FTP so the power numbers light up:
+
+```sh
+# 2b. Set your sport and FTP (watts). Training Stress Score (TSS), Intensity Factor,
+#     and the whole fitness/fatigue/form chart are computed FROM your FTP — without it
+#     they stay null/zero, so set it once before reading the chart. Use your real FTP.
+curl -fsS -X PUT "$BASE/v1/athlete" -H "$AUTH" \
+  -H 'Content-Type: application/json' -d '{"current_sport":"cycling"}'
+curl -fsS -X PUT "$BASE/v1/athlete/signature" -H "$AUTH" \
+  -H 'Content-Type: application/json' -d '{"ftp_w":250}'
+```
+
+> First chart all zeros? You almost certainly skipped this step. `GET /v1/onboarding/status`
+> will say so — its `suggested_next_step` reads `set_ftp` until an FTP for your current sport
+> is set, then advances to `all_set`.
+
 Now read your data back and ask the coach:
 
 ```sh

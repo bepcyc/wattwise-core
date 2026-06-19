@@ -54,12 +54,13 @@ from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import onboarding as onboarding_router
 from wattwise_core.api.routers import sync as sync_router
 from wattwise_core.config import Settings, load_settings
-from wattwise_core.domain.enums import ConnectionStatus
+from wattwise_core.domain.enums import ConnectionStatus, SignatureOrigin
 from wattwise_core.persistence.models import (
     Activity,
     Athlete,
     Base,
     Connection,
+    FitnessSignature,
     SourceDescriptor,
     Sport,
 )
@@ -851,13 +852,84 @@ def test_onboarding_api_key_connect_does_not_auto_enqueue_sync(harness: _Harness
 
 
 def test_onboarding_complete_once_data_lands(harness: _Harness) -> None:
-    """Once a canonical activity exists, onboarding reports complete + all_set (API-R46)."""
+    """Data landed AND current-sport FTP set → onboarding reports complete + all_set (API-R46).
+
+    The athlete seed leaves ``current_sport`` unset, so reaching ``all_set`` now requires
+    BOTH a landed activity AND a resolvable current-sport FTP signature (API-R46b): without
+    FTP the power TSS/PMC are a silent zero, so onboarding must keep guiding the user.
+    """
     _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    _record_ftp(harness, sport="cycling", ftp_w=250.0)
     resp = harness.client.get("/v1/onboarding/status", headers=_auth())
     body = resp.json()
     assert body["first_data_ready"] is True
     assert body["first_sync_state"] == "complete"
     assert body["suggested_next_step"] == "all_set"
+
+
+def test_onboarding_data_ready_but_ftp_unset_suggests_set_ftp(harness: _Harness) -> None:
+    """Rides landed but FTP never set → suggest set_ftp, NOT all_set (issue #116 / API-R46b).
+
+    This is the reported papercut: a first-timer uploads rides, but with no FTP the power
+    TSS/IF are null and the PMC is all zeros. ``first_sync_state`` is still ``complete``
+    (the data DID land — the zero chart is CORRECT given no FTP, not an analytics bug), but
+    ``suggested_next_step`` must surface the FTP prerequisite so the first chart is not a
+    confusing silent zero. The athlete seed leaves ``current_sport`` unset, so no FTP resolves.
+    """
+    _land_activity(harness)
+    resp = harness.client.get("/v1/onboarding/status", headers=_auth())
+    body = resp.json()
+    assert body["first_data_ready"] is True
+    assert body["first_sync_state"] == "complete"  # data landed; zero chart is correct, not a bug
+    assert body["suggested_next_step"] == "set_ftp"
+
+
+def test_onboarding_ftp_set_advances_past_set_ftp(harness: _Harness) -> None:
+    """Setting the current-sport FTP advances the suggestion from set_ftp → all_set (API-R46b).
+
+    Proves the gate flips on the SAME harness: identical data, the only delta is recording
+    an effective current-sport FTP signature with a non-NULL ``ftp_w``.
+    """
+    _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    before = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert before["suggested_next_step"] == "set_ftp"  # current_sport set, but no FTP yet
+
+    _record_ftp(harness, sport="cycling", ftp_w=250.0)
+    after = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert after["suggested_next_step"] == "all_set"
+
+
+def test_onboarding_ftp_for_other_sport_still_suggests_set_ftp(harness: _Harness) -> None:
+    """An FTP set for a NON-current sport does not satisfy the gate (API-R46b gating subtlety).
+
+    Gating is on the FTP the analytics actually RESOLVES for ``current_sport`` (ANL-R9), not
+    on the mere presence of any signature row. A signature for ``running`` while the current
+    sport is ``cycling`` never resolves into the cycling power stack → still ``set_ftp``.
+    """
+    _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    _register_sport(harness, "running", "Running", has_power=False)
+    _record_ftp(harness, sport="running", ftp_w=250.0)
+    body = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert body["first_data_ready"] is True
+    assert body["suggested_next_step"] == "set_ftp"  # the cycling FTP is still unset
+
+
+def test_onboarding_signature_row_with_null_ftp_still_suggests_set_ftp(harness: _Harness) -> None:
+    """A current-sport signature whose ``ftp_w`` is NULL still counts as FTP-unset (API-R46b).
+
+    The gate is ``ftp_w IS NOT NULL`` — NOT the existence of a signature row. A signature
+    that carries, say, only an HR threshold but no power FTP cannot feed power TSS, so
+    onboarding must keep suggesting ``set_ftp``.
+    """
+    _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    _record_ftp(harness, sport="cycling", ftp_w=None, threshold_hr_bpm=165)
+    body = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert body["first_data_ready"] is True
+    assert body["suggested_next_step"] == "set_ftp"  # row exists, but ftp_w is NULL
 
 
 # --------------------------------------------------------------------------- db helpers
@@ -901,3 +973,60 @@ async def _insert_activity(session: AsyncSession) -> None:
         )
     )
     await session.commit()
+
+
+def _set_current_sport(harness: _Harness, sport: str) -> None:
+    """Set the owner's ``current_sport`` (the analytics FTP-resolution scope, API-R46b)."""
+
+    async def _apply(session: AsyncSession) -> None:
+        owner = (
+            await session.execute(
+                select(Athlete).where(Athlete.athlete_id == uuid.UUID(harness.athlete_id))
+            )
+        ).scalar_one()
+        owner.current_sport = sport
+        await session.commit()
+
+    harness.run(_apply)
+
+
+def _register_sport(harness: _Harness, code: str, name: str, *, has_power: bool) -> None:
+    """Register an extra sport so a signature can reference it (FK into the sport registry)."""
+
+    async def _apply(session: AsyncSession) -> None:
+        session.add(Sport(sport_code=code, display_name=name, has_mechanical_power=has_power))
+        await session.commit()
+
+    harness.run(_apply)
+
+
+def _record_ftp(
+    harness: _Harness,
+    *,
+    sport: str,
+    ftp_w: float | None,
+    threshold_hr_bpm: int | None = None,
+    effective_date: _dt.date | None = None,
+) -> None:
+    """Record an effective-dated FTP signature for ``sport`` (the write the power stack reads).
+
+    ``ftp_w=None`` records a signature row with NO power FTP (e.g. an HR-only threshold), to
+    prove the onboarding gate keys on the resolved ``ftp_w``, not on row presence (API-R46b).
+    """
+    effective = effective_date or _dt.date(2026, 5, 1)
+
+    async def _apply(session: AsyncSession) -> None:
+        session.add(
+            FitnessSignature(
+                athlete_id=uuid.UUID(harness.athlete_id),
+                signature_type=sport,
+                effective_date=effective,
+                effective_to=None,
+                origin=SignatureOrigin.USER_ENTERED,
+                ftp_w=ftp_w,
+                threshold_hr_bpm=threshold_hr_bpm,
+            )
+        )
+        await session.commit()
+
+    harness.run(_apply)
