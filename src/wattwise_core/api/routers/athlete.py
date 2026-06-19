@@ -27,7 +27,7 @@ The identity/scope/session dependencies are override seams the app factory wires
 ``dependency_overrides``), mirroring the performance/activities routers. No field is
 source-shaped or carries a provider name (AUTH-R15).
 
-Requirement IDs: API-R40, API-R51, AUTH-R3, AUTH-R7, AUTH-R11, AUTH-R18, GBO-R13,
+Requirement IDs: API-R40, API-R51, API-R52, AUTH-R3, AUTH-R7, AUTH-R11, AUTH-R18, GBO-R13,
 GBO-R16a, GBO-R26, SCHEMA-R4, ERR-R6, ERR-R8.
 """
 
@@ -250,7 +250,13 @@ def _f(value: object) -> float | None:
     "", response_model=AthleteProfile, operation_id="getAthleteProfile", dependencies=[_Read]
 )
 async def get_profile(session: Session, athlete_id: AthleteId) -> AthleteProfile:
-    """Read the one owner's profile + effective FTP signature (doc 60 §8.1)."""
+    """Read the one owner's profile + effective FTP signature (doc 60 §8.1, API-R52).
+
+    ``fitness_signature`` is the latest-effective signature for ``current_sport`` as-of today
+    (GBO-R27 / API-R46b) — ``null`` when ``current_sport`` is unset or selects a sport with no
+    current signature; deliberately ASYMMETRIC with the signature WRITE (which echoes the
+    written sport regardless of ``current_sport``, API-R52).
+    """
     owner = await _load_owner(session, athlete_id)
     sig = await _effective_signature(session, athlete_id, owner.current_sport)
     return _profile(owner, sig)
@@ -307,6 +313,13 @@ async def set_signature(
     row in place rather than violating the uniqueness key. ``signature_type`` defaults to
     the owner's current sport and is validated against the sport registry (GBO-R16a); an
     unregistered code → ``422 unknown_sport``. Acts ONLY on the server-derived owner id.
+
+    API-R52: the ``200`` body echoes the upserted row for THIS request's ``signature_type``,
+    INDEPENDENT of ``current_sport`` — so a successful write is always observable (never a
+    current-sport ``null`` no-op, #117) and a back-/future-dated write echoes exactly what was
+    recorded, not a re-resolved lookup. Deliberately ASYMMETRIC with the profile read (which
+    resolves the ``current_sport`` signature, API-R46b); ``current_sport`` is NOT auto-set —
+    sport selection stays the explicit change-sport action (API-R40).
     """
     owner = await _load_owner(session, athlete_id)
     sport = body.signature_type or owner.current_sport
@@ -326,12 +339,17 @@ async def set_signature(
     effective = body.effective_date or _dt.datetime.now(tz=_dt.UTC).date()
     existing = await _exact_signature(session, athlete_id, sport, effective)
     if existing is None:
-        session.add(_new_signature(athlete_id, sport, effective, body))
+        written = _new_signature(athlete_id, sport, effective, body)
+        session.add(written)
     else:
         _apply_signature(existing, body)
+        written = existing
     await session.flush()
-    sig = await _effective_signature(session, athlete_id, owner.current_sport)
-    return _profile(owner, sig)
+    # API-R52: echo the row JUST written (for its own signature_type), NOT a current_sport
+    # resolution — a successful write must never read back as a ``null`` no-op (#117). The
+    # OTHER profile fields still come straight off the unchanged ``owner`` row (current_sport
+    # included), so nothing but ``fitness_signature`` changes.
+    return _profile(owner, written)
 
 
 async def _exact_signature(

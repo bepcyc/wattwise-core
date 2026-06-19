@@ -8811,7 +8811,7 @@
     },
     "/v1/athlete": {
       "get": {
-        "description": "Read the one owner's profile + effective FTP signature (doc 60 \u00a78.1).",
+        "description": "Read the one owner's profile + effective FTP signature (doc 60 \u00a78.1, API-R52).\n\n``fitness_signature`` is the latest-effective signature for ``current_sport`` as-of today\n(GBO-R27 / API-R46b) \u2014 ``null`` when ``current_sport`` is unset or selects a sport with no\ncurrent signature; deliberately ASYMMETRIC with the signature WRITE (which echoes the\nwritten sport regardless of ``current_sport``, API-R52).",
         "operationId": "getAthleteProfile",
         "responses": {
           "200": {
@@ -9415,7 +9415,7 @@
     },
     "/v1/athlete/signature": {
       "put": {
-        "description": "Write the owner-entered FTP fitness signature the power analytics ground on (GBO-R26).\n\nThis is the load-bearing write: CTL/TSS/NP/IF/CP all resolve the effective\n:class:`FitnessSignature` for the activity's sport (doc 40), so without it the power\nsurface degrades to typed-unavailable. The row is stamped ``origin = user_entered``\nSERVER-side (never a client field) and keyed by ``(athlete_id, effective_date,\nsignature_type)``: re-setting the SAME effective date for the SAME sport UPDATES that\nrow in place rather than violating the uniqueness key. ``signature_type`` defaults to\nthe owner's current sport and is validated against the sport registry (GBO-R16a); an\nunregistered code \u2192 ``422 unknown_sport``. Acts ONLY on the server-derived owner id.",
+        "description": "Write the owner-entered FTP fitness signature the power analytics ground on (GBO-R26).\n\nThis is the load-bearing write: CTL/TSS/NP/IF/CP all resolve the effective\n:class:`FitnessSignature` for the activity's sport (doc 40), so without it the power\nsurface degrades to typed-unavailable. The row is stamped ``origin = user_entered``\nSERVER-side (never a client field) and keyed by ``(athlete_id, effective_date,\nsignature_type)``: re-setting the SAME effective date for the SAME sport UPDATES that\nrow in place rather than violating the uniqueness key. ``signature_type`` defaults to\nthe owner's current sport and is validated against the sport registry (GBO-R16a); an\nunregistered code \u2192 ``422 unknown_sport``. Acts ONLY on the server-derived owner id.\n\nAPI-R52: the ``200`` body echoes the upserted row for THIS request's ``signature_type``,\nINDEPENDENT of ``current_sport`` \u2014 so a successful write is always observable (never a\ncurrent-sport ``null`` no-op, #117) and a back-/future-dated write echoes exactly what was\nrecorded, not a re-resolved lookup. Deliberately ASYMMETRIC with the profile read (which\nresolves the ``current_sport`` signature, API-R46b); ``current_sport`` is NOT auto-set \u2014\nsport selection stays the explicit change-sport action (API-R40).",
         "operationId": "setAthleteSignature",
         "requestBody": {
           "content": {
