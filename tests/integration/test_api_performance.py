@@ -226,6 +226,32 @@ async def test_pmc_chart_ready_shape(seeded: Env) -> None:
 
 
 @pytest.mark.integration
+async def test_pmc_load_field_carries_the_real_daily_load_not_null(seeded: Env) -> None:
+    """#120: the PMC ``load`` is the real per-day canonical load, never the hardcoded ``null``.
+
+    The seeded ride is one hour at FTP on 2026-06-01 ⇒ TSS ≈ 100, so that calendar day's load —
+    the SAME value ``/load-metrics`` reports and the value the EWMA integrates — must surface as
+    ≈100, not ``null``. The OLD code hardcoded ``load: None`` on every PMC point even though
+    fitness/fatigue (which integrate that load) were non-zero. A genuinely-no-activity day
+    (2026-06-02..07) is a real ``0.0`` rest day per LOAD-R1/PMC-R2 — surfaced as ``0.0``, NOT
+    coalesced to ``null`` — so the test also pins that the rest day is the real zero, not absent.
+    """
+    client = seeded.client
+    body = (await client.get("/v1/performance/load-fitness", params=_range())).json()
+    by_date = {it["local_date"]: it["values"] for it in body["items"]}
+    ride_day = by_date["2026-06-01"]
+    assert ride_day["load"] is not None, "the ride day's load must not be the hardcoded null (#120)"
+    assert ride_day["load"] == pytest.approx(100.0, abs=1.0), "load is the canonical daily TSS"
+    # Cross-check it agrees with the dedicated /load-metrics surface (same LOAD-R1 series).
+    lm = (await client.get("/v1/performance/load-metrics", params=_range())).json()
+    lm_by_date = {it["local_date"]: it["values"]["canonical_load"] for it in lm["items"]}
+    assert ride_day["load"] == pytest.approx(lm_by_date["2026-06-01"], abs=1e-6)
+    # A no-activity day is a genuine 0.0 rest day (LOAD-R1), never silently coalesced to null.
+    rest_day = by_date["2026-06-04"]
+    assert rest_day["load"] == 0.0, "a no-activity rest day surfaces a real 0.0, not null (#120)"
+
+
+@pytest.mark.integration
 async def test_coggan_per_activity_points_carry_activity_id(seeded: Env) -> None:
     """Per-activity Coggan points carry ``activity_id`` and a computed TSS (~100)."""
     client, activity_id = seeded.client, seeded.activity_id

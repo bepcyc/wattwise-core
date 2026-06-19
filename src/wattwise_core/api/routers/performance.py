@@ -128,8 +128,13 @@ async def load_fitness(svc: Service, athlete_id: AthleteId, rng: Range) -> Chart
     series = await svc.pmc(athlete_id, frm, to)
     if len(series) == 1 and isinstance(series[0], Unavailable):
         raise _precondition_unmet("pmc_seed_unavailable", series[0].detail)
+    # The per-day canonical load that feeds the EWMA (LOAD-R1) — the SAME series
+    # ``load_metrics`` reads — so the PMC chart's ``load`` agrees with fitness/fatigue instead
+    # of always rendering ``null`` (#120). ``daily_load_series`` fills the same dense [frm, to]
+    # calendar PMC does, so the per-day lookup aligns (a real 0.0 rest day stays 0.0, never null).
+    loads = await svc.daily_load_series(athlete_id, frm, to)
     days = [frm + _dt.timedelta(days=i) for i in range(len(series))]
-    items = [_pmc_point(day, res) for day, res in zip(days, series, strict=True)]
+    items = [_pmc_point(day, res, loads.get(day)) for day, res in zip(days, series, strict=True)]
     last = series[-1] if series else None
     summary = _pmc_summary(last)
     return ChartSeries(

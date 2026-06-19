@@ -216,6 +216,13 @@ async def _write_activity_canonical(
         candidates, _ACTIVITY_SCALARS, policy, svc._resolver
     )
     local_projection = await _project_local(svc._session, athlete, activity_id, scalars)
+    # Streams resolve PER CHANNEL under each channel's effective tier (CONF-R3/SF-3);
+    # an empty policy makes this the candidate's adapter tier (the prior behaviour). Resolved
+    # HERE (before the row write) so the GAP-R3 channel UNION is available to derive the
+    # has_gps/has_cadence presence flags on the canonical row — built BEFORE the PRIV-R2 pop
+    # below so the union reflects every channel any source supplied (#120).
+    streams = _cs.resolve_streams(candidates, policy)
+    stream_channels = frozenset(streams)
     values, update_columns = _activity_values(
         activity_id,
         athlete,
@@ -224,6 +231,8 @@ async def _write_activity_canonical(
         local_projection,
         policy_version=policy.policy_version,  # CONF-R6: recorded with the values
         field_resolution=field_resolution,  # LIN-R3: per-field resolution record
+        stream_channels=stream_channels,  # GAP-R3 union for the presence flags (#120)
+        store_raw_gps=svc._store_raw_gps,  # PRIV-R2 — has_gps tracks what actually lands
     )
     await upsert(
         svc._session,
@@ -233,11 +242,9 @@ async def _write_activity_canonical(
         update_columns=update_columns,
     )
     await svc._session.flush()
-    # Streams resolve PER CHANNEL under each channel's effective tier (CONF-R3/SF-3);
-    # an empty policy makes this the candidate's adapter tier (the prior behaviour).
-    streams = _cs.resolve_streams(candidates, policy)
     # PRIV-R2: honour the athlete's raw-GPS opt-out — drop the precise-location channel
     # before canonical landing; derived non-locating metrics in the other channels land.
+    # (The union above was captured BEFORE this pop; has_gps already reflects the opt-out.)
     if not svc._store_raw_gps:
         streams.pop("latlng", None)
     best = _highest_trust(candidates)
