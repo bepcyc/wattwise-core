@@ -16,6 +16,7 @@ from wattwise_core.agent.contracts import (
     GroundVerdict,
 )
 from wattwise_core.agent.grounding import ground
+from wattwise_core.agent.grounding_match import _apply_number_scrub
 
 # --- fake canonical evidence (GROUND-R2/R4/R7) ---
 
@@ -760,3 +761,74 @@ def test_thousands_separated_token_rewrites_as_one_figure() -> None:
     res = ground(draft, claims, _FakeEvidence(metrics={"work_kj": 950.0}), [])
     assert "950,000" not in res.scrubbed_text
     assert ",000" not in res.scrubbed_text
+
+
+def test_negative_canonical_value_renders_a_single_minus_not_double_dash() -> None:
+    """#120: a within-band NEGATIVE form value publishes "-4.8", never the doubled "--4.8".
+
+    The model writes an already-negative number ("-4.8") and the canonical TSB is also -4.8. The
+    located span is the magnitude only (the shared regex carries no sign), so the OLD code spliced
+    the signed canonical replacement ("-4.8") over the "4.8" while leaving the draft's "-" in place,
+    producing "--4.8" — not a valid number and not the canonical value (GROUND-R7). The signed
+    rewrite must reconcile the draft's leading minus so a single well-formed "-4.8" ships.
+    """
+    evidence = _FakeEvidence(metrics={"tsb": -4.8})
+    result = ground(
+        "Your freshness sits at -4.8 today.", [_number("-4.8", "tsb", -4.8)], evidence, []
+    )
+    assert result.claims[0].verdict is GroundVerdict.GROUNDED
+    assert "--4.8" not in result.scrubbed_text, "the leading minus must not be doubled (#120)"
+    assert "-4.8" in result.scrubbed_text, "the canonical negative value must publish once"
+    assert result.decision is GroundDecision.PROCEED
+
+
+def test_contradicted_negative_claim_publishes_single_signed_canonical_negative() -> None:
+    """#120: a WRONG *negative* form claim is replaced by the canonical NEGATIVE value, signed once.
+
+    The model itself wrote a signed "-2.0" but canonical TSB is -4.8 (a contradiction, outside
+    tolerance). The published figure is ALWAYS the canonical value (GROUND-R7); because the draft
+    already carries a unary minus before the magnitude, the signed rewrite must reconcile it so the
+    published value is a single "-4.8" — NOT the doubled "--4.8" the pre-fix splice produced when
+    the canonical replacement and the draft both carried a sign.
+    """
+    evidence = _FakeEvidence(metrics={"tsb": -4.8})
+    result = ground("Your form is -2.0 today.", [_number("-2.0", "tsb", -2.0)], evidence, [])
+    assert result.claims[0].verdict is GroundVerdict.CONTRADICTED
+    assert "-2.0" not in result.scrubbed_text, "the model's contradicted value must not ship"
+    assert "-4.8" in result.scrubbed_text, "the canonical negative value must publish (GROUND-R7)"
+    assert "--4.8" not in result.scrubbed_text, "the reconciled minus must not be doubled (#120)"
+
+
+def test_request_echo_range_with_dash_is_unchanged_by_the_sign_fix() -> None:
+    """#120 regression: the ECHO path (a range like "5-7") is untouched — its dash stays single.
+
+    The echo path republishes the athlete's own sign-stripped token verbatim AS the replacement
+    (the shared regex omits the sign), so the sign-reconciliation guard — which only fires when the
+    replacement ITSELF begins with a minus — never engages on it. A prescriptive range echoing the
+    request's own numbers must still ship verbatim ("5-7"), with no dash change.
+    """
+    draft = "Next week: ride 5-7 efforts."
+    claims = [_prescription("5", 5.0), _prescription("7", 7.0)]
+    result = ground(draft, claims, _FakeEvidence(), [], request_numbers=frozenset({5.0, 7.0}))
+    assert "5-7" in result.scrubbed_text, "the athlete's own range echoes verbatim, single dash"
+    assert "--" not in result.scrubbed_text
+    assert result.decision is GroundDecision.PROCEED
+
+
+def test_sign_reconciliation_does_not_eat_a_range_hyphen() -> None:
+    """#120 guard: the sign-reconciliation only absorbs a UNARY minus, never a range separator.
+
+    A dash preceded by a digit ("5-7") is the hyphen BETWEEN two range members, not a unary sign on
+    the second member. If a negative canonical replacement for "7" absorbed that hyphen it would
+    corrupt the range into a misleading "5-4.8" (a 5..4.8 range) and silently drop the sign. The
+    guard therefore excludes a dash preceded by a digit/dot, so the range structure is preserved —
+    the published token keeps its own minus instead of cannibalising the range hyphen. Tested at the
+    splice directly (the full ``ground`` path for such a contradiction fails closed to regenerate).
+    """
+    claim = Claim(kind=ClaimKind.NUMBER, text="7", metric="tsb", value=7.0)
+    edited, _covered = _apply_number_scrub("Range is 5-7 today.", claim, "-4.8", [])
+    assert "5-4.8" not in edited, "the range hyphen must NOT be eaten as a sign (#120)"
+    # A genuine UNARY minus IS reconciled (no double dash) — the guard still fires there.
+    unary = Claim(kind=ClaimKind.NUMBER, text="-7", metric="tsb", value=-7.0)
+    edited2, _c2 = _apply_number_scrub("Form is -7 today.", unary, "-4.8", [])
+    assert "--4.8" not in edited2 and "-4.8" in edited2, "a unary minus reconciles to a single -4.8"

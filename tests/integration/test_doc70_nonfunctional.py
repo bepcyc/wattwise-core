@@ -270,6 +270,149 @@ async def test_gps_default_stores_latlng(tmp_path: Path) -> None:
     assert "power_w" in channels
 
 
+def _ride_with(
+    native_id: str,
+    *,
+    cadence: bool,
+    gps: bool = True,
+    cadence_stream: bool | None = None,
+    cadence_summary: bool | None = None,
+) -> GboCandidate:
+    """A ride candidate carrying a power stream plus optionally cadence / GPS streams (#120).
+
+    ``cadence`` sets BOTH the ``cadence_rpm`` stream and the ``avg_cadence_rpm`` summary together;
+    pass ``cadence_stream`` / ``cadence_summary`` explicitly to exercise the GAP-R3 union OR-branch
+    (e.g. a summary-only cadence with no stream must still set ``has_cadence``).
+    """
+    has_cadence_stream = cadence if cadence_stream is None else cadence_stream
+    has_cadence_summary = cadence if cadence_summary is None else cadence_summary
+    seconds = 60
+    streams: dict[str, Any] = {
+        "power_w": {"values": [200.0] * seconds, "sample_basis": "time", "sample_rate_hz": 1.0},
+    }
+    if gps:
+        streams["latlng"] = {
+            "values": [[48.1, 11.5]] * seconds,
+            "sample_basis": "time",
+            "sample_rate_hz": 1.0,
+        }
+    if has_cadence_stream:
+        streams["cadence_rpm"] = {
+            "values": [89] * seconds,
+            "sample_basis": "time",
+            "sample_rate_hz": 1.0,
+        }
+    payload = {
+        "start_time": _dt.datetime(2026, 6, 1, 8, 0, tzinfo=UTC),
+        "sport": "cycling",
+        "elapsed_time_s": seconds,
+        "moving_time_s": seconds,
+        "avg_power_w": 200.0,
+        "avg_cadence_rpm": 89 if has_cadence_summary else None,
+        "streams": streams,
+    }
+    return GboCandidate(
+        gbo_type="activity",
+        source_descriptor_id="placeholder",
+        source_native_id=native_id,
+        content_hash=content_hash(native_id.encode()),
+        payload=payload,
+        trust_tier=Fidelity.RAW_STREAM,
+        fetched_at=_dt.datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+    )
+
+
+async def _landed_activity(
+    tmp_path: Path, cand: GboCandidate, *, store_raw_gps: bool = True
+) -> Activity:
+    """Land one ride end-to-end through the real IngestService; return the persisted Activity."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'flags.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    try:
+        async with factory() as session:
+            athlete_id, descriptor_id = await _seed_minimal(session)
+            svc = IngestService(session, store_raw_gps=store_raw_gps)
+            await svc.ingest(athlete_id, descriptor_id, [cand])
+            await session.commit()
+            row = (await session.execute(select(Activity))).scalars().one()
+            return row
+    finally:
+        await engine.dispose()
+
+
+async def test_activity_flags_reflect_landed_streams_on_canonical_write(tmp_path: Path) -> None:
+    """#120: ``has_cadence``/``has_gps`` are DERIVED from the GAP-R3 union, not the silent False.
+
+    A ride with cadence + GPS streams (and an ``avg_cadence_rpm`` summary) must persist
+    ``has_cadence=True`` and — under the default ``store_raw_gps=True`` where the canonical
+    ``latlng`` channel lands — ``has_gps=True``. The OLD write derived only ``has_power``/
+    ``has_hr`` and left both these flags at the model default ``False``, so the row contradicted
+    its own data (``has_cadence:false`` next to ``avg_cadence_rpm:89``; ``has_gps:false`` with a
+    GPS-bearing file). ``has_power``/``has_hr`` stay correct as a control.
+    """
+    act = await _landed_activity(tmp_path, _ride_with("ride-cad-gps", cadence=True))
+    assert act.has_cadence is True, "cadence stream + avg_cadence_rpm must set has_cadence (#120)"
+    assert act.has_gps is True, "a landed latlng channel must set has_gps under the default (#120)"
+    assert act.has_power is True  # control: the existing derivation is unchanged
+    assert act.avg_cadence_rpm == 89  # the summary the flag must agree with
+
+
+async def test_activity_has_cadence_false_when_no_cadence_present(tmp_path: Path) -> None:
+    """#120: a ride with NO cadence stream and NO cadence summary persists ``has_cadence=False``.
+
+    The flag is a real union signal, not always-True: absent both the ``cadence_rpm`` channel and
+    the ``avg_cadence_rpm`` summary, ``has_cadence`` must be ``False`` (the GAP-R3 absent case).
+    """
+    act = await _landed_activity(tmp_path, _ride_with("ride-no-cad", cadence=False))
+    assert act.has_cadence is False, "no cadence channel and no summary ⇒ has_cadence False (#120)"
+    assert act.has_gps is True  # GPS still present, so its flag still tracks the landed channel
+
+
+async def test_has_cadence_true_from_summary_only_no_cadence_stream(tmp_path: Path) -> None:
+    """#120: the GAP-R3 union OR-branch — a summary-only ``avg_cadence_rpm`` sets ``has_cadence``.
+
+    A source may report an ``avg_cadence_rpm`` summary with NO ``cadence_rpm`` stream (GBO-R15
+    summary-only). ``has_cadence`` must still be ``True`` from that summary alone. This pins the
+    summary side of the OR independently of the stream side: a derivation that only checked the
+    stream channel (dropping ``or avg_cadence_rpm``) would wrongly read ``False`` here.
+    """
+    cand = _ride_with("ride-cad-summary", cadence=False, cadence_summary=True)
+    assert "cadence_rpm" not in cand.payload["streams"], "fixture must carry NO cadence stream"
+    act = await _landed_activity(tmp_path, cand)
+    assert act.has_cadence is True, "a summary-only avg_cadence_rpm must set has_cadence (#120)"
+    assert act.avg_cadence_rpm == 89
+
+
+async def test_has_cadence_true_from_stream_only_no_summary(tmp_path: Path) -> None:
+    """#120: the GAP-R3 union OR-branch — a ``cadence_rpm`` stream with NO summary sets the flag.
+
+    The mirror of the summary-only case: a cadence stream landed without any ``avg_cadence_rpm``
+    summary scalar must still set ``has_cadence`` from the stream channel alone, pinning the stream
+    side of the OR independently.
+    """
+    cand = _ride_with("ride-cad-stream", cadence=False, cadence_stream=True)
+    assert cand.payload["avg_cadence_rpm"] is None, "fixture must carry NO cadence summary"
+    act = await _landed_activity(tmp_path, cand)
+    assert act.has_cadence is True, "a cadence_rpm stream alone must set has_cadence (#120)"
+
+
+async def test_has_gps_false_under_raw_gps_opt_out_matches_withheld_track(tmp_path: Path) -> None:
+    """#120 + PRIV-R2/API-R49: under the raw-GPS opt-out, ``has_gps`` is False (track withheld).
+
+    ``has_gps`` reflects whether the canonical ``latlng`` channel actually LANDS, not merely
+    whether the file carried GPS: the opt-out drops the channel, ``GET /map`` must serve
+    ``points:[]`` (API-R49 ``has_gps=false``), so the flag stays consistent with what can be
+    served — ``False`` — rather than advertising a track that no longer exists.
+    """
+    act = await _landed_activity(
+        tmp_path, _ride_with("ride-optout", cadence=True), store_raw_gps=False
+    )
+    assert act.has_gps is False, "opt-out withholds the latlng channel ⇒ has_gps False (PRIV-R2)"
+    assert act.has_cadence is True  # non-locating cadence is unaffected by the GPS opt-out
+
+
 async def test_gps_opt_out_withholds_verbatim_original_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
