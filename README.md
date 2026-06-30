@@ -61,14 +61,14 @@ each), and an LLM key for the coach (any OpenAI-compatible endpoint —
 to keep everything on your LAN). Build the image from this repo, then start it:
 
 ```sh
-# Build from source — matches these docs and works on any CPU (amd64 OR arm64).
+# Build from source — matches these docs and works on any machine, Intel/AMD or ARM.
 # On Apple Silicon, a Raspberry Pi, or any ARM box, build locally (this is the path to use).
 docker build -t wattwise-core:local .
 
-# Prefer not to build? A released image exists, but note it is the pinned v0.0.1 snapshot,
-# is linux/amd64 only, and may trail these docs:
-#   docker pull ghcr.io/bepcyc/wattwise-core:v0.0.1    # amd64 only; if you use it, put this
-#                                                       # name in the `docker run` below.
+# Prefer not to build? A prebuilt image also exists, but it runs on x86/Intel machines only
+# (not Apple Silicon, a Raspberry Pi, or other ARM hardware):
+#   docker pull ghcr.io/bepcyc/wattwise-core:v0.0.1    # x86/Intel only; if you use it, put
+#                                                       # this name in the `docker run` below.
 
 # Two secrets — keep SIGNING_KEY in your shell, it is also your login secret below
 ENCRYPTION_KEY=$(python3 -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())')
@@ -93,7 +93,7 @@ curl --retry 15 --retry-delay 2 --retry-all-errors -fsS http://127.0.0.1:8000/re
 > container first: `docker rm -f wattwise`.
 
 That is a complete setup. Your database and your uploaded files live on the `wattwise_data`
-volume. On first boot the container builds its own database, so there is no extra migration
+volume. On first boot the container builds its own database, so there is no extra setup
 step. Your data is encrypted at rest, every request needs your token, the process runs as an
 unprivileged user, and a bad configuration stops startup instead of running on quietly.
 
@@ -129,10 +129,9 @@ Then upload the file you exported:
 curl -fsS -X POST "$BASE/v1/imports" -H "$AUTH" -F file=@/path/to/your-activity.fit
 ```
 
-File upload is the supported way to get data in on this self-hosted image. The engine also
-ships an **intervals.icu** api-key connector (its catalog is `GET /v1/connections/available`),
-but its connect path is intentionally inert here — it returns `422` until a credential probe is
-configured — so it will not pull data in the stock OSS container. Stick with file upload above.
+File upload is how you get your data in on this self-hosted build. Automatic sync from a
+service like **intervals.icu** isn't available in this build yet — for now, bring your data in
+by uploading files, as shown above.
 
 Set your FTP so the power numbers light up:
 
@@ -196,64 +195,46 @@ A few rules hold the whole thing together:
 - **You approve the plans.** When the coach moves from explaining your data toward suggesting
   a training plan, it stops at an approval step rather than acting on its own.
 
-Storage is a single connection string: SQLite by default, or PostgreSQL or MariaDB by
-changing that one setting, with no code changes.
+It runs on SQLite out of the box, and you can point it at PostgreSQL or MariaDB when you
+outgrow that — no code changes.
 
 ## Roadmap
 
-Releases are named after the people who changed how endurance sport is measured and
-coached. Each name marks what that release is *about*. Every open issue is tagged with the
-milestone it belongs to (`v0.0.1-banister`, `v0.0.2-coggan`, `future`, or `backlog`), so it
-is always clear whether a piece of work is shipping in a named version, is on the longer-term
-frontier, or is parked for triage.
+Releases are named after the people who changed how endurance sport is measured and coached —
+each name marks what that release is *about*. The detailed, tracked work for every release
+lives on its **[GitHub milestone](https://github.com/bepcyc/wattwise-core/milestones)**, which
+is where to look if you want to follow the engineering or help with it.
 
 ### v0.0.1 — **Banister** · the honest foundation
 
 Named for **Eric W. Banister**, who in the 1970s introduced the impulse-response
 (fitness–fatigue) model and TRIMP — the mathematical ancestor of every fitness/fatigue/form
 chart wattwise computes. This release is the bedrock: one de-duplicated record of truth, the
-established sports-science metrics, and a coach that refuses to invent a number. The work
-here makes the core honesty promise something we can actually *prove*.
+established sports-science metrics, and a coach that refuses to invent a number.
 
-- **#93** — Remove false-confidence tests (including GDPR-erasure tests that never exercise
-  the production erase path) so "you can trust it" is a tested guarantee, not a hope.
-- **#98** — VOICE-R2: turn the presentation strip into an allow-list so no internal metric
-  code can ever leak into athlete-facing prose.
-- **#95** — Surface the gathered activity id into the compose fact sheet so per-ride TSS
-  claims are genuinely citable in production, not just in theory.
-- **#103** — Scope the slow CI tiers to the change: a docs/text-only PR shouldn't pay the
-  database, e2e, and image-build tax, while any DDL or source change still runs the full gate.
+For you, that means the honesty promise becomes something you can rely on rather than take on
+faith: the coach answers in plain words, and it can point you to the exact ride a number came
+from.
 
 ### v0.0.2 — **Coggan** · the metrics vocabulary
 
 Named for **Andrew Coggan**, who turned the fitness–fatigue model into the power-meter
 language the world now speaks: Normalized Power, Intensity Factor, TSS, and the Performance
-Management Chart. This release widens the set of metrics the coach can compute *and cite*,
-and makes the conversation layer sturdier.
+Management Chart.
 
-- **#39** — Wire durability (fatigue resistance) all the way onto the service and agent
-  surface, with `work_above_cp_j` persisted on ingest so the number can be retrieved and cited.
-- **#87** — Two-layer coach answer: a verifiable evidence layer the grounder reads, plus warm
-  visible prose for the athlete, split fail-closed so honesty and tone stop fighting.
+For you, that means more of the metrics you already know — including a fatigue-resistance
+(durability) measure — and a coach that can cite each one as it talks you through your
+training.
 
 ### Future — **Seiler** · the training-science frontier
 
-Named for **Stephen Seiler**, whose polarized-training research reframed how endurance
-athletes balance easy and hard work. This is the direction wattwise is heading: understanding
-not just *how much* you trained but *how*, and reasoning about the athlete as a human rather
-than a row of numbers.
+Named for **Stephen Seiler**, whose polarized-training research reframed how endurance athletes
+balance easy and hard work.
 
-- **#76** — Training Intensity Distribution + Polarization Index: the easy/hard mix the
-  engine doesn't yet see.
-- **#78** — A pluggable feasibility-model registry that *falsifies* a prescription per
-  (sport, goal) instead of pretending to predict an outcome.
-- **#79** — Model the athlete as a human — life-state, real availability, motivation — and
-  close the observe→adapt loop instead of optimizing open-loop.
-
-### Backlog — triaged, not yet scheduled
-
-- **#97** — Make the checkpoint `interrupt_id` stable across pause/resume (a known LangGraph
-  re-run quirk; the fix may be a deterministic id or a documented spec carve-out).
+Where wattwise is heading: understanding not just *how much* you trained but *how* — the
+easy/hard balance polarized training is built on — and a coach that reasons about you as a
+person, with your real availability, your goals, and your limits, and that is honest about
+whether a goal is realistic for you.
 
 ## For developers
 
