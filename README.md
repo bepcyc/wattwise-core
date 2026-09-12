@@ -134,21 +134,27 @@ ships an **intervals.icu** api-key connector (its catalog is `GET /v1/connection
 but its connect path is intentionally inert here — it returns `422` until a credential probe is
 configured — so it will not pull data in the stock OSS container. Stick with file upload above.
 
-Set your FTP so the power numbers light up:
+Set your sport and FTP so the power numbers can be calculated. FTP applies from its
+`effective_date`: use the date when that value actually applied to you. For historical
+uploads, it must cover the ride dates. Omitting the date applies the FTP from today only;
+it does not fill in past training load. The date and watts below are examples — replace
+both with your own, and record additional dated values if your FTP changed.
 
 ```sh
 # 2b. Set your sport and FTP (watts). Training Stress Score (TSS), Intensity Factor,
 #     and the whole fitness/fatigue/form chart are computed FROM your FTP — without it
-#     they stay null/zero, so set it once before reading the chart. Use your real FTP.
+#     they stay null/zero. Use your actual FTP and the date it became applicable.
 curl -fsS -X PUT "$BASE/v1/athlete" -H "$AUTH" \
   -H 'Content-Type: application/json' -d '{"current_sport":"cycling"}'
 curl -fsS -X PUT "$BASE/v1/athlete/signature" -H "$AUTH" \
-  -H 'Content-Type: application/json' -d '{"ftp_w":250}'
+  -H 'Content-Type: application/json' -d '{"ftp_w":250,"effective_date":"2026-01-01"}'
 ```
 
-> First chart all zeros? You almost certainly skipped this step. `GET /v1/onboarding/status`
-> will say so — its `suggested_next_step` reads `set_ftp` until an FTP for your current sport
-> is set, then advances to `all_set`.
+> First chart all zeros? Check that its date window includes your rides and that your FTP
+> applies on those dates. `GET /v1/onboarding/status` suggests `set_ftp` until your current
+> sport has an FTP applicable today. `all_set` confirms that current setup; it does not mean
+> older rides have an applicable FTP. After recording a value valid for those older rides,
+> read the chart again — no re-upload is needed.
 
 Now read your data back and ask the coach:
 
