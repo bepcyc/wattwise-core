@@ -133,8 +133,15 @@ def _metric_citation(claim: Claim, canonical: float) -> dict[str, Any]:
 
 #: Numeric-token extraction that keeps a thousands-separated figure as ONE token
 #: ("1,000" / "12,345.6"), so its rewrite replaces the whole figure instead of splicing
-#: the canonical value over the leading digit group (issue #4 review, finding 2).
+#: the canonical value over the leading digit group (issue #4 review, finding 2). It carries
+#: NO sign on purpose: the echo path (grounding_numeric._request_echo) re-publishes the
+#: captured token verbatim AS the replacement, so a sign here would corrupt that path —
+#: signed-rewrite reconciliation is handled positionally at the splice instead (GROUND-R7).
 _THOUSANDS_AWARE_NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+
+#: Minus sign + en/em dash variants a draft may have written directly before a number; used
+#: at the signed-rewrite splice so a negative canonical value does not double the dash (#120).
+_MINUS_DASHES = "-\N{EN DASH}\N{EM DASH}"  # hyphen-minus + en dash + em dash
 
 
 def bounded_number_pattern(token: str) -> re.Pattern[str]:
@@ -262,6 +269,25 @@ def _apply_number_scrub(
         kept = [r for r in covered if not (r[0] < end and start < r[1])]
         edited, delta = remove_span_clean(text, start, end)
         return edited, shift_ranges_after(kept, end, delta)
+    # GROUND-R7 signed-rewrite reconciliation (#120): the located span is the magnitude only
+    # (``_THOUSANDS_AWARE_NUMBER_RE`` carries no sign, and ``bounded_number_pattern``'s lookbehind
+    # blocks only a preceding digit/dot, not a "-"), so a negative canonical ``replacement``
+    # ("-4.8") spliced over the bare magnitude while the draft already wrote a leading minus would
+    # double it into "--4.8". When the canonical rewrite is itself signed AND a UNARY minus/dash
+    # sits directly before the span, extend ``start`` back to swallow that draft dash so the
+    # canonical signed token is published exactly once and ITS full character range (sign included)
+    # is marked covered — the numeric sweep then sees a fully-covered "-4.8". The dash must be a
+    # unary sign, NOT a range separator: a dash preceded by a digit/dot ("5-7") is the range hyphen
+    # between two numbers, so absorbing it would corrupt the range and drop the sign — that case is
+    # excluded. The echo path's replacement is a sign-stripped magnitude token (the shared regex
+    # omits the sign), so it never begins with "-" and this branch is never taken on it.
+    if (
+        replacement[0] in _MINUS_DASHES
+        and start > 0
+        and text[start - 1] in _MINUS_DASHES
+        and (start == 1 or text[start - 2] not in "0123456789.")
+    ):
+        start -= 1
     edited = text[:start] + replacement + text[end:]
     updated = shift_ranges_after(covered, end, len(replacement) - (end - start))
     updated.append((start, start + len(replacement)))

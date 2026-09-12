@@ -19,6 +19,11 @@
     "code": "invalid_credential",
     "text": "That key didn't work — double-check it and try again."
   },
+  "connection.connector_unavailable_detail": {
+    "kind": "error",
+    "code": "connector_unavailable",
+    "text": "API-key sync isn't turned on in this build. Upload an activity file to bring in your rides instead."
+  },
   "connection.key_archetype_only": {
     "kind": "validation",
     "code": "unsupported_archetype",

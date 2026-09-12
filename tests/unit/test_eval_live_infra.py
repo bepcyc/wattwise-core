@@ -99,6 +99,20 @@ def test_infra_text_classification() -> None:
     assert not classify_infra_text("AssertionError: answer was not grounded")
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) database is locked",
+        "AssertionError: expected 429 connections but got 503",
+        "self._connection_worker_thread()\nOperationalError: database is locked",
+        "AssertionError: provider unavailable",
+    ],
+)
+def test_product_failures_are_not_excused_by_infra_words(message: str) -> None:
+    """QA-EVAL-R12(b): database/assertion failures cannot become infrastructure errors."""
+    assert not classify_infra_text(message)
+
+
 def test_infra_rate_over_max_blocks_promotion_and_alerts() -> None:
     """Exceeding the configured max INFRA_ERROR rate alerts and blocks promotion."""
     results = (

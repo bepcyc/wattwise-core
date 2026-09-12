@@ -37,7 +37,6 @@ AUTH-R15, AUTH-R16, AUTH-R17, SCHEMA-R4, SCHEMA-R10, ERR-R6, ERR-R8.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -58,89 +57,25 @@ from wattwise_core.api.connection_catalog import (
 from wattwise_core.api.copy import message as _copy
 from wattwise_core.api.deps import CurrentPrincipal, DbSession, RateLimit
 from wattwise_core.api.errors import FieldError, ProblemError
+
+# The credential-probe + credential-store seams live in a focused sibling module
+# (QUAL-R9 decomposition); re-exported here so importers and ``dependency_overrides``
+# keys (``credential_probe`` / ``credential_sink``) keep their identity (AUTH-R16/R17).
+from wattwise_core.api.routers.connection_seams import (
+    CredentialProbe,
+    CredentialProbeError,
+    CredentialProbeUnavailable,
+    CredentialSink,
+    ProbeDep,
+    SinkDep,
+    SourcePath,
+    credential_probe,
+    credential_sink,
+)
 from wattwise_core.domain.enums import AuthArchetype, ConnectionStatus
 from wattwise_core.persistence.models import Connection, SourceDescriptor
 
 router = APIRouter(prefix="/v1/connections", tags=["connections"], dependencies=[RateLimit])
-
-
-# --------------------------------------------------------- credential-probe seam
-
-
-class CredentialProbeError(Exception):
-    """A read-only credential probe rejected the supplied secret (AUTH-R17).
-
-    Raised by the probe seam when the adapter's read-only check fails (bad key /
-    revoked / unreachable-with-this-credential). Carries no secret material and no
-    source-specific detail; the router maps it to ``422 credential-invalid``.
-    """
-
-
-#: The probe seam: given a source key + the raw secret, run the adapter's MANDATORY
-#: read-only check (AUTH-R17). Returns nothing on success; raises
-#: :class:`CredentialProbeError` on a bad credential. The app factory overrides this
-#: with the registered adapter's probe so this router never imports a named adapter
-#: (ARCH-R22 / ONB-R4); tests inject a mock probe.
-CredentialProbe = Callable[[str, str], Awaitable[None]]
-
-
-async def _unconfigured_probe(source: str, secret: str) -> None:
-    """Fail-closed default probe: refuse every credential until the factory wires one.
-
-    The real probe is the registered adapter's read-only check, injected by the app
-    factory. Until then no credential can pass — a connection is NEVER marked
-    ``connected`` without a successful probe (AUTH-R17, fail-closed).
-    """
-    raise CredentialProbeError(source)
-
-
-def credential_probe() -> CredentialProbe:
-    """Provide the credential-probe seam; the app factory overrides it (AUTH-R17)."""
-    return _unconfigured_probe
-
-
-# --------------------------------------------------------- credential-store seam
-
-
-class CredentialSink(BaseModel):
-    """The minimal credential-store surface this router needs (AUTH-R16).
-
-    A structural seam (``store`` only) so the router depends on a capability, not on
-    the security package's concrete store. The app factory binds the process
-    :class:`~wattwise_core.security.credentials.CredentialStore`; tests inject a fake.
-    Envelope encryption + opaque-ref issuance live behind it; the raw secret is never
-    persisted here (AUTH-R16).
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
-
-    store: Callable[[str], str]
-
-
-def credential_sink() -> CredentialSink:
-    """Provide the credential-store seam; keyless apps keep credential storage disabled.
-
-    ``create_app`` overrides this dependency only when an envelope encryption root key is
-    configured. Without that key, file upload/import remains available but API-key connector
-    completion fails closed with a typed operator-actionable 4xx instead of storing a secret
-    insecurely or surfacing a generic internal error.
-    """
-    raise ProblemError(
-        "credential-storage-disabled",
-        detail=_copy("connection.credential_storage_disabled_detail"),
-        errors=[
-            FieldError(
-                code="credential_storage_disabled",
-                message=_copy("connection.credential_storage_disabled"),
-                parameter="source",
-            )
-        ],
-    )
-
-
-ProbeDep = Annotated[CredentialProbe, Depends(credential_probe)]
-SinkDep = Annotated[CredentialSink, Depends(credential_sink)]
-SourcePath = Annotated[str, Path(description="The connectable source key (catalog).")]
 
 
 # --------------------------------------------------------------------------- wire shapes
@@ -289,9 +224,10 @@ async def complete(
     Order is load-bearing (AUTH-R17): the MANDATORY read-only probe runs FIRST against
     the raw key; only on success is the key envelope-encrypted into an opaque
     ``credential_ref`` (the raw value is discarded, AUTH-R16) and a ``connected`` row
-    written. A failed probe → ``422 credential-invalid`` and NO half-connected row is
-    created. A non-``api_key`` source (e.g. ``file_upload``) → ``422`` (it has no
-    ``complete`` step). An unknown source → ``404``.
+    written. A wired probe that rejects the key → ``422 credential-invalid``; an UNWIRED
+    probe → the DISTINCT ``422 connector-unavailable`` (QUAL-R13(d)/(e)); either way NO
+    half-connected row is created. A non-``api_key`` source (e.g. ``file_upload``) →
+    ``422`` (no ``complete`` step). An unknown source → ``404``.
     """
     entry = _require_catalog_entry(source)
     if entry.auth_archetype is not AuthArchetype.API_KEY:
@@ -351,14 +287,28 @@ def _require_catalog_entry(source: str) -> CatalogEntry:
 
 
 async def _run_probe(probe: CredentialProbe, source: str, secret: str) -> None:
-    """Run the mandatory read-only probe; a failure → ``422 credential-invalid`` (AUTH-R17).
+    """Run the mandatory read-only probe; map a failure to its DISTINCT problem (AUTH-R17).
 
-    The raw secret never reaches the problem document or any log line (AUTH-R16): a
-    rejected probe surfaces only the catalog copy with a machine ``invalid_credential``
-    code. No half-connected row exists — nothing was persisted before this point.
+    Two distinct failures get two distinct messages (QUAL-R13(d)): an UNWIRED probe →
+    ``422 connector-unavailable`` (no-blame copy pointing at file upload); a wired probe
+    that RUNS and rejects the key → ``422 credential-invalid``. The subclass is caught
+    FIRST. The raw secret never reaches the problem document or any log line (AUTH-R16);
+    no half-connected row exists — nothing was persisted before this point.
     """
     try:
         await probe(source, secret)
+    except CredentialProbeUnavailable as exc:
+        raise ProblemError(
+            "connector-unavailable",
+            detail=_copy("connection.connector_unavailable_detail"),
+            errors=[
+                FieldError(
+                    code="connector_unavailable",
+                    message=_copy("connection.connector_unavailable_detail"),
+                    pointer="/api_key",
+                )
+            ],
+        ) from exc
     except CredentialProbeError as exc:
         raise ProblemError(
             "credential-invalid",
@@ -497,6 +447,7 @@ __all__ = [
     "ConnectionResult",
     "CredentialProbe",
     "CredentialProbeError",
+    "CredentialProbeUnavailable",
     "CredentialSink",
     "FileUploadNextStep",
     "credential_probe",

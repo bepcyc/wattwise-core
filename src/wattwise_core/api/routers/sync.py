@@ -108,15 +108,18 @@ class SyncRunRequest(BaseModel):
 
 
 class SyncRun(BaseModel):
-    """A started sync-run handle (``202``, API-R46a).
+    """A sync-run handle (``202``, API-R46a/API-R46c).
 
-    ``status`` reflects that the run was accepted and is in flight; ``status_text`` is
-    jargon-free athlete copy (API-R21/HLT-R7). No secret, watermark, or adapter
-    internal is exposed.
+    ``status`` is a stable machine token a client branches on (QUAL-R13(d), never the
+    sentence): ``accepted`` when a connected source was actually started, ``nothing_to_sync``
+    when the owner has NO connected source to pull from so the run did nothing (API-R46c —
+    no false "we're pulling your training" reassurance). ``status_text`` is the matching
+    jargon-free athlete copy (API-R21/HLT-R7). No secret, watermark, or adapter internal is
+    exposed.
     """
 
     sync_run_id: str
-    status: Literal["accepted", "running"]
+    status: Literal["accepted", "running", "nothing_to_sync"]
     started_at: datetime
     status_text: str
 
@@ -225,10 +228,12 @@ async def _owned_connection_by_source(
 
 
 def started_run(sync_run_id: str) -> SyncRun:
-    """Build an accepted :class:`SyncRun` handle (the orchestrator's accept return).
+    """Build an accepted :class:`SyncRun` handle (a connected source was started).
 
     A small constructor the orchestration seam reuses so the accepted status + athlete
-    copy are defined once here (API-R21), not at the wiring site.
+    copy are defined once here (API-R21), not at the wiring site. Used ONLY when the run
+    actually started against at least one connected source; the no-connected-source case
+    uses :func:`nothing_to_sync_run` so the reassurance is never falsely shown (API-R46c).
     """
     return SyncRun(
         sync_run_id=sync_run_id,
@@ -238,11 +243,33 @@ def started_run(sync_run_id: str) -> SyncRun:
     )
 
 
+def nothing_to_sync_run(sync_run_id: str) -> SyncRun:
+    """Build an HONEST :class:`SyncRun` handle for the no-connected-source case (API-R46c).
+
+    When the owner has no connected source to pull from, the run touched nothing — so the
+    handle MUST NOT claim a sync is happening (issue #118: the canned "we're pulling your
+    training" reassurance is misleading on this path). The distinct ``nothing_to_sync``
+    status (a stable machine token, QUAL-R13(d)) carries warm, athlete-native copy
+    (API-R21/HLT-R7) that states the no-source state and the next step, without blame
+    (QUAL-R13(e)), so the intervals.icu onboarding user can tell it did nothing.
+    """
+    return SyncRun(
+        sync_run_id=sync_run_id,
+        status="nothing_to_sync",
+        started_at=datetime.now(UTC),
+        status_text=(
+            "No sources are connected yet, so there's nothing to bring in right now. "
+            "Connect a source or upload a file to get started."
+        ),
+    )
+
+
 __all__ = [
     "SyncOrchestrator",
     "SyncRun",
     "SyncRunRequest",
     "SyncTarget",
+    "nothing_to_sync_run",
     "router",
     "started_run",
     "sync_orchestrator",

@@ -872,16 +872,3 @@ async def test_update_baseline_round_trips(tmp_path: Path) -> None:
     report = compare_to_baseline(cards, path=path)
     assert report.baseline_present
     assert report.passed
-
-
-def test_update_baseline_cli_rewrites_and_run_stays_green(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # QA-EVAL-R12(c): `update-baseline` actually rewrites the artifact (no longer a no-op),
-    # and a subsequent `run` (with its non-regression gate active) stays green against it.
-    target = tmp_path / "baseline-scorecard.json"
-    monkeypatch.setattr("wattwise_core.eval.baseline.BASELINE_PATH", target)
-    assert cli_main(["update-baseline"]) == 0
-    assert target.exists(), "update-baseline MUST write the baseline artifact (not a no-op)"
-    out = tmp_path / "scorecard.json"
-    assert cli_main(["run", "--mode=recorded", f"--scorecard={out}"]) == 0

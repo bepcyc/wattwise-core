@@ -3957,6 +3957,7 @@
               "connect_a_source",
               "run_first_sync",
               "waiting_for_data",
+              "set_ftp",
               "all_set"
             ],
             "title": "Suggested Next Step",
@@ -4796,7 +4797,7 @@
         "type": "object"
       },
       "SyncRun": {
-        "description": "A started sync-run handle (``202``, API-R46a).\n\n``status`` reflects that the run was accepted and is in flight; ``status_text`` is\njargon-free athlete copy (API-R21/HLT-R7). No secret, watermark, or adapter\ninternal is exposed.",
+        "description": "A sync-run handle (``202``, API-R46a/API-R46c).\n\n``status`` is a stable machine token a client branches on (QUAL-R13(d), never the\nsentence): ``accepted`` when a connected source was actually started, ``nothing_to_sync``\nwhen the owner has NO connected source to pull from so the run did nothing (API-R46c \u2014\nno false \"we're pulling your training\" reassurance). ``status_text`` is the matching\njargon-free athlete copy (API-R21/HLT-R7). No secret, watermark, or adapter internal is\nexposed.",
         "properties": {
           "started_at": {
             "format": "date-time",
@@ -4806,7 +4807,8 @@
           "status": {
             "enum": [
               "accepted",
-              "running"
+              "running",
+              "nothing_to_sync"
             ],
             "title": "Status",
             "type": "string"
@@ -8810,7 +8812,7 @@
     },
     "/v1/athlete": {
       "get": {
-        "description": "Read the one owner's profile + effective FTP signature (doc 60 \u00a78.1).",
+        "description": "Read the one owner's profile + effective FTP signature (doc 60 \u00a78.1, API-R52).\n\n``fitness_signature`` is the latest-effective signature for ``current_sport`` as-of today\n(GBO-R27 / API-R46b) \u2014 ``null`` when ``current_sport`` is unset or selects a sport with no\ncurrent signature; deliberately ASYMMETRIC with the signature WRITE (which echoes the\nwritten sport regardless of ``current_sport``, API-R52).",
         "operationId": "getAthleteProfile",
         "responses": {
           "200": {
@@ -9414,7 +9416,7 @@
     },
     "/v1/athlete/signature": {
       "put": {
-        "description": "Write the owner-entered FTP fitness signature the power analytics ground on (GBO-R26).\n\nThis is the load-bearing write: CTL/TSS/NP/IF/CP all resolve the effective\n:class:`FitnessSignature` for the activity's sport (doc 40), so without it the power\nsurface degrades to typed-unavailable. The row is stamped ``origin = user_entered``\nSERVER-side (never a client field) and keyed by ``(athlete_id, effective_date,\nsignature_type)``: re-setting the SAME effective date for the SAME sport UPDATES that\nrow in place rather than violating the uniqueness key. ``signature_type`` defaults to\nthe owner's current sport and is validated against the sport registry (GBO-R16a); an\nunregistered code \u2192 ``422 unknown_sport``. Acts ONLY on the server-derived owner id.",
+        "description": "Write the owner-entered FTP fitness signature the power analytics ground on (GBO-R26).\n\nThis is the load-bearing write: CTL/TSS/NP/IF/CP all resolve the effective\n:class:`FitnessSignature` for the activity's sport (doc 40), so without it the power\nsurface degrades to typed-unavailable. The row is stamped ``origin = user_entered``\nSERVER-side (never a client field) and keyed by ``(athlete_id, effective_date,\nsignature_type)``: re-setting the SAME effective date for the SAME sport UPDATES that\nrow in place rather than violating the uniqueness key. ``signature_type`` defaults to\nthe owner's current sport and is validated against the sport registry (GBO-R16a); an\nunregistered code \u2192 ``422 unknown_sport``. Acts ONLY on the server-derived owner id.\n\nAPI-R52: the ``200`` body echoes the upserted row for THIS request's ``signature_type``,\nINDEPENDENT of ``current_sport`` \u2014 so a successful write is always observable (never a\ncurrent-sport ``null`` no-op, #117) and a back-/future-dated write echoes exactly what was\nrecorded, not a re-resolved lookup. Deliberately ASYMMETRIC with the profile read (which\nresolves the ``current_sport`` signature, API-R46b); ``current_sport`` is NOT auto-set \u2014\nsport selection stays the explicit change-sport action (API-R40).",
         "operationId": "setAthleteSignature",
         "requestBody": {
           "content": {
@@ -11146,7 +11148,7 @@
     },
     "/v1/connections/{source}/complete": {
       "post": {
-        "description": "Complete an ``api_key`` connection: probe, then store, then persist (API-R44).\n\nOrder is load-bearing (AUTH-R17): the MANDATORY read-only probe runs FIRST against\nthe raw key; only on success is the key envelope-encrypted into an opaque\n``credential_ref`` (the raw value is discarded, AUTH-R16) and a ``connected`` row\nwritten. A failed probe \u2192 ``422 credential-invalid`` and NO half-connected row is\ncreated. A non-``api_key`` source (e.g. ``file_upload``) \u2192 ``422`` (it has no\n``complete`` step). An unknown source \u2192 ``404``.",
+        "description": "Complete an ``api_key`` connection: probe, then store, then persist (API-R44).\n\nOrder is load-bearing (AUTH-R17): the MANDATORY read-only probe runs FIRST against\nthe raw key; only on success is the key envelope-encrypted into an opaque\n``credential_ref`` (the raw value is discarded, AUTH-R16) and a ``connected`` row\nwritten. A wired probe that rejects the key \u2192 ``422 credential-invalid``; an UNWIRED\nprobe \u2192 the DISTINCT ``422 connector-unavailable`` (QUAL-R13(d)/(e)); either way NO\nhalf-connected row is created. A non-``api_key`` source (e.g. ``file_upload``) \u2192\n``422`` (no ``complete`` step). An unknown source \u2192 ``404``.",
         "operationId": "completeConnection",
         "parameters": [
           {
@@ -14468,7 +14470,7 @@
     },
     "/v1/onboarding/status": {
       "get": {
-        "description": "Return the composed, derived first-setup status for the owner (API-R46).\n\nReads the owner's connections and whether any canonical activity has landed, then\nderives the first-sync progress and the suggested next step. The OSS carve-out\nholds: a fresh ``api_key`` connection with no manual sync yet reports\n``first_sync_state=\"not_started\"`` (no auto-enqueue, API-R46).",
+        "description": "Return the composed, derived first-setup status for the owner (API-R46).\n\nReads the owner's connections, whether any canonical activity has landed, and\nwhether the current-sport FTP signature is set, then derives the first-sync\nprogress and the suggested next step. The OSS carve-out holds: a fresh ``api_key``\nconnection with no manual sync yet reports ``first_sync_state=\"not_started\"`` (no\nauto-enqueue, API-R46). When data is ready but FTP is unset, the next step is\n``set_ftp`` so the first chart is not a silent zero (API-R46b).",
         "operationId": "getOnboardingStatus",
         "responses": {
           "200": {

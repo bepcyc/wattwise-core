@@ -23,6 +23,7 @@ Runs on in-memory SQLite (the portable substrate, GBO-R8b).
 from __future__ import annotations
 
 import datetime as _dt
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -281,6 +282,94 @@ async def test_set_signature_is_idempotent_on_same_effective_date(seeded: Env) -
     )
     assert second.status_code == 200
     assert second.json()["fitness_signature"]["ftp_w"] == pytest.approx(275.0)
+
+
+async def _set_current_sport(env: Env, sport: str | None) -> None:
+    """Force the seeded owner's ``current_sport`` (the seed pins ``cycling``, masking #117)."""
+    owner = await env.session.get(Athlete, uuid.UUID(env.athlete_id))
+    assert owner is not None
+    owner.current_sport = sport
+    await env.session.commit()
+
+
+# --- #117 / API-R52: the FTP write must be OBSERVABLE on its own 200 ----------------
+# The ``seeded`` fixture pins ``current_sport="cycling"`` so the (buggy) current-sport
+# resolution and the correct just-written resolution COINCIDE — which masked #117. These
+# tests deliberately drive the two cases where they DIVERGE: current_sport unset, and
+# current_sport set to a DIFFERENT sport than the signature. A successful write must echo
+# the written signature in BOTH, never read back as a ``null`` no-op.
+
+
+async def test_set_signature_echoes_write_when_current_sport_unset(seeded: Env) -> None:
+    """API-R52: with current_sport UNSET, the 200 still echoes the just-written signature (#117).
+
+    This is the primary issue repro: ``PUT /v1/athlete/signature`` returned ``200`` with
+    ``fitness_signature: null`` because the response resolved by the (null) ``current_sport``
+    rather than the sport just written. The write had succeeded all along.
+    """
+    await _set_current_sport(seeded, None)
+    resp = await seeded.client.put(
+        "/v1/athlete/signature",
+        json={"ftp_w": 250.0, "signature_type": "cycling", "effective_date": "2026-01-01"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    sig = body["fitness_signature"]
+    assert sig is not None  # the write is observable (was null under #117)
+    assert sig["ftp_w"] == pytest.approx(250.0)
+    assert sig["signature_type"] == "cycling"  # echoes the WRITTEN sport
+    assert sig["origin"] == "user_entered"
+    assert body["current_sport"] is None  # NOT auto-set — sport selection stays explicit (API-R40)
+    # GET still reflects current_sport (unset → null): the documented, correct asymmetry.
+    fresh = (await seeded.client.get("/v1/athlete")).json()
+    assert fresh["current_sport"] is None
+    assert fresh["fitness_signature"] is None
+
+
+async def test_set_signature_echoes_write_when_current_sport_is_different(seeded: Env) -> None:
+    """API-R52: current_sport=running + a CYCLING write → the 200 echoes the cycling row (#117).
+
+    The set-but-different case: the signature is for a sport OTHER than current_sport, so the
+    current-sport resolution (the bug) finds nothing and returns ``null`` though the write
+    succeeded. The fix echoes the just-written cycling signature regardless of current_sport.
+    """
+    await _set_current_sport(seeded, "running")
+    resp = await seeded.client.put(
+        "/v1/athlete/signature",
+        json={"ftp_w": 250.0, "signature_type": "cycling", "effective_date": "2026-01-01"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    sig = body["fitness_signature"]
+    assert sig is not None  # observable though current_sport != signature_type (null under #117)
+    assert sig["signature_type"] == "cycling"  # the WRITTEN sport, not the current one
+    assert sig["ftp_w"] == pytest.approx(250.0)
+    assert body["current_sport"] == "running"  # untouched — only fitness_signature changed
+    # GET resolves by current_sport (running) → no running signature → null, by design.
+    fresh = (await seeded.client.get("/v1/athlete")).json()
+    assert fresh["current_sport"] == "running"
+    assert fresh["fitness_signature"] is None
+
+
+async def test_set_signature_echoes_future_dated_write(seeded: Env) -> None:
+    """API-R52: a FUTURE-dated write echoes exactly what was recorded, not a re-resolved row.
+
+    Pins the design to projecting the just-written row (not an as-of-today re-resolve, which
+    would filter a future ``effective_date`` back out and re-introduce the null no-op). GET,
+    keyed on the as-of-today effective signature, correctly does NOT surface it yet.
+    """
+    future = (_dt.datetime.now(tz=UTC).date() + _dt.timedelta(days=30)).isoformat()
+    resp = await seeded.client.put(
+        "/v1/athlete/signature",
+        json={"ftp_w": 300.0, "signature_type": "cycling", "effective_date": future},
+    )
+    assert resp.status_code == 200
+    sig = resp.json()["fitness_signature"]
+    assert sig is not None
+    assert sig["ftp_w"] == pytest.approx(300.0)  # echoes the written future row, not null/old
+    assert sig["effective_date"] == future
+    # the as-of-today profile read does not surface a future-effective signature
+    assert (await seeded.client.get("/v1/athlete")).json()["fitness_signature"] is None
 
 
 async def test_set_signature_unknown_sport_is_422(seeded: Env) -> None:

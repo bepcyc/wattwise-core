@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from sqlalchemy import event
 
+from wattwise_core.agent import capabilities_evidence, engine_planner, grounding_evidence
 from wattwise_core.agent.contracts import ClaimKind, ReflectDecision, ReflectVerdict
 from wattwise_core.agent.engine import (
     GraphAgentEngine,
@@ -88,6 +89,15 @@ _RIDE_FIT = (
 )
 
 
+@pytest.fixture
+def agent_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Anchor agent date windows to the seeded rides without changing token or checkpoint clocks."""
+    now = _dt.datetime.combine(_TODAY, _dt.time(12), tzinfo=UTC)
+    monkeypatch.setattr(capabilities_evidence, "utcnow", lambda: now)
+    monkeypatch.setattr(engine_planner, "utcnow", lambda: now)
+    monkeypatch.setattr(grounding_evidence, "utcnow", lambda: now)
+
+
 def _completed_model() -> FakeModel:
     """A FakeModel scripting a grounded, COMPLETED weekly-load answer (the default path).
 
@@ -130,7 +140,7 @@ class _Journey:
 
 
 @pytest.fixture
-def journey(tmp_path: Path) -> Iterator[_Journey]:
+def journey(tmp_path: Path, agent_clock: None) -> Iterator[_Journey]:
     """Build the REAL app on a shared file DB, seed canonical data, and mint a real token.
 
     A temp-file DSN means every request-scoped session (the analytics read, the import
@@ -258,13 +268,18 @@ def test_journey_a_connect_sync_lands_canonical_data(journey: _Journey) -> None:
         files={"file": ("ride.fit", _RIDE_FIT.read_bytes(), "application/octet-stream")},
     )
     assert upload.status_code == 202, upload.text
-    assert upload.json()["status"] == "queued"
+    # The OSS import ingests SYNCHRONOUSLY in-request, so the job is already TERMINAL by the
+    # time the 202 lands: it reads "done", never a stranded "queued" (API-R33a, #115).
+    assert upload.json()["status"] == "done"
 
-    # A manual sync is the only OSS trigger and is accepted (API-R46); the file-upload
-    # source has nothing to pull, so the run starts and reports accepted.
+    # A manual sync is the only OSS trigger (API-R46). The file upload is CONNECTIONLESS
+    # (LIN-R1.1) — it created no connection — so there is no connected source to pull from:
+    # the run honestly reports "nothing_to_sync" rather than falsely claiming a sync is
+    # happening (API-R46c, #118). The upload's data already landed via the import path above.
     run = journey.client.post("/v1/sync/run", headers=journey.auth)
     assert run.status_code == 202, run.text
-    assert run.json()["status"] == "accepted"
+    assert run.json()["status"] == "nothing_to_sync"
+    assert run.json()["status_text"] != "We're pulling in your latest training now."
 
     # The uploaded ride (2024-01-02) is now a canonical activity on the analytics surface.
     after = journey.client.get(
@@ -559,7 +574,7 @@ def _wire_plan_seams(app: FastAPI, engine: GraphAgentEngine) -> None:
 
 
 @pytest.fixture
-def plan_journey(tmp_path: Path) -> Iterator[_PlanJourney]:
+def plan_journey(tmp_path: Path, agent_clock: None) -> Iterator[_PlanJourney]:
     """The BUILT app whose plan + decision endpoints share ONE durable-saver engine (E2E-R1a).
 
     Mirrors :func:`journey` (real app, shared file DB, real token), but the agent engine is the

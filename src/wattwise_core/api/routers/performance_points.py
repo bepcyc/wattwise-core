@@ -56,17 +56,24 @@ _HRV_KEYS: tuple[str, ...] = (
 )
 
 
-def _pmc_point(day: _dt.date, res: MetricResult[Any]) -> SeriesPoint:
-    """One PMC calendar point: fitness/fatigue/form values + coverage (PMC-R1/R6)."""
+def _pmc_point(day: _dt.date, res: MetricResult[Any], load: float | None = None) -> SeriesPoint:
+    """One PMC calendar point: fitness/fatigue/form values + coverage (PMC-R1/R6).
+
+    ``load`` is the day's canonical training load that FEEDS the EWMA (LOAD-R1, doc 60 §1) —
+    the same per-day value ``/load-metrics`` surfaces — threaded through verbatim so the PMC
+    chart's load magnitude agrees with fitness/fatigue (which integrate it) instead of always
+    reading ``null`` (#120). It is typed-null ONLY when genuinely unavailable; a real ``0.0``
+    rest day is a genuine value and is NEVER coalesced to null (LOAD-R1 / PMC-R2).
+    """
     if is_computed(res):
         vals: dict[str, float | None] = {
             "fitness": res.value.ctl,
             "fatigue": res.value.atl,
             "form": res.value.tsb,
-            "load": None,
+            "load": load,
         }
     else:
-        vals = {"fitness": None, "fatigue": None, "form": None, "load": None}
+        vals = {"fitness": None, "fatigue": None, "form": None, "load": load}
     return SeriesPoint(
         local_date=day, label=_day_label(day), values=vals, coverage=_coverage_for(res)
     )

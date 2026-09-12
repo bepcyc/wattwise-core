@@ -28,6 +28,7 @@ on:
     tags: ["v*"]   # the v*-tag push triggers the release job (CI-R10/CI-R12)
   pull_request:
     branches: [main]
+  workflow_dispatch: {}   # CI-R4/CI-R9: manually verify the same nightly recipes on a chosen ref
   schedule:
     - cron: "30 2 * * *"   # nightly leg (CI-R4): live eval+smoke, deep fuzz (mutation nightly: nightly.yml)
 
@@ -60,6 +61,11 @@ jobs:
     steps:
       - uses: dorny/paths-filter@v3
         id: filter
+        # paths-filter needs a git checkout on push/tag events, and its output is
+        # consumed ONLY for pull_request docs-only skipping (see `decide` below).
+        # Gate it to PRs so push/tag runs don't fail with "not a git repository"
+        # (git exit 128) and cascade-skip the heavy tiers + release. (CI-R / #106 fix)
+        if: ${{ github.event_name == 'pull_request' }}
         with:
           # 'every': the filter matches only when EVERY changed file matches one
           # of its patterns — i.e. a genuine docs/text-only change. DDL lives in
@@ -682,7 +688,7 @@ jobs:
     # blocking PRs. The nightly MUTATION campaign (T-MUT enforcing leg) is owned by the
     # dedicated nightly.yml scheduler (`just test-mut`) — kept out of here so there is
     # exactly ONE mutation gate across the workflows (issue #35 / ADR 0006 / TIER-R6).
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       WATTWISE_LLM_API_KEY: ${{ secrets.WATTWISE_LLM_API_KEY }}
@@ -710,7 +716,7 @@ jobs:
   # release, conditional PyPI publish). FORGE_PROVIDER selects GitHub here.
   release:
     name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - lint
       - type-check

@@ -59,6 +59,8 @@ import tomllib
 from collections import Counter, deque
 from pathlib import Path
 
+from mutmut.configuration import Config
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Verdict classification — mirrors mutmut 3.6's status_by_exit_code. A timeout
@@ -220,6 +222,56 @@ def _prepare_cache_for_diff(changed: set[str], tracked: set[str]) -> None:
             # Deleted source must not linger importable inside the mutated tree.
             stale_copy.unlink(missing_ok=True)
             Path(str(stale_copy) + ".meta").unlink(missing_ok=True)
+
+
+def _refresh_cached_source_assets(source_paths: list[str]) -> None:
+    """Refresh assets and remove deleted source without discarding generated mutants.
+
+    mutmut only copies an asset when its cached destination is absent. Python
+    files refresh separately during generation, but deleted files never reach
+    that step. Reconcile both on every leg, including restored nightly caches.
+    """
+    cache_root = _REPO_ROOT / _MUTANTS_DIR
+    for source_path in source_paths:
+        cached_source = cache_root / source_path
+        files = [cached_source] if cached_source.is_file() else cached_source.rglob("*")
+        for cached in files:
+            if not cached.is_file():
+                continue
+            original = _REPO_ROOT / cached.relative_to(cache_root)
+            if cached.name.endswith(".py.meta"):
+                # Preserve metadata only while the corresponding source exists.
+                original = Path(str(original).removesuffix(".meta"))
+                if original.is_file():
+                    continue
+            elif cached.suffix == ".py" and original.is_file():
+                continue
+            cached.unlink()
+
+
+def _remove_deleted_cached_helpers() -> None:
+    """Prune deleted tests/config/helpers that mutmut's merging copy would retain."""
+    cache_root = (_REPO_ROOT / _MUTANTS_DIR).resolve()
+    # Use mutmut's effective configuration, including its built-in test/config
+    # roots. Its test*.py glob only sees current files, so include cached matches
+    # to catch deleted root-level tests as well.
+    roots = set(Config.get().also_copy)
+    roots.update(path.relative_to(cache_root) for path in cache_root.glob("test*.py"))
+    for root in roots:
+        if root.is_absolute() or ".." in root.parts:
+            raise ValueError(f"mutation cache copy path must be repository-relative: {root}")
+        destination = cache_root / root
+        entries = [destination, *destination.rglob("*")]
+        # Children first: deleted directories may otherwise leave file/directory
+        # collisions behind when the current checkout is copied into the cache.
+        for cached in sorted(entries, key=lambda path: len(path.parts), reverse=True):
+            if not cached.resolve().is_relative_to(cache_root):
+                raise ValueError(f"mutation cache copy path escapes cache: {cached}")
+            original = _REPO_ROOT / cached.relative_to(cache_root)
+            if cached.is_file() and not original.is_file():
+                cached.unlink()
+            elif cached.is_dir() and not original.is_dir() and not any(cached.iterdir()):
+                cached.rmdir()
 
 
 def _mutable(files: set[str], source_paths: list[str], do_not_mutate: list[str]) -> list[str]:
@@ -438,6 +490,8 @@ def main(argv: list[str] | None = None) -> int:
         scope_paths = _mutable(tracked, source_paths, do_not_mutate)
         scope_label = f"full campaign over {source_paths}"
 
+    _refresh_cached_source_assets(source_paths)
+    _remove_deleted_cached_helpers()
     exit_code, timed_out, output_tail = _run_mutmut(patterns, budget_s)
 
     if exit_code != 0 and not timed_out and _NO_MATCH_MARKER in output_tail:

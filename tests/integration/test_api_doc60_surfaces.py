@@ -206,7 +206,9 @@ def test_import_upload_then_list_and_detail(tmp_path: Path) -> None:
         assert job_id in [j["import_job_id"] for j in listed.json()["data"]]
         got = client.get(f"/v1/imports/{job_id}", headers=auth)
         assert got.status_code == 200
-        assert got.json()["status"] in {"queued", "processing", "done"}
+        # The OSS import ingests synchronously, so the job is already TERMINAL "done" by the
+        # time the 202 lands — never stranded at "queued"/"processing" (API-R33a, #115).
+        assert got.json()["status"] == "done"
         assert got.json()["status_text"]  # athlete-native copy (API-R21)
         missing = client.get("/v1/imports/definitely-not-a-job", headers=auth)
         assert missing.status_code == 404
@@ -394,14 +396,21 @@ def test_delegated_token_requires_the_service_factor_when_configured(tmp_path: P
 # ----------------------------------------------------------- public rate limit (LIMIT-R1)
 
 
-def test_public_auth_endpoints_are_rate_limited(tmp_path: Path) -> None:
+def test_public_auth_endpoints_are_rate_limited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The pre-token surface debits a shared bucket and 429s when exhausted (LIMIT-R1)."""
-    client, _ = _app(tmp_path)
+    burst = 30
+    client, app = _app(tmp_path, ratelimit__mutating_per_minute=burst)
+    now = [0.0]
+    # Refill time belongs to this scenario; slow CI requests must not replenish the burst.
+    monkeypatch.setattr(app.state.rate_limiter, "_clock", lambda: now[0])
     try:
-        # The mutating public bucket is 30/min: hammer link/start until it trips.
-        statuses = [client.post("/v1/auth/link/start").status_code for _ in range(35)]
-        assert 429 in statuses, "the public pre-token bucket never tripped (LIMIT-R1)"
-        assert statuses[0] == 200  # the first call was served normally
+        statuses = [client.post("/v1/auth/link/start").status_code for _ in range(burst + 1)]
+        assert statuses == [200] * burst + [429]
+        now[0] += 60.0 / burst  # Exactly one token refills; the next request consumes it.
+        assert client.post("/v1/auth/link/start").status_code == 200
+        assert client.post("/v1/auth/link/start").status_code == 429
     finally:
         client.__exit__(None, None, None)
 

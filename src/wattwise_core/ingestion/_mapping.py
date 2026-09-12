@@ -135,15 +135,28 @@ def _activity_values(
     *,
     policy_version: str | None = None,
     field_resolution: dict[str, object] | None = None,
+    stream_channels: frozenset[str] = frozenset(),
+    store_raw_gps: bool = True,
 ) -> tuple[dict[str, Any], list[str]]:
     """The activity row value-dict + the update-on-collision set for the atomic upsert (UPS-R2).
 
     Carries the resolved scalars (``start_time`` parsed to tz-aware UTC), the derived
-    ``has_power``/``has_hr``/``coverage`` flags, and a fresh ``updated_at``. ``sport`` is
-    NOT NULL, so a new row defaults to ``"other"`` when unresolved. The returned update set
-    is exactly the resolved/derived columns — ``sport`` is included ONLY when resolved, so a
-    conflicting (existing) row never has a previously-resolved value regressed to a default,
-    matching the prior setattr-only behaviour (no zero-filling, PRV-R6).
+    ``has_power``/``has_hr``/``has_gps``/``has_cadence``/``coverage`` flags, and a fresh
+    ``updated_at``. ``sport`` is NOT NULL, so a new row defaults to ``"other"`` when unresolved.
+    The returned update set is exactly the resolved/derived columns — ``sport`` is included ONLY
+    when resolved, so a conflicting (existing) row never has a previously-resolved value
+    regressed to a default, matching the prior setattr-only behaviour (no zero-filling, PRV-R6).
+
+    ``stream_channels`` is the GAP-R3 union of channel names any contributing source supplies
+    for this session (computed BEFORE the PRIV-R2 raw-GPS pop). The presence flags are derived
+    from it so they no longer silently default to ``False`` and contradict the data (#120):
+    ``has_cadence`` is the union of a ``cadence_rpm`` channel OR a resolved ``avg_cadence_rpm``
+    summary scalar (GAP-R3 + GBO-R15, mirroring how ``has_power``/``has_hr`` OR the summary
+    scalar). ``has_gps`` reflects whether the canonical ``latlng`` channel actually LANDS:
+    present in the union AND not dropped by the raw-GPS opt-out (``store_raw_gps``). Under the
+    default (``store_raw_gps=True``) a GPS-bearing file lands the channel ⇒ ``has_gps=True``;
+    under the PRIV-R2 opt-out the channel is withheld ⇒ ``has_gps=False``, keeping the flag
+    consistent with what ``GET /map`` can serve (API-R49: ``has_gps=false`` ⇒ ``points:[]``).
 
     ``local_projection`` is the ``(start_time_local, local_date)`` derived by projecting the
     resolved UTC ``start_time`` into the athlete's effective-dated reference timezone
@@ -168,6 +181,14 @@ def _activity_values(
         update_columns += ["start_time_local", "local_date"]
     values["has_power"] = scalars.get("avg_power_w") is not None
     values["has_hr"] = scalars.get("avg_hr_bpm") is not None
+    # GAP-R3 channel-presence flags derived from the union (#120) — never the silent False
+    # default. has_gps tracks the canonical latlng channel that ACTUALLY lands (present in the
+    # union AND retained under the PRIV-R2 raw-GPS policy); has_cadence is the union of a
+    # cadence_rpm stream OR a resolved avg_cadence_rpm summary (GBO-R15), mirroring has_power/hr.
+    values["has_gps"] = "latlng" in stream_channels and store_raw_gps
+    values["has_cadence"] = (
+        "cadence_rpm" in stream_channels or scalars.get("avg_cadence_rpm") is not None
+    )
     values["coverage"] = coverage
     # CONF-R6: record the policy version that produced the resolved values; LIN-R3: the
     # per-field resolution record (candidate pointers + deciding rule) — lineage-only.
@@ -177,6 +198,8 @@ def _activity_values(
     update_columns += [
         "has_power",
         "has_hr",
+        "has_gps",
+        "has_cadence",
         "coverage",
         "policy_version",
         "field_resolution",

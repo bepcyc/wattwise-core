@@ -26,7 +26,9 @@ class ImportJobRecord(AgentStateBase):
     """One accepted upload job (API-R33): the ``GET /v1/imports`` read surface's row.
 
     Written when ``POST /v1/imports`` accepts an upload; ``status`` is the canonical
-    import-job status (``queued|processing|done|failed``). Carries NO file bytes and no
+    import-job status (``queued|processing|done|failed``) and MUST reach a TERMINAL value
+    reflecting the real ingest outcome — ``done`` on success, ``failed`` on a post-acceptance
+    ingest error — never stranded at ``queued`` (API-R33a). Carries NO file bytes and no
     source/provider shape — the landed activity lives canonically; this row is only the
     job bookkeeping (operational state, ARCH-R13).
     """

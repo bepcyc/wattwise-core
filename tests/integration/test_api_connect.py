@@ -47,18 +47,20 @@ from wattwise_core.api.auth import Principal, Scope, authenticate
 from wattwise_core.api.deps import get_agent_state_session, get_db, get_settings
 from wattwise_core.api.errors import install_error_handlers
 from wattwise_core.api.ratelimit import RateLimiter
+from wattwise_core.api.routers import connection_seams
 from wattwise_core.api.routers import connections as connections_router
 from wattwise_core.api.routers import connections_management as connections_mgmt_router
 from wattwise_core.api.routers import imports as imports_router
 from wattwise_core.api.routers import onboarding as onboarding_router
 from wattwise_core.api.routers import sync as sync_router
 from wattwise_core.config import Settings, load_settings
-from wattwise_core.domain.enums import ConnectionStatus
+from wattwise_core.domain.enums import ConnectionStatus, SignatureOrigin
 from wattwise_core.persistence.models import (
     Activity,
     Athlete,
     Base,
     Connection,
+    FitnessSignature,
     SourceDescriptor,
     Sport,
 )
@@ -389,6 +391,58 @@ def test_complete_bad_key_is_422_with_no_half_connected_row(harness: _Harness) -
     assert resp.status_code == 422
     assert resp.json()["type"].endswith("/credential-invalid")
     # The probe rejected it, so nothing was stored and no half-connected row exists.
+    assert harness.sink.stored == []
+    assert _connection_count(harness) == 0
+
+
+def test_complete_with_unwired_probe_is_connector_unavailable_not_credential_invalid(
+    harness: _Harness,
+) -> None:
+    """An UNWIRED probe -> 422 connector-unavailable with NON-BLAMING title, not credential-invalid.
+
+    Issue #119 / API-R44 / QUAL-R13(d)(e): the OSS build ships the PRODUCTION
+    ``_unconfigured_probe`` (the fail-closed default the app factory leaves in place when
+    no adapter probe is registered), which rejects EVERY key — including a perfectly valid
+    one. That failure is the connector being inert in this build, NOT a bad credential, so
+    it MUST surface the DISTINCT ``connector-unavailable`` type with copy that does not
+    blame the athlete's key, and MUST NOT leave a half-connected row. The blaming string
+    lives in the catalog TITLE (``body['title']``), so the no-blame guarantee is asserted
+    THERE — the old ``credential-invalid`` title ("Those sign-in details didn't work …")
+    must not appear, and the connector-unavailable title must.
+    """
+    app = harness.client.app
+    # Swap the in-test fake probe for the REAL production unwired default seam, so this
+    # exercises the shipped fail-closed path — not a mock that passes or a mock that
+    # rejects as a bad credential.
+    previous = app.dependency_overrides[connections_router.credential_probe]
+    app.dependency_overrides[connections_router.credential_probe] = lambda: (
+        connection_seams._unconfigured_probe
+    )
+    try:
+        resp = harness.client.post(
+            "/v1/connections/intervals_icu/complete",
+            headers=_auth(),
+            # A syntactically valid key (a real self-hoster's correct key would look the
+            # same): the point is the connector is inert, not that the key is malformed.
+            json={"api_key": "a-perfectly-valid-looking-key"},
+        )
+    finally:
+        app.dependency_overrides[connections_router.credential_probe] = previous
+
+    assert resp.status_code == 422
+    body = resp.json()
+    # The DISTINCT type — a not-enabled connector is never reported as a bad credential.
+    assert body["type"].endswith("/connector-unavailable")
+    assert not body["type"].endswith("/credential-invalid")
+    # The TITLE carries no blame (the QUAL-R13(e) bug lived in the catalog title).
+    assert body["title"] == "This source isn't available to connect here"
+    assert "didn't work" not in body["title"].lower()
+    assert "sign-in details" not in body["title"].lower()
+    # The field error branches on the distinct machine code, and the detail points at
+    # file upload rather than re-checking the key.
+    assert body["errors"][0]["code"] == "connector_unavailable"
+    assert "upload" in body["detail"].lower()
+    # Fail-closed is unchanged: nothing stored, NO half-connected row (AUTH-R17).
     assert harness.sink.stored == []
     assert _connection_count(harness) == 0
 
@@ -766,6 +820,31 @@ def test_sync_run_both_scopes_is_422(harness: _Harness) -> None:
     assert resp.json()["type"].endswith("/validation-error")
 
 
+def test_sync_run_no_connected_source_serializes_honest_status(harness: _Harness) -> None:
+    """The route serializes the HONEST no-connected-source handle verbatim (API-R46c, #118).
+
+    When the orchestrator resolves NO connected source, it returns a ``nothing_to_sync``
+    handle; the route MUST surface that distinct status + its honest ``status_text`` on the
+    ``202``, never the falsely-reassuring "we're pulling your training" copy.
+    """
+    app = harness.client.app
+    app.dependency_overrides[sync_router.sync_orchestrator] = lambda: _nothing_to_sync
+    try:
+        resp = harness.client.post("/v1/sync/run", headers=_auth())
+    finally:
+        app.dependency_overrides[sync_router.sync_orchestrator] = lambda: harness.orchestrator
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "nothing_to_sync"
+    assert body["status_text"] != "We're pulling in your latest training now."
+    assert "nothing to bring in" in body["status_text"].lower()
+
+
+async def _nothing_to_sync(target: sync_router.SyncTarget) -> sync_router.SyncRun:
+    """A sync orchestrator that resolved no connected source (the #118 honest path)."""
+    return sync_router.nothing_to_sync_run("sync_none")
+
+
 # --------------------------------------------------------------------------- onboarding
 
 
@@ -798,13 +877,84 @@ def test_onboarding_api_key_connect_does_not_auto_enqueue_sync(harness: _Harness
 
 
 def test_onboarding_complete_once_data_lands(harness: _Harness) -> None:
-    """Once a canonical activity exists, onboarding reports complete + all_set (API-R46)."""
+    """Data landed AND current-sport FTP set → onboarding reports complete + all_set (API-R46).
+
+    The athlete seed leaves ``current_sport`` unset, so reaching ``all_set`` now requires
+    BOTH a landed activity AND a resolvable current-sport FTP signature (API-R46b): without
+    FTP the power TSS/PMC are a silent zero, so onboarding must keep guiding the user.
+    """
     _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    _record_ftp(harness, sport="cycling", ftp_w=250.0)
     resp = harness.client.get("/v1/onboarding/status", headers=_auth())
     body = resp.json()
     assert body["first_data_ready"] is True
     assert body["first_sync_state"] == "complete"
     assert body["suggested_next_step"] == "all_set"
+
+
+def test_onboarding_data_ready_but_ftp_unset_suggests_set_ftp(harness: _Harness) -> None:
+    """Rides landed but FTP never set → suggest set_ftp, NOT all_set (issue #116 / API-R46b).
+
+    This is the reported papercut: a first-timer uploads rides, but with no FTP the power
+    TSS/IF are null and the PMC is all zeros. ``first_sync_state`` is still ``complete``
+    (the data DID land — the zero chart is CORRECT given no FTP, not an analytics bug), but
+    ``suggested_next_step`` must surface the FTP prerequisite so the first chart is not a
+    confusing silent zero. The athlete seed leaves ``current_sport`` unset, so no FTP resolves.
+    """
+    _land_activity(harness)
+    resp = harness.client.get("/v1/onboarding/status", headers=_auth())
+    body = resp.json()
+    assert body["first_data_ready"] is True
+    assert body["first_sync_state"] == "complete"  # data landed; zero chart is correct, not a bug
+    assert body["suggested_next_step"] == "set_ftp"
+
+
+def test_onboarding_ftp_set_advances_past_set_ftp(harness: _Harness) -> None:
+    """Setting the current-sport FTP advances the suggestion from set_ftp → all_set (API-R46b).
+
+    Proves the gate flips on the SAME harness: identical data, the only delta is recording
+    an effective current-sport FTP signature with a non-NULL ``ftp_w``.
+    """
+    _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    before = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert before["suggested_next_step"] == "set_ftp"  # current_sport set, but no FTP yet
+
+    _record_ftp(harness, sport="cycling", ftp_w=250.0)
+    after = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert after["suggested_next_step"] == "all_set"
+
+
+def test_onboarding_ftp_for_other_sport_still_suggests_set_ftp(harness: _Harness) -> None:
+    """An FTP set for a NON-current sport does not satisfy the gate (API-R46b gating subtlety).
+
+    Gating is on the FTP the analytics actually RESOLVES for ``current_sport`` (ANL-R9), not
+    on the mere presence of any signature row. A signature for ``running`` while the current
+    sport is ``cycling`` never resolves into the cycling power stack → still ``set_ftp``.
+    """
+    _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    _register_sport(harness, "running", "Running", has_power=False)
+    _record_ftp(harness, sport="running", ftp_w=250.0)
+    body = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert body["first_data_ready"] is True
+    assert body["suggested_next_step"] == "set_ftp"  # the cycling FTP is still unset
+
+
+def test_onboarding_signature_row_with_null_ftp_still_suggests_set_ftp(harness: _Harness) -> None:
+    """A current-sport signature whose ``ftp_w`` is NULL still counts as FTP-unset (API-R46b).
+
+    The gate is ``ftp_w IS NOT NULL`` — NOT the existence of a signature row. A signature
+    that carries, say, only an HR threshold but no power FTP cannot feed power TSS, so
+    onboarding must keep suggesting ``set_ftp``.
+    """
+    _land_activity(harness)
+    _set_current_sport(harness, "cycling")
+    _record_ftp(harness, sport="cycling", ftp_w=None, threshold_hr_bpm=165)
+    body = harness.client.get("/v1/onboarding/status", headers=_auth()).json()
+    assert body["first_data_ready"] is True
+    assert body["suggested_next_step"] == "set_ftp"  # row exists, but ftp_w is NULL
 
 
 # --------------------------------------------------------------------------- db helpers
@@ -848,3 +998,60 @@ async def _insert_activity(session: AsyncSession) -> None:
         )
     )
     await session.commit()
+
+
+def _set_current_sport(harness: _Harness, sport: str) -> None:
+    """Set the owner's ``current_sport`` (the analytics FTP-resolution scope, API-R46b)."""
+
+    async def _apply(session: AsyncSession) -> None:
+        owner = (
+            await session.execute(
+                select(Athlete).where(Athlete.athlete_id == uuid.UUID(harness.athlete_id))
+            )
+        ).scalar_one()
+        owner.current_sport = sport
+        await session.commit()
+
+    harness.run(_apply)
+
+
+def _register_sport(harness: _Harness, code: str, name: str, *, has_power: bool) -> None:
+    """Register an extra sport so a signature can reference it (FK into the sport registry)."""
+
+    async def _apply(session: AsyncSession) -> None:
+        session.add(Sport(sport_code=code, display_name=name, has_mechanical_power=has_power))
+        await session.commit()
+
+    harness.run(_apply)
+
+
+def _record_ftp(
+    harness: _Harness,
+    *,
+    sport: str,
+    ftp_w: float | None,
+    threshold_hr_bpm: int | None = None,
+    effective_date: _dt.date | None = None,
+) -> None:
+    """Record an effective-dated FTP signature for ``sport`` (the write the power stack reads).
+
+    ``ftp_w=None`` records a signature row with NO power FTP (e.g. an HR-only threshold), to
+    prove the onboarding gate keys on the resolved ``ftp_w``, not on row presence (API-R46b).
+    """
+    effective = effective_date or _dt.date(2026, 5, 1)
+
+    async def _apply(session: AsyncSession) -> None:
+        session.add(
+            FitnessSignature(
+                athlete_id=uuid.UUID(harness.athlete_id),
+                signature_type=sport,
+                effective_date=effective,
+                effective_to=None,
+                origin=SignatureOrigin.USER_ENTERED,
+                ftp_w=ftp_w,
+                threshold_hr_bpm=threshold_hr_bpm,
+            )
+        )
+        await session.commit()
+
+    harness.run(_apply)
