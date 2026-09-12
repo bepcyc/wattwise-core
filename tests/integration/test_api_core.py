@@ -222,31 +222,37 @@ def test_oversized_json_body_is_413() -> None:
 # --- LIMIT-R1/R2/R3: read/mutating rate limits on the feature surface ------------
 
 
-def test_read_endpoints_are_rate_limited_per_athlete(db_client: tuple[TestClient, str]) -> None:
+def test_read_endpoints_are_rate_limited_per_athlete(
+    db_client: tuple[TestClient, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Read endpoints debit the 120/min read bucket and 429 past it (LIMIT-R1/R2/R3)."""
     client, athlete_id = db_client
     headers = _owner_token(athlete_id, scopes=["read"])
-    limited = None
-    # The read bucket is 120/min; a burst exhausts it. Allow a small margin for the
-    # token-bucket's continuous refill (≈2 tokens/sec) over the loop's wall time.
-    for _ in range(160):
-        resp = client.get(f"{API_PREFIX}/onboarding/status", headers=headers)
-        if resp.status_code == 429:
-            limited = resp
-            break
-    assert limited is not None, "the read bucket never rate-limited within the burst (LIMIT-R2)"
+    now = [0.0]
+    # TIER-R1: this burst has no elapsed refill time, regardless of CI request throughput.
+    monkeypatch.setattr(client.app.state.rate_limiter, "_clock", lambda: now[0])
+    for _ in range(120):
+        assert client.get(f"{API_PREFIX}/onboarding/status", headers=headers).status_code == 200
+    limited = client.get(f"{API_PREFIX}/onboarding/status", headers=headers)
+    assert limited.status_code == 429
     assert limited.json()["type"].endswith("/rate-limited")
     assert int(limited.headers["Retry-After"]) >= 1
     assert limited.headers["RateLimit-Limit"] == "120"
     assert limited.headers["RateLimit-Remaining"] == "0"
 
+    now[0] += 0.5  # LIMIT-R2: 120/min refills exactly one token in half a second.
+    assert client.get(f"{API_PREFIX}/onboarding/status", headers=headers).status_code == 200
+    assert client.get(f"{API_PREFIX}/onboarding/status", headers=headers).status_code == 429
+
 
 def test_read_endpoint_emits_ratelimit_headers_on_success(
     db_client: tuple[TestClient, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A served read carries the RateLimit-* headers for the post-debit state (LIMIT-R3)."""
     client, athlete_id = db_client
     headers = _owner_token(athlete_id, scopes=["read"])
+    monkeypatch.setattr(client.app.state.rate_limiter, "_clock", lambda: 0.0)
     # The db_client fixture builds a fresh app -> a pristine, empty bucket map, so the
     # FIRST served read is the very first debit on a full read bucket. The token-bucket
     # caps at capacity, so after exactly one debit RateLimit-Remaining MUST be
@@ -264,7 +270,9 @@ def test_read_endpoint_emits_ratelimit_headers_on_success(
     assert int(second.headers["RateLimit-Remaining"]) < first_remaining
 
 
-def test_activities_list_is_rate_limited_per_athlete(db_client: tuple[TestClient, str]) -> None:
+def test_activities_list_is_rate_limited_per_athlete(
+    db_client: tuple[TestClient, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """GET /v1/activities debits the per-athlete read bucket and 429s past it (LIMIT-R1/R2).
 
     The activities/athlete/performance/user-settings feature surfaces attached only scope
@@ -277,22 +285,24 @@ def test_activities_list_is_rate_limited_per_athlete(db_client: tuple[TestClient
     """
     client, athlete_id = db_client
     headers = _owner_token(athlete_id, scopes=["read"])
+    now = [0.0]
+    monkeypatch.setattr(client.app.state.rate_limiter, "_clock", lambda: now[0])
     # Sanity: the endpoint really serves 200 (so the 429 is the limiter, not an auth/wiring 401).
     first = client.get(f"{API_PREFIX}/activities", headers=headers)
     assert first.status_code == 200, "GET /v1/activities must serve before the rate-limit assertion"
-    limited = None
-    # The read bucket is 120/min; a burst exhausts it. A margin past 120 absorbs the
-    # token-bucket's continuous refill (≈2 tokens/sec) over the loop's wall time.
-    for _ in range(160):
-        resp = client.get(f"{API_PREFIX}/activities", headers=headers)
-        if resp.status_code == 429:
-            limited = resp
-            break
-    assert limited is not None, "GET /v1/activities was never rate-limited in the burst (LIMIT-R1)"
+    # The first request consumed one token; exhaust the other 119 without advancing time.
+    for _ in range(119):
+        assert client.get(f"{API_PREFIX}/activities", headers=headers).status_code == 200
+    limited = client.get(f"{API_PREFIX}/activities", headers=headers)
+    assert limited.status_code == 429
     assert limited.json()["type"].endswith("/rate-limited")
     assert int(limited.headers["Retry-After"]) >= 1
     assert limited.headers["RateLimit-Limit"] == "120"
     assert limited.headers["RateLimit-Remaining"] == "0"
+
+    now[0] += 0.5
+    assert client.get(f"{API_PREFIX}/activities", headers=headers).status_code == 200
+    assert client.get(f"{API_PREFIX}/activities", headers=headers).status_code == 429
 
 
 # --- API-R3 / AUTH-R1: the factory wires the seam routers ------------------------
