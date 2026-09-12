@@ -110,6 +110,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just lint            # CI-R1 item 1 + item 14 (lint-ast/content/novendor-sql/arch)
       - run: just fmt-check
@@ -137,6 +139,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just type            # CI-R1 item 2 (mypy --strict)
 
@@ -164,6 +168,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just lint-commits     # CI-R1 item 15 (pure git/bash; no `just install` needed)
 
   precommit-config:
@@ -213,6 +219,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - uses: actions/cache@v4
         with:
@@ -247,6 +255,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just cov              # CI-R1 item 5 (≥80% overall; analytics/adapter ≥90%)
       - uses: actions/upload-artifact@v4   # retained artifact (CI-R6)
@@ -276,6 +286,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just eval             # CI-R1 item 6 (recorded-response mode)
       - uses: actions/upload-artifact@v4   # eval scorecard (CI-R6)
@@ -305,6 +317,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just test-inject      # CI-R1 item 7
 
@@ -341,6 +355,8 @@ jobs:
           restore-keys: |
             trivy-db-${{ runner.os }}-
       - run: bash scripts/ci_tools.sh just gitleaks trivy
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just scan             # CI-R1 items 8 + 9 (secret scan + lockfile SCA)
 
@@ -367,6 +383,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just test-forge-portable   # CI-R1 item 18 (CI-R9/DELIV-R8)
 
@@ -409,6 +427,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -474,6 +494,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       # Bootstrap-acceptance (BOOT-R1, E4-T3): clean checkout -> migrate ->
       # health-serving instance. The bootstrap recipe runs uvicorn in the
@@ -538,6 +560,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - name: Generate throwaway boot secrets (BOOT-R4; disposable per-run instance)
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -586,6 +610,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - uses: actions/cache@v4     # mutant/verdict/test-stats cache (issue #35 item 4)
         with:
@@ -638,6 +664,8 @@ jobs:
       - name: Expose Actions cache runtime to run steps (type=gha cache auth)
         uses: crazy-max/ghaction-github-runtime@v3
       - run: bash scripts/ci_tools.sh just trivy syft
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just sbom                  # CI-R1 item 10 (CONT-R1: builds the image, no Critical + SBOM)
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -673,6 +701,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just install-boot-check    # CI-R1 item 20 (uv build + boot from wheel)
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -702,6 +732,8 @@ jobs:
           cache-dependency-glob: "uv.lock"
           cache-python: true
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just eval-live          # QA-EVAL-R9 live mode + INFRA_ERROR gate (QA-EVAL-R12(b))
       - run: just test-llm           # live-provider smoke (CI-R4)
@@ -777,6 +809,8 @@ jobs:
       - name: Expose Actions cache runtime to run steps (type=gha cache auth)
         uses: crazy-max/ghaction-github-runtime@v3
       - run: bash scripts/ci_tools.sh just trivy syft
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - run: just release               # CI-R10/CI-R12 (live in CI; FORGE_PROVIDER=github)
         env:

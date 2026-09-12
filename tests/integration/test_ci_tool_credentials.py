@@ -30,7 +30,7 @@ def test_vendor_installer_inherits_only_github_credential(
 ) -> None:
     commands = tmp_path / "commands"
     commands.mkdir()
-    for command in ("bash", "sh", "cat", "mkdir", "chmod", "head"):
+    for command in ("bash", "sh", "cat", "mkdir", "chmod", "head", "mktemp", "rm", "mv"):
         executable = shutil.which(command)
         assert executable is not None
         (commands / command).symlink_to(executable)
@@ -38,10 +38,14 @@ def test_vendor_installer_inherits_only_github_credential(
     # This fake fetch serves an executable installer, so the test observes the
     # actual child shell's environment rather than merely the parent's variables.
     curl.write_text(
-        "#!/bin/sh\ncat <<'INSTALLER'\n"
+        "#!/bin/sh\nout=/dev/stdout\nwhile [ $# -gt 0 ]; do\n"
+        'if [ "$1" = -o ]; then out="$2"; shift; fi; shift\ndone\n'
+        "cat > \"$out\" <<'INSTALLER'\n"
         'printf "%s" "${GITHUB_TOKEN:-}" > "$WW_TOKEN_AUDIT"\n'
-        'printf "#!/bin/sh\\nexit 0\\n" > "$WW_CI_BIN/$WW_TEST_TOOL"\n'
-        'chmod +x "$WW_CI_BIN/$WW_TEST_TOOL"\nINSTALLER\n'
+        'destination="$WW_CI_BIN"\nif [ "${1:-}" = --to ]; then destination="$2"; fi\n'
+        'mkdir -p "$destination"\n'
+        'printf "#!/bin/sh\\nexit 0\\n" > "$destination/$WW_TEST_TOOL"\n'
+        'chmod +x "$destination/$WW_TEST_TOOL"\nINSTALLER\n'
     )
     curl.chmod(0o755)
     audit = tmp_path / "inherited-token"
