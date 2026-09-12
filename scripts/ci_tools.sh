@@ -54,10 +54,28 @@ fi
 
 log() { printf '[ci-tools] %s\n' "$*" >&2; }
 
-install_just() {
-  curl "${CURL_RETRY[@]}" --proto '=https' --tlsv1.2 -fsSL https://just.systems/install.sh \
-    | bash -s -- --to "${BIN_DIR}"
-}
+install_just() (
+  # The vendor installer performs its own GitHub requests without retries.
+  # Execute only a complete download and publish only a successful staged binary.
+  local stage attempt
+  stage="$(mktemp -d "${BIN_DIR}/.just-install.XXXXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  curl "${CURL_RETRY[@]}" --proto '=https' --tlsv1.2 -fsSL \
+    https://just.systems/install.sh -o "$stage/install.sh" || return 1
+  for attempt in 1 2 3; do
+    rm -rf "$stage/bin"
+    if bash "$stage/install.sh" --to "$stage/bin"; then
+      [ -x "$stage/bin/just" ] && "$stage/bin/just" --version >/dev/null || return 1
+      mv "$stage/bin/just" "${BIN_DIR}/just"
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      log "just installer failed (attempt $attempt/3); retrying"
+      sleep 3
+    fi
+  done
+  return 1
+)
 
 install_trivy() {
   curl "${CURL_RETRY[@]}" -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
