@@ -41,6 +41,8 @@ jobs:
         uses: astral-sh/setup-uv@v8.2.0
         with: { python-version: "3.13" }
       - run: bash scripts/ci_tools.sh just
+        env:
+          GH_TOKEN: ${{ github.token }}  # CI-R9a: this GitHub job token is not auto-exported
       - run: just install
       - uses: actions/cache@v4     # incremental campaign + PR warm-start source
         with:
