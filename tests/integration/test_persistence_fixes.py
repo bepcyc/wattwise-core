@@ -29,21 +29,24 @@ UTC = _dt.UTC
 
 
 @pytest_asyncio.fixture
-async def session() -> AsyncIterator[AsyncSession]:
-    """Session over a fresh file-backed SQLite schema (FK pragma applies per connection)."""
+async def session(tmp_path: Path) -> AsyncIterator[AsyncSession]:
+    """TIER-R2: isolate each test in real SQLite while retaining production FK/WAL setup."""
+    database_path = tmp_path / "persistence.sqlite"
     settings = load_settings(
-        database_dsn="sqlite+aiosqlite:///./.fixtest.sqlite",
+        database_dsn=f"sqlite+aiosqlite:///{database_path}",
         app__environment="development",
     )
     engine = create_engine_from_settings(settings)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    async with factory() as s:
-        yield s
-    await engine.dispose()
-    with contextlib.suppress(FileNotFoundError):
-        Path("./.fixtest.sqlite").unlink()  # noqa: ASYNC240 (best-effort teardown cleanup)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+        async with factory() as s:
+            yield s
+    finally:
+        await engine.dispose()
+        with contextlib.suppress(FileNotFoundError):
+            database_path.unlink()
 
 
 async def _athlete(session: AsyncSession) -> uuid.UUID:
