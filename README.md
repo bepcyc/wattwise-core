@@ -61,14 +61,14 @@ each), and an LLM key for the coach (any OpenAI-compatible endpoint —
 to keep everything on your LAN). Build the image from this repo, then start it:
 
 ```sh
-# Build from source — matches these docs and works on any machine, Intel/AMD or ARM.
+# Build from source to follow this guide on an Intel/AMD or ARM machine.
 # On Apple Silicon, a Raspberry Pi, or any ARM box, build locally (this is the path to use).
 docker build -t wattwise-core:local .
 
-# Prefer not to build? A prebuilt image also exists, but it runs on x86/Intel machines only
-# (not Apple Silicon, a Raspberry Pi, or other ARM hardware):
-#   docker pull ghcr.io/bepcyc/wattwise-core:v0.0.1    # x86/Intel only; if you use it, put
-#                                                       # this name in the `docker run` below.
+# A prebuilt image is also available for 64-bit Intel/AMD PCs (not ARM hardware).
+# It is an older version and may not support every step below; build from source
+# to follow this guide. If you use it, put this image name in `docker run` below:
+#   docker pull ghcr.io/bepcyc/wattwise-core:v0.0.1
 
 # Two secrets — keep SIGNING_KEY in your shell, it is also your login secret below
 ENCRYPTION_KEY=$(python3 -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())')
