@@ -31,6 +31,7 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 
+from wattwise_core.agent import capabilities_evidence, engine_planner, grounding_evidence
 from wattwise_core.agent.capabilities import CanonicalEvidence
 from wattwise_core.agent.contracts import RunStatus
 from wattwise_core.agent.engine import build_agent_engine
@@ -65,23 +66,27 @@ pytestmark = [
 
 UTC = _dt.UTC
 _RIDE_DAYS = (_dt.date(2026, 6, 6), _dt.date(2026, 6, 7), _dt.date(2026, 6, 8))
+_REFERENCE_NOW = _dt.datetime(2026, 6, 9, 12, tzinfo=UTC)
 _QUESTION = "How much training load have I done over the last six weeks?"
 # A real model is stochastic; assert the capability works within a few attempts, not on one draft.
 _MAX_ATTEMPTS = 4
 
 
 def _ride(native_id: str, day: _dt.date) -> GboCandidate:
-    """A constant-250 W, 1 h cycling ride (TSS == 100 at FTP 250) on ``day``."""
-    seconds, watts = 3600, 250.0
+    """A one-hour ride: two minutes at 450 W, then 58 minutes at 250 W.
+
+    The hard effort gives the canonical CP/W' fit non-degenerate power data;
+    activity and lap averages are derived from those same recorded samples.
+    """
+    power = [450.0] * 120 + [250.0] * 3480
+    seconds, watts = len(power), sum(power) / len(power)
     payload = {
         "start_time": _dt.datetime(day.year, day.month, day.day, 8, 0, tzinfo=UTC),
         "sport": "cycling",
         "elapsed_time_s": seconds,
         "moving_time_s": seconds,
         "avg_power_w": watts,
-        "streams": {
-            "power_w": {"values": [watts] * seconds, "sample_basis": "time", "sample_rate_hz": 1.0}
-        },
+        "streams": {"power_w": {"values": power, "sample_basis": "time", "sample_rate_hz": 1.0}},
         "laps": [
             {"lap_index": 0, "start_offset_s": 0, "duration_s": seconds, "avg_power_w": watts}
         ],
@@ -98,12 +103,17 @@ def _ride(native_id: str, day: _dt.date) -> GboCandidate:
 
 
 @pytest_asyncio.fixture
-async def live_db(tmp_path) -> AsyncIterator[Database]:  # type: ignore[no-untyped-def]
-    """A REAL file-sqlite pool (not :memory:) seeded with the owner + FTP + three 100-TSS rides.
+async def live_db(tmp_path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Database]:  # type: ignore[no-untyped-def]
+    """A real file-sqlite pool with an onboarded cycling athlete, FTP and three power rides.
 
     File-sqlite gives the durable checkpointer a real multi-connection pool (§7); :memory:/
     StaticPool would false-green the saver. The canonical + agent-state schemas are created here.
     """
+    # The live model and canonical verifier must resolve the same fixed training window.
+    # Keep checkpoint/authentication clocks real; only computation dates are fixture-owned.
+    monkeypatch.setattr(capabilities_evidence, "utcnow", lambda: _REFERENCE_NOW)
+    monkeypatch.setattr(engine_planner, "utcnow", lambda: _REFERENCE_NOW)
+    monkeypatch.setattr(grounding_evidence, "utcnow", lambda: _REFERENCE_NOW)
     dsn = f"sqlite+aiosqlite:///{tmp_path / 'live_canon.sqlite'}"
     settings = load_settings(app__environment="development", database_dsn=dsn)
     db = Database(settings)
@@ -112,7 +122,15 @@ async def live_db(tmp_path) -> AsyncIterator[Database]:  # type: ignore[no-untyp
         await conn.run_sync(AgentStateBase.metadata.create_all)
     async with db.session() as session:
         session.add(Sport(sport_code="cycling", display_name="Cycling", has_mechanical_power=True))
-        session.add(Athlete(athlete_id=OWNER_ATHLETE_ID, sex="male", reference_timezone="UTC"))
+        await session.flush()  # Register the sport before the athlete's foreign-key reference.
+        session.add(
+            Athlete(
+                athlete_id=OWNER_ATHLETE_ID,
+                sex="male",
+                reference_timezone="UTC",
+                current_sport="cycling",
+            )
+        )
         descriptor = SourceDescriptor(
             source_key="file_import", display_name="Activity files", kind="file_upload"
         )

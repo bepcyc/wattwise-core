@@ -26,6 +26,7 @@ on:
     tags: ["v*"]   # the v*-tag push triggers the release job (CI-R10/CI-R12)
   pull_request:
     branches: [main]
+  workflow_dispatch: {}   # CI-R4/CI-R9: manually verify the same nightly recipes on a chosen ref
   schedule:
     - cron: "30 2 * * *"   # nightly leg (CI-R4): live eval+smoke, deep fuzz (mutation nightly: nightly.yml)
 
@@ -48,6 +49,11 @@ jobs:
     steps:
       - uses: https://github.com/dorny/paths-filter@v3
         id: filter
+        # paths-filter needs a git checkout on push/tag events, and its output is
+        # consumed ONLY for pull_request docs-only skipping (see `decide` below).
+        # Gate it to PRs so push/tag runs don't fail with "not a git repository"
+        # (git exit 128) and cascade-skip the heavy tiers + release. (CI-R / #106 fix)
+        if: ${{ github.event_name == 'pull_request' }}
         with:
           predicate-quantifier: 'every'
           filters: |
@@ -497,7 +503,7 @@ jobs:
     # blocking PRs. The nightly MUTATION campaign (T-MUT enforcing leg) is owned by the
     # dedicated nightly.yml scheduler (`just test-mut`) — kept out of here so there is
     # exactly ONE mutation gate across the workflows (issue #35 / ADR 0006 / TIER-R6).
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: docker
     env:
       WATTWISE_LLM_API_KEY: ${{ secrets.WATTWISE_LLM_API_KEY }}
@@ -522,7 +528,7 @@ jobs:
   # derives the registry host + API base from GITHUB_SERVER_URL the runner sets.
   release:
     name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - lint
       - type-check
@@ -544,7 +550,9 @@ jobs:
       FORGE_PROVIDER: forgejo
       VERSION: ${{ github.ref_name }}   # the pushed v* tag drives release.sh
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+      # Keep the release credential separate from the runner's reserved job-token
+      # variables; export FORGEJO_TOKEN only in the release script's process.
+      WW_FORGE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
         with: { fetch-depth: 0 }
@@ -560,11 +568,10 @@ jobs:
       - run: bash scripts/ci_tools.sh just trivy syft
       - name: Registry login (Forgejo OCI)
         run: |
-          if [ -n "${FORGEJO_TOKEN:-}" ]; then
-            echo "${FORGEJO_TOKEN}" | docker login "${GITHUB_SERVER_URL#*://}" \
-              -u "${GITHUB_ACTOR}" --password-stdin
-          else
-            echo "FORGEJO_TOKEN unset — skipping registry login (release will fail at push)"
-          fi
+          : "${WW_FORGE_TOKEN:?RELEASE_TOKEN is required for a Forgejo release}"
+          printf '%s\n' "${WW_FORGE_TOKEN}" | docker login "${GITHUB_SERVER_URL#*://}" \
+            -u "${GITHUB_ACTOR}" --password-stdin
       - run: just install
-      - run: just release               # CI-R10/CI-R12 (FORGE_PROVIDER=forgejo)
+      - run: |
+          export FORGEJO_TOKEN="${WW_FORGE_TOKEN}"
+          just release                 # CI-R10/CI-R12 (FORGE_PROVIDER=forgejo)

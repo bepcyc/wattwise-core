@@ -46,16 +46,16 @@ dependencies = [
   "langgraph-checkpoint>=2.0.9",
   "langchain-core>=0.3.28",
   "openai>=1.58",
-  "mcp>=1.2",
+  "mcp>=1.28.1,<2",
   # --- API ---
   "fastapi>=0.115",
   "uvicorn[standard]>=0.34",
   "sse-starlette>=2.1",
   "nh3>=0.2.19",
   # --- security / ops ---
-  "cryptography>=44.0",
+  "cryptography>=50.0",
   "structlog>=24.4",
-  "httpx2>=2.3.0",
+  "httpx2>=2.12.0",
 ]
 
 [project.optional-dependencies]

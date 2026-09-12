@@ -880,6 +880,7 @@ def test_update_baseline_cli_rewrites_and_run_stays_green(
     # QA-EVAL-R12(c): `update-baseline` actually rewrites the artifact (no longer a no-op),
     # and a subsequent `run` (with its non-regression gate active) stays green against it.
     target = tmp_path / "baseline-scorecard.json"
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("wattwise_core.eval.baseline.BASELINE_PATH", target)
     assert cli_main(["update-baseline"]) == 0
     assert target.exists(), "update-baseline MUST write the baseline artifact (not a no-op)"
