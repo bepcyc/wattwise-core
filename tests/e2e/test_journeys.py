@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from sqlalchemy import event
 
+from wattwise_core.agent import capabilities_evidence, engine_planner, grounding_evidence
 from wattwise_core.agent.contracts import ClaimKind, ReflectDecision, ReflectVerdict
 from wattwise_core.agent.engine import (
     GraphAgentEngine,
@@ -88,6 +89,15 @@ _RIDE_FIT = (
 )
 
 
+@pytest.fixture
+def agent_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Anchor agent date windows to the seeded rides without changing token or checkpoint clocks."""
+    now = _dt.datetime.combine(_TODAY, _dt.time(12), tzinfo=UTC)
+    monkeypatch.setattr(capabilities_evidence, "utcnow", lambda: now)
+    monkeypatch.setattr(engine_planner, "utcnow", lambda: now)
+    monkeypatch.setattr(grounding_evidence, "utcnow", lambda: now)
+
+
 def _completed_model() -> FakeModel:
     """A FakeModel scripting a grounded, COMPLETED weekly-load answer (the default path).
 
@@ -130,7 +140,7 @@ class _Journey:
 
 
 @pytest.fixture
-def journey(tmp_path: Path) -> Iterator[_Journey]:
+def journey(tmp_path: Path, agent_clock: None) -> Iterator[_Journey]:
     """Build the REAL app on a shared file DB, seed canonical data, and mint a real token.
 
     A temp-file DSN means every request-scoped session (the analytics read, the import
@@ -564,7 +574,7 @@ def _wire_plan_seams(app: FastAPI, engine: GraphAgentEngine) -> None:
 
 
 @pytest.fixture
-def plan_journey(tmp_path: Path) -> Iterator[_PlanJourney]:
+def plan_journey(tmp_path: Path, agent_clock: None) -> Iterator[_PlanJourney]:
     """The BUILT app whose plan + decision endpoints share ONE durable-saver engine (E2E-R1a).
 
     Mirrors :func:`journey` (real app, shared file DB, real token), but the agent engine is the

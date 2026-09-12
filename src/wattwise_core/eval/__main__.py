@@ -24,7 +24,6 @@ import json
 import os
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from wattwise_core.eval.baseline import (
@@ -33,7 +32,12 @@ from wattwise_core.eval.baseline import (
     live_run_blocks_baseline,
     write_baseline,
 )
-from wattwise_core.eval.live import LiveRunReport, LiveStatus, LiveSuiteResult, classify_infra_text
+from wattwise_core.eval.live import (
+    LiveRunReport,
+    LiveStatus,
+    LiveSuiteResult,
+    parse_live_smoke_results,
+)
 from wattwise_core.eval.recorded_meta import stamp_recorded_datasets, verify_recorded_datasets
 from wattwise_core.eval.runner import EvalMode, Scorecard, list_suites, run_suite
 
@@ -70,23 +74,15 @@ def _run_live_smoke() -> list[LiveSuiteResult]:
     """
     junit = Path("reports/eval-live-smoke.xml")
     junit.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(  # noqa: S603 - fixed argv, repo-local dev/CI tooling
-        [sys.executable, "-m", "pytest", "-m", "llm", "-q", f"--junit-xml={junit}"],
-        check=False,
-    )
-    results: list[LiveSuiteResult] = []
-    tree = ET.parse(junit)  # noqa: S314 - our own pytest junit artifact, not untrusted XML
-    for case in tree.getroot().iter("testcase"):
-        name = f"live_smoke::{case.get('name', 'unknown')}"
-        problems = [el for el in case if el.tag in {"failure", "error"}]
-        if not problems:
-            if not [el for el in case if el.tag == "skipped"]:
-                results.append(LiveSuiteResult(name, LiveStatus.PASS))
-            continue
-        text = " ".join((el.get("message") or "") + (el.text or "") for el in problems)
-        status = LiveStatus.INFRA_ERROR if classify_infra_text(text) else LiveStatus.FAIL
-        results.append(LiveSuiteResult(name, status, detail=text[:500]))
-    return results
+    junit.unlink(missing_ok=True)
+    try:
+        process = subprocess.run(  # noqa: S603 - fixed argv, repo-local dev/CI tooling
+            [sys.executable, "-m", "pytest", "-m", "llm", "-q", f"--junit-xml={junit}"],
+            check=False,
+        )
+        return parse_live_smoke_results(junit.read_text(), process.returncode)
+    except (OSError, UnicodeError) as exc:
+        return [LiveSuiteResult("live_smoke::runner", LiveStatus.FAIL, detail=str(exc))]
 
 
 def _cmd_run_live(args: argparse.Namespace) -> int:
@@ -136,7 +132,7 @@ def _cmd_run_live(args: argparse.Namespace) -> int:
         print(f"[{r.status.value.upper()}] {r.suite}")
     for line in report.alert_lines():
         print(line, file=sys.stderr)
-    if report.quality_failed or report.infra_blocked:
+    if report.quality_failed or report.infra_blocked or not report.live_results:
         return 1
     print(f"live eval PASSED (infra_error_rate={report.infra_error_rate:.2f})")
     return 0

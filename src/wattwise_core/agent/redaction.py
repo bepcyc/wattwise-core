@@ -26,7 +26,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence, Set
 from typing import Any, Final
 
-from langgraph.checkpoint.base import Checkpoint
+from langgraph.checkpoint.base import WRITES_IDX_MAP, Checkpoint
+from langgraph.checkpoint.serde.base import SerializerProtocol
 
 from wattwise_core.api.redaction import redact_text
 
@@ -86,4 +87,29 @@ def redact_checkpoint(checkpoint: Checkpoint) -> Checkpoint:
     return redacted
 
 
-__all__ = ["IDENTITY_CHANNELS", "redact_checkpoint", "redact_state_payload"]
+def prepare_pending_writes(
+    writes: Sequence[tuple[str, Any]], serde: SerializerProtocol
+) -> list[tuple[int, str, str, bytes]]:
+    """Mask and serialize a complete pending batch before any DB writes (CKPT-R2a/-R8)."""
+    prepared: list[tuple[int, str, str, bytes]] = []
+    for idx, (channel, value) in enumerate(writes):
+        write_idx = WRITES_IDX_MAP.get(channel, idx)
+        # Mask PII in the pending intermediate write before it is serialized, so a
+        # node's not-yet-checkpointed output (which may carry the athlete's words or
+        # composed prose) is never persisted raw (AGT-SEC-R4 / CKPT-R8). An IDENTITY
+        # channel (athlete_id/thread_id/turn_id/...) is left verbatim — it is an opaque
+        # internal identifier, not PII, and masking it would corrupt durable scoping
+        # (CKPT-R3). Redaction only masks high-confidence PII spans, so the replayed
+        # write (CKPT-R2) keeps its shape and type.
+        masked = value if channel in IDENTITY_CHANNELS else redact_state_payload(value)
+        value_type, value_blob = serde.dumps_typed(masked)
+        prepared.append((write_idx, channel, value_type, value_blob))
+    return prepared
+
+
+__all__ = [
+    "IDENTITY_CHANNELS",
+    "prepare_pending_writes",
+    "redact_checkpoint",
+    "redact_state_payload",
+]

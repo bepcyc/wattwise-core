@@ -23,7 +23,6 @@ from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
-    WRITES_IDX_MAP,
     BaseCheckpointSaver,
     ChannelVersions,
     Checkpoint,
@@ -38,15 +37,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from wattwise_core.agent import checkpoint_interrupts as ledger
 from wattwise_core.agent.redaction import (
-    IDENTITY_CHANNELS,
+    prepare_pending_writes,
     redact_checkpoint,
-    redact_state_payload,
 )
 from wattwise_core.agent.state_store import (
     AgentCheckpoint,
     AgentThread,
     AgentWrite,
 )
+from wattwise_core.agent.state_write_queue import writer_lock_for
 from wattwise_core.observability.logging import get_logger
 from wattwise_core.persistence.types import uuid7
 from wattwise_core.persistence.upsert import ensure_row, upsert
@@ -122,6 +121,7 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
     ) -> None:
         super().__init__(serde=serde)
         self._sessions = session_factory
+        self._write_lock = writer_lock_for(session_factory)
         self._athlete_id = _coerce_athlete_id(athlete_id)
         self._conversation_id = conversation_id
         self._schema_version = schema_version
@@ -143,9 +143,9 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
     async def _ensure_thread(self, session: AsyncSession, thread_id: str) -> AgentThread:
         """Get-or-create the durable thread for the saver's bound (athlete, conversation).
 
-        Concurrency-safe (CKPT-R1): a single graph run makes the langgraph runtime call
-        ``aput``/``aput_writes`` on SEPARATE sessions/connections that race to create the
-        thread. The create therefore goes through the sanctioned atomic upsert seam's
+        Concurrency-safe (CKPT-R1): shared-factory admission orders the runtime's concurrent
+        ``aput``/``aput_writes`` locally, but independent factories/processes can still race
+        to create the thread. The create uses the sanctioned atomic upsert seam's
         :func:`~wattwise_core.persistence.upsert.ensure_row` (UPS-R2) keyed on
         ``thread_id``: ONE atomic insert-or-ignore in its own short transaction, so both
         racers succeed — never a plain ``INSERT`` whose loser raises (PostgreSQL/SQLite
@@ -373,7 +373,7 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
         ns = _config_str(config, "checkpoint_ns")
         parent_id = get_checkpoint_id(config) or None
         cp_type, cp_blob = self.serde.dumps_typed(redact_checkpoint(checkpoint))
-        async with self._sessions() as session:
+        async with self._write_lock, self._sessions() as session:
             await self._ensure_thread(session, thread_id)
             row = AgentCheckpoint(
                 thread_id=thread_id,
@@ -411,19 +411,12 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
         thread_id = _config_str(config, "thread_id")
         ns = _config_str(config, "checkpoint_ns")
         checkpoint_id = _config_str(config, "checkpoint_id")
-        async with self._sessions() as session:
+        # CKPT-R2a: prepare the entire masked batch before acquiring a writer lock.
+        # Serialization can be expensive; parallel checkpoints must remain able to write.
+        prepared = prepare_pending_writes(writes, self.serde)
+        async with self._write_lock, self._sessions() as session:
             await self._ensure_thread(session, thread_id)
-            for idx, (channel, value) in enumerate(writes):
-                write_idx = WRITES_IDX_MAP.get(channel, idx)
-                # Mask PII in the pending intermediate write before it is serialized, so a
-                # node's not-yet-checkpointed output (which may carry the athlete's words or
-                # composed prose) is never persisted raw (AGT-SEC-R4 / CKPT-R8). An IDENTITY
-                # channel (athlete_id/thread_id/turn_id/...) is left verbatim — it is an opaque
-                # internal identifier, not PII, and masking it would corrupt durable scoping
-                # (CKPT-R3). Redaction only masks high-confidence PII spans, so the replayed
-                # write (CKPT-R2) keeps its shape and type.
-                masked = value if channel in IDENTITY_CHANNELS else redact_state_payload(value)
-                value_type, value_blob = self.serde.dumps_typed(masked)
+            for write_idx, channel, value_type, value_blob in prepared:
                 await upsert(
                     session,
                     cast(Table, AgentWrite.__table__),  # ORM table is a Table at runtime
@@ -450,15 +443,17 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):  # noqa: size-limits
 
     async def record_interrupt(self, thread_id: str, interrupt_id: str) -> None:
         """Record a ``live`` approval-gate interrupt row, idempotently (CKPT-R9)."""
-        await ledger.record_interrupt(
-            self._sessions, self._ensure_thread, self._athlete_id, thread_id, interrupt_id
-        )
+        async with self._write_lock:
+            await ledger.record_interrupt(
+                self._sessions, self._ensure_thread, self._athlete_id, thread_id, interrupt_id
+            )
 
     async def consume_interrupt(self, thread_id: str, interrupt_id: str) -> bool:
         """Atomically consume a ``live`` interrupt; True ⇒ resume, False ⇒ 404/409 (CKPT-R9)."""
-        return await ledger.consume_interrupt(
-            self._sessions, self._athlete_id, thread_id, interrupt_id
-        )
+        async with self._write_lock:
+            return await ledger.consume_interrupt(
+                self._sessions, self._athlete_id, thread_id, interrupt_id
+            )
 
     async def interrupt_status(
         self, thread_id: str, interrupt_id: str

@@ -25,6 +25,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from wattwise_core.agent import capabilities_evidence, engine_planner, grounding_evidence
 from wattwise_core.agent.capabilities import CanonicalEvidence
 from wattwise_core.agent.compose_contracts import EvidenceClaim
 from wattwise_core.agent.contracts import ClaimKind, GroundDecision, RunStatus
@@ -68,6 +69,7 @@ from wattwise_core.storage import content_hash
 pytestmark = pytest.mark.integration
 
 UTC = _dt.UTC
+_TODAY = _dt.date(2026, 6, 8)
 _RIDE_DAYS = (_dt.date(2026, 6, 1), _dt.date(2026, 6, 2), _dt.date(2026, 6, 3))
 
 
@@ -103,8 +105,15 @@ class _SessionCtx:
 
 
 @pytest_asyncio.fixture
-async def seeded() -> AsyncIterator[tuple[AnalyticsService, _DatabaseStub, AsyncSession]]:
+async def seeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[AnalyticsService, _DatabaseStub, AsyncSession]]:
     """A canonical store seeded with the owner + an FTP signature + three 100-TSS rides."""
+    # Keep the trailing gather window and temporal grounding aligned with the fixed ride dates.
+    now = _dt.datetime.combine(_TODAY, _dt.time(12), tzinfo=UTC)
+    monkeypatch.setattr(capabilities_evidence, "utcnow", lambda: now)
+    monkeypatch.setattr(engine_planner, "utcnow", lambda: now)
+    monkeypatch.setattr(grounding_evidence, "utcnow", lambda: now)
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -174,7 +183,7 @@ async def test_engine_answer_runs_graph_to_completed(
     completed-with-zero-citations semantics this test once pinned was the issue-44/-45 defect.)
     """
     svc, database, _ = seeded
-    today = _dt.datetime.now(UTC).date()
+    today = _TODAY
     series = await svc.pmc(str(OWNER_ATHLETE_ID), today - _dt.timedelta(days=42), today)
     ctl = next(day.value.ctl for day in reversed(series) if day.available)
     model = FakeModel(

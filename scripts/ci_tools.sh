@@ -32,18 +32,50 @@ GITLEAKS_FALLBACK_VERSION="8.21.2"
 # space the attempts out, and `--fail` keeps a final hard failure visible (non-zero exit).
 CURL_RETRY=(--retry 5 --retry-delay 3 --retry-all-errors --fail)
 
-# When a GitHub token is present (GITHUB_TOKEN on the runner, or GH_TOKEN locally),
-# authenticate GitHub release/API requests — authenticated calls get a far higher rate
-# limit, which is the actual cause of the transient 403s. Absence of a token changes
-# NOTHING: the array stays empty and requests go out unauthenticated exactly as before.
-GH_TOKEN_VALUE="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+# CI-R9a: Forgejo also sets GITHUB_TOKEN, but that token is not valid for
+# GitHub. Upstream installers inspect the environment themselves, so normalize
+# their inherited token as well as the direct release-request header below.
+GH_TOKEN_VALUE="${GH_TOKEN:-}"
+if [ -z "${GH_TOKEN_VALUE}" ]; then
+  case "${GITHUB_SERVER_URL:-}" in
+    https://github.com|https://github.com/)
+      GH_TOKEN_VALUE="${GITHUB_TOKEN:-}" ;;
+    "")
+      if [ "${GITHUB_ACTIONS:-false}" != "true" ]; then
+        GH_TOKEN_VALUE="${GITHUB_TOKEN:-}"
+      fi ;;
+  esac
+fi
+if [ -n "${GH_TOKEN_VALUE}" ]; then
+  export GITHUB_TOKEN="${GH_TOKEN_VALUE}"
+else
+  unset GITHUB_TOKEN
+fi
 
 log() { printf '[ci-tools] %s\n' "$*" >&2; }
 
-install_just() {
-  curl "${CURL_RETRY[@]}" --proto '=https' --tlsv1.2 -fsSL https://just.systems/install.sh \
-    | bash -s -- --to "${BIN_DIR}"
-}
+install_just() (
+  # The vendor installer performs its own GitHub requests without retries.
+  # Execute only a complete download and publish only a successful staged binary.
+  local stage attempt
+  stage="$(mktemp -d "${BIN_DIR}/.just-install.XXXXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  curl "${CURL_RETRY[@]}" --proto '=https' --tlsv1.2 -fsSL \
+    https://just.systems/install.sh -o "$stage/install.sh" || return 1
+  for attempt in 1 2 3; do
+    rm -rf "$stage/bin"
+    if bash "$stage/install.sh" --to "$stage/bin"; then
+      [ -x "$stage/bin/just" ] && "$stage/bin/just" --version >/dev/null || return 1
+      mv "$stage/bin/just" "${BIN_DIR}/just"
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      log "just installer failed (attempt $attempt/3); retrying"
+      sleep 3
+    fi
+  done
+  return 1
+)
 
 install_trivy() {
   curl "${CURL_RETRY[@]}" -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \

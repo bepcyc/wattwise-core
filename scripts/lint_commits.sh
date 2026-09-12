@@ -155,8 +155,15 @@ main() {
 
   # Collect "<short-sha> <subject>" per commit, newline-separated, oldest→newest.
   # %x09 (tab) cleanly separates the sha from a subject that may contain spaces.
-  local lines
-  if ! lines="$(git log --no-merges --reverse --format='%h%x09%s' "$range" 2>/dev/null)"; then
+  local lines log_range="$range"
+  local log_options=(--no-merges --reverse --format='%h%x09%s')
+  if [ -z "${COMMIT_RANGE:-}" ] && [ "$range" = HEAD ]; then
+    # Exclude HEAD's parents explicitly: --max-count=1 with --no-merges alone
+    # would walk back from a merge tip to an older non-merge commit.
+    log_range='HEAD^!'
+    log_options+=(--max-count=1)
+  fi
+  if ! lines="$(git log "${log_options[@]}" "$log_range" 2>/dev/null)"; then
     # An unresolvable range (e.g. shallow clone missing the base) — fail loudly.
     err "could not read commits for range '${range}' (is the base fetched / clone deep enough?)"
     exit 1

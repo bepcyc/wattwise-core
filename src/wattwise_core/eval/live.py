@@ -20,6 +20,8 @@ The live leg is env-gated (``WATTWISE_LLM_API_KEY``) and NEVER part of the offli
 from __future__ import annotations
 
 import asyncio
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -92,11 +94,18 @@ class LiveRunReport:
 
     @property
     def infra_error_rate(self) -> float:
-        """Fraction of suites that landed INFRA_ERROR (0.0 for an empty run)."""
-        if not self.results:
+        """Fraction of live attempts that landed INFRA_ERROR; recorded gates are separate."""
+        if not self.live_results:
             return 0.0
-        infra = sum(1 for r in self.results if r.status is LiveStatus.INFRA_ERROR)
-        return infra / len(self.results)
+        infra = sum(1 for r in self.live_results if r.status is LiveStatus.INFRA_ERROR)
+        return infra / len(self.live_results)
+
+    @property
+    def live_results(self) -> tuple[LiveSuiteResult, ...]:
+        """Actual live outcomes, excluding scorecards produced by the recorded gate."""
+        return tuple(
+            r for r in self.results if r.scorecard is None or r.scorecard.mode is EvalMode.LIVE
+        )
 
     @property
     def quality_failed(self) -> tuple[str, ...]:
@@ -116,7 +125,7 @@ class LiveRunReport:
         within-budget infra blip still bars baseline advancement, it only avoids the
         blocking alert.
         """
-        return not self.quality_failed and self.infra_error_rate == 0.0
+        return bool(self.live_results) and not self.quality_failed and self.infra_error_rate == 0.0
 
     def alert_lines(self) -> tuple[str, ...]:
         """Human-readable alert lines (CI-R4: a live regression/infra breach must alert)."""
@@ -131,21 +140,16 @@ class LiveRunReport:
         return tuple(lines)
 
 
-#: Failure-text tokens that mark an infrastructure failure in the live smoke's junit
-#: output (the env-gated ``llm`` pytest tier driven by ``--mode=live``).
-_INFRA_TEXT_TOKENS = (
-    "timeout",
-    "timed out",
-    "connection",
-    "connect error",
-    "rate limit",
-    "rate-limit",
-    "429",
-    "502",
-    "503",
-    "504",
-    "unavailable",
-    "temporarily",
+#: Match supported exception summaries, never incidental traceback tokens.
+_INFRA_EXCEPTION = re.compile(
+    r"^(?:(?:openai|httpx|httpcore)(?:\.[A-Za-z_]\w*)*\.)?"
+    r"(?:ConnectTimeout|ReadTimeout|WriteTimeout|PoolTimeout|ConnectError|ReadError|"
+    r"WriteError|NetworkError|APITimeoutError|APIConnectionError|RateLimitError|"
+    r"TimeoutError|ConnectionError):"
+)
+_INFRA_STATUS = re.compile(
+    r"^(?:(?:openai\.)?(?:APIStatusError|InternalServerError|RateLimitError):\s*)?"
+    r"Error code: (408|429|500|502|503|504)\b"
 )
 
 
@@ -156,8 +160,44 @@ def classify_infra_text(text: str) -> bool:
     rather than raisable exceptions; the same infra taxonomy (unavailability, timeout,
     rate-limit) is detected from the message.
     """
-    lowered = text.lower()
-    return any(token in lowered for token in _INFRA_TEXT_TOKENS)
+    summary = text.strip().partition("\n")[0]
+    return bool(_INFRA_EXCEPTION.match(summary) or _INFRA_STATUS.match(summary))
+
+
+def _smoke_case_result(case: ET.Element) -> LiveSuiteResult:
+    """Classify one named executed case from its exception summary, not its traceback."""
+    name = case.get("name", "").strip()
+    if not name or name == "unknown" or case.find("skipped") is not None:
+        return LiveSuiteResult(
+            "live_smoke::" + (name or "unnamed"), LiveStatus.FAIL, "case not executed"
+        )
+    problems = [element for element in case if element.tag in {"failure", "error"}]
+    if not problems:
+        return LiveSuiteResult("live_smoke::" + name, LiveStatus.PASS)
+    messages = [element.get("message", "") for element in problems]
+    status = LiveStatus.INFRA_ERROR if all(map(classify_infra_text, messages)) else LiveStatus.FAIL
+    return LiveSuiteResult("live_smoke::" + name, status, detail="; ".join(messages)[:500])
+
+
+def parse_live_smoke_results(xml: str, returncode: int) -> list[LiveSuiteResult]:
+    """Require a completed pytest run with usable case verdicts (QA-EVAL-R12(b))."""
+    failure = LiveSuiteResult(
+        "live_smoke::runner", LiveStatus.FAIL, "incomplete or invalid live results"
+    )
+    if returncode not in {0, 1}:
+        return [LiveSuiteResult(failure.suite, LiveStatus.FAIL, f"pytest exited {returncode}")]
+    try:
+        root = ET.fromstring(xml)  # noqa: S314 - our own pytest artifact
+    except ET.ParseError:
+        return [failure]
+    if root.tag not in {"testsuite", "testsuites"}:
+        return [failure]
+    results = [_smoke_case_result(case) for case in root.iter("testcase")]
+    if not results:
+        return [failure]
+    if (returncode == 0) != all(result.status is LiveStatus.PASS for result in results):
+        results.append(failure)
+    return results
 
 
 async def run_live_suite(suite: str) -> LiveSuiteResult:
@@ -183,5 +223,6 @@ __all__ = [
     "LiveSuiteResult",
     "classify_infra",
     "classify_infra_text",
+    "parse_live_smoke_results",
     "run_live_suite",
 ]

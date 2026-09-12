@@ -13,7 +13,7 @@
 #   The spec (RUN-R2 / CONT-R1) explicitly allows "Python 3.13-slim OR distroless". Google's
 #   distroless `python3-debian12` ships a FIXED Python 3.11 (verified at build time of this file),
 #   which would VIOLATE the hard RUN-R3.1 "Python 3.13" mandate — distroless has no 3.13 variant.
-#   We therefore use python:3.13-slim-bookworm, which is an allowed minimal runtime, satisfies
+#   We therefore use python:3.13-slim-trixie, which is an allowed minimal runtime, satisfies
 #   RUN-R3.1, and lets uvicorn run with a real shell-less-friendly entrypoint. We recover most of
 #   distroless's hardening posture manually: non-root fixed UID, no build toolchain in the final
 #   layer, a venv copied from the builder, read-only-root-fs-compatible layout, and a tini-free
@@ -29,7 +29,7 @@
 # Stage 1 — builder: resolve + install the FROZEN locked dependency set with uv.
 # ---------------------------------------------------------------------------
 # hadolint ignore=DL3007
-FROM ghcr.io/astral-sh/uv:0.5.13-python3.13-bookworm-slim@sha256:c64168148341106dd8b9bf8ff1f1c5f443b156c40386b7d0c4ddd4dda42174a0 AS builder
+FROM ghcr.io/astral-sh/uv:0.12.13-python3.13-trixie-slim@sha256:c0ba49559fc5622531fd05a5747b52afb49ffa883574bbf8eb719ebd103efb84 AS builder
 
 # Deterministic, hermetic install:
 #   - compile bytecode so the runtime stage does no first-import write (read-only fs friendly);
@@ -63,7 +63,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime: minimal, non-root, no build tools, no dev deps, no tests.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:05b95397cac02b060ff1251afaa78087d92d7034369afbc8eb765631cada8257 AS runtime
+FROM python:3.13-slim-trixie@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285 AS runtime
 
 # OCI provenance labels (CI-R12). version/revision are injected at build/release time; defaults keep
 # a bare `docker build` honest. ARGs are NOT secrets (SEC-R12) — purely build metadata.
@@ -97,6 +97,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # A static UID (10001) keeps file ownership reproducible and lets the platform map it predictably.
 RUN groupadd --system --gid 10001 wattwise \
     && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin wattwise
+
+# Perl is unused by the Python runtime, migrations, and database drivers. Remove the
+# actual package after account creation to eliminate its CVE-2026-13221 attack surface
+# (RUN-R2 / CONT-R1). Debian marks perl-base essential for general-purpose systems;
+# this minimal application image intentionally has no Perl runtime. Keep dpkg's package
+# database intact so scanners can inventory everything that remains installed.
+RUN apt-get purge -y --allow-remove-essential perl-base \
+    && test ! -e /usr/bin/perl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy ONLY the self-contained venv from the builder — no compiler, no uv, no dev deps, no .git,
 # no tests, no lockfile, no source tree beyond what the installed wheel already contains.
