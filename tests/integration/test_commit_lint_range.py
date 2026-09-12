@@ -13,14 +13,18 @@ BASH = shutil.which("bash") or "/bin/bash"
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/lint_commits.sh"
 
 
+def git_environment() -> dict[str, str]:
+    """Git hooks export repository selectors which must not escape into fixture repos."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(  # noqa: S603 — fixed executable and synthetic test arguments
-        [GIT, "-C", str(repo), *args], text=True
+        [GIT, "-C", str(repo), *args], text=True, env=git_environment()
     ).strip()
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
+def init_repo(tmp_path: Path) -> Path:
     git(tmp_path, "init", "-b", "main")
     git(tmp_path, "config", "user.name", "Synthetic Test")
     git(tmp_path, "config", "user.email", "test@example.invalid")
@@ -29,13 +33,18 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return init_repo(tmp_path)
+
+
 def commit(repo: Path, message: str) -> str:
     git(repo, "commit", "--allow-empty", "-m", message)
     return git(repo, "rev-parse", "HEAD")
 
 
 def lint(repo: Path, **overrides: str) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
+    env = git_environment()
     for key in ("COMMIT_RANGE", "GITHUB_BASE_REF", "GITEA_BASE_REF", "FORGEJO_BASE_REF"):
         env.pop(key, None)
     return subprocess.run(  # noqa: S603 — repository gate against an isolated synthetic repo
@@ -92,3 +101,32 @@ def test_merge_tip_exemption_does_not_select_ancestor(repo: Path) -> None:
     result = lint(repo)
     assert result.returncode == 0, result.stderr
     assert "no non-merge commits" in result.stdout
+
+
+def test_hook_git_environment_cannot_redirect_fixture_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    init_repo(outer)
+    original_head = commit(outer, "chore: preserve outer repository")
+    original_config = (outer / ".git/config").read_bytes()
+    original_refs = git(outer, "show-ref")
+    monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(outer / ".git/index"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(outer / "injected-hooks"))
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    init_repo(inner)
+    commit(inner, "historical invalid inner subject")
+    commit(inner, "fix(ci): independent inner tip")
+    result = lint(inner)
+    assert result.returncode == 0, result.stderr
+    assert "all 1 commit message(s)" in result.stdout
+    assert (inner / ".git").is_dir()
+    assert git(outer, "rev-parse", "HEAD") == original_head
+    assert git(outer, "show-ref") == original_refs
+    assert (outer / ".git/config").read_bytes() == original_config
