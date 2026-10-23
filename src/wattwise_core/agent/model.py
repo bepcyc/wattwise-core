@@ -34,6 +34,10 @@ from wattwise_core.observability import runtrace
 from wattwise_core.observability.logging import get_logger
 
 _VERDICT_TEMPERATURE = 0.0  # MODEL-R5: zero temperature for verdicts / span extraction.
+# Extra compose attempts after an empty answer the provider ended for a reason OTHER than the
+# output cap (MODEL-R5a): a transient upstream glitch, not budget exhaustion, so one fresh call
+# is worth it. An answer cut off at the cap (``finish_reason == "length"``) is never retried.
+_EMPTY_COMPOSE_RETRIES = 1
 
 _logger = get_logger(__name__)
 
@@ -220,36 +224,41 @@ class OpenAICompatibleModel:
         # output tokens on its thinking trace before the answer, so a small per-call cap starved
         # compose to empty (MODEL-R5a); this budget holds reasoning trace + answer.
         bound = min(max_tokens, self._max_output_tokens)
-        with runtrace.span("model.compose") as span:
-            completion = await self._client.chat.completions.create(
-                model=self._model,
-                temperature=self._compose_temperature,
-                max_completion_tokens=bound,
-                reasoning_effort=self._request_effort,
-                messages=[
-                    {"role": "system", "content": self._outbound(system)},
-                    {"role": "user", "content": self._outbound(context)},
-                ],
-            )
-            self._record_usage(span, completion, schema_id=None)
+        for attempt in range(_EMPTY_COMPOSE_RETRIES + 1):
+            with runtrace.span("model.compose") as span:
+                completion = await self._client.chat.completions.create(
+                    model=self._model,
+                    temperature=self._compose_temperature,
+                    max_completion_tokens=bound,
+                    reasoning_effort=self._request_effort,
+                    messages=[
+                        {"role": "system", "content": self._outbound(system)},
+                        {"role": "user", "content": self._outbound(context)},
+                    ],
+                )
+                self._record_usage(span, completion, schema_id=None)
+            choice = completion.choices[0]
+            content = choice.message.content or ""
+            if content:
+                return content
+            # MODEL-R5a: an empty answer is never a valid draft. 2026 reasoning models emit the
+            # reasoning trace BEFORE the answer in a separate channel, so empty content cut off
+            # at the output cap means the budget went to reasoning — fail closed, retrying the
+            # same budget would only burn it again. Any other stop is retried once (above).
+            finish = getattr(choice, "finish_reason", None)
+            if finish == "length":
+                raise ModelResponseError(
+                    "model reasoning budget exhausted: output cap reached with empty content; "
+                    "refusing to store an empty draft (MODEL-R5a)"
+                )
+            _logger.warning("empty compose content", finish_reason=finish, attempt=attempt + 1)
         msg = completion.choices[0].message
-        content = msg.content or ""
-        # MODEL-R5a: 2026 reasoning models emit the reasoning trace BEFORE the answer in a
-        # separate channel. A non-empty reasoning trace with EMPTY content means the output
-        # budget was exhausted by reasoning — this is NOT a valid empty answer, it is a
-        # resource-exhaustion failure that MUST fail closed rather than silently store ''.
         reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
-        if not content and reasoning:
-            raise ModelResponseError(
-                "model reasoning budget exhausted: reasoning trace present but content empty; "
-                "refusing to store an empty draft (MODEL-R5a)"
-            )
-        if not content:
-            raise ModelResponseError(
-                "model returned empty compose content with no reasoning trace; "
-                "refusing to store an empty draft (MODEL-R5a)"
-            )
-        return content
+        trace = "a reasoning trace" if reasoning else "no reasoning trace"
+        raise ModelResponseError(
+            f"model returned empty compose content (finish_reason={finish!r}, {trace}) after "
+            f"{_EMPTY_COMPOSE_RETRIES + 1} attempts; refusing to store an empty draft (MODEL-R5a)"
+        )
 
 
 def _build_client(cfg: Settings) -> AsyncOpenAI:

@@ -291,6 +291,52 @@ async def test_openai_model_compose_raises_on_empty_content() -> None:
         await model.compose(system="v", context="c")
 
 
+class _SequencedCreate:
+    """Returns one scripted ``(content, finish_reason)`` completion per ``create`` call."""
+
+    def __init__(self, script: list[tuple[str, str]]) -> None:
+        self._script = list(script)
+        self.calls = 0
+
+    async def create(self, **_: Any) -> Any:
+        content, finish = self._script[self.calls]
+        self.calls += 1
+        choice = type("Choice", (), {"message": _StubMessage(content=content)})()
+        choice.finish_reason = finish
+        return type("Completion", (), {"choices": [choice]})()
+
+
+def _sequenced_model(script: list[tuple[str, str]]) -> tuple[OpenAICompatibleModel, Any]:
+    completions = _SequencedCreate(script)
+    model = OpenAICompatibleModel(
+        settings=_dev_settings(),
+        client=_StubClient(completions),  # type: ignore[arg-type]
+    )
+    return model, completions
+
+
+async def test_openai_model_compose_retries_transient_empty_content() -> None:
+    """MODEL-R5a: an empty answer NOT cut off at the cap is a provider glitch, retried once."""
+    model, completions = _sequenced_model([("", "stop"), ("warm prose", "stop")])
+    assert await model.compose(system="v", context="c") == "warm prose"
+    assert completions.calls == 2
+
+
+async def test_openai_model_compose_fails_closed_when_output_cap_reached() -> None:
+    """MODEL-R5a: empty content at the output cap is budget exhaustion — no retry."""
+    model, completions = _sequenced_model([("", "length"), ("unused", "stop")])
+    with pytest.raises(ModelResponseError, match="budget exhausted"):
+        await model.compose(system="v", context="c")
+    assert completions.calls == 1
+
+
+async def test_openai_model_compose_fails_after_bounded_empty_retries() -> None:
+    model, completions = _sequenced_model([("", "stop"), ("", "stop")])
+    with pytest.raises(ModelResponseError, match="finish_reason='stop'"):
+        await model.compose(system="v", context="c")
+    assert completions.calls == 2
+
+
 def test_openai_model_satisfies_chatmodel_protocol() -> None:
     completions = _RecordingCompletions(parse_message=_StubMessage(parsed=None), create_content="")
     assert isinstance(_make_model(completions), ChatModel)
