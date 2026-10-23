@@ -189,7 +189,11 @@ A few model settings worth knowing:
 - `WATTWISE_AGENT__CONTEXT_WINDOW_TOKENS` (default `1000000`) must match your model's
   real context window. The default matches the shipped model's ~1M-token window; if you
   swap to a smaller model, lower this so the engine does not overrun it.
-- `WATTWISE_AGENT__TEMPERATURE` (default `0.0`) keeps answers steady and repeatable.
+- `WATTWISE_AGENT__TEMPERATURE` (default `0.6`) and `WATTWISE_AGENT__VERDICT_TEMPERATURE`
+  (default `0.5`) are the sampling temperatures for written answers and for the model's
+  internal yes/no checks. Reasoning models can get stuck repeating themselves at `0` and
+  run out of budget without answering, so the defaults stay in the 0.5–0.7 range DeepSeek
+  recommends. With a non-reasoning model you can set both to `0` for repeatable output.
 - `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` (default `600`) caps how long a single
   model call may take. A reasoning model's thinking trace can legitimately run for
   minutes, so this is generous; lower it only if you want to fail faster.
@@ -502,7 +506,8 @@ performance-management practice; change them only if you know what you are doing
 | `WATTWISE_AGENT__MODEL` | `deepseek/deepseek-v4-flash` | — | Model identifier to call. |
 | `WATTWISE_AGENT__TIER` | `flash` | — | Label tagged on model spans for observability. |
 | `WATTWISE_AGENT__REASONING_EFFORT` | `low` | — | Reasoning-effort label tagged on model spans. |
-| `WATTWISE_AGENT__TEMPERATURE` | `0.0` | 0.0–2.0 | Sampling temperature. |
+| `WATTWISE_AGENT__TEMPERATURE` | `0.6` | 0.0–2.0 | Sampling temperature for written answers. |
+| `WATTWISE_AGENT__VERDICT_TEMPERATURE` | `0.5` | 0.0–2.0 | Sampling temperature for structured checks (verdicts, claim extraction). |
 | `WATTWISE_AGENT__MAX_OUTPUT_TOKENS` | `32768` | ≥ 1 | Output-token budget sent to the model. |
 | `WATTWISE_AGENT__CONTEXT_WINDOW_TOKENS` | `1000000` | ≥ 1024 | Your model's context window; set to match the deployed model. |
 | `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` | `600` | > 0 | Timeout for one model request. |

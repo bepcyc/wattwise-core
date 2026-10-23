@@ -257,7 +257,15 @@ model = "deepseek/deepseek-v4-flash"
 # the effort is "low"; loaded content (CFG-R1a), never a code literal.
 tier = "flash"
 reasoning_effort = "low"
-temperature = 0.0
+# Sampling temperatures (MODEL-R5): `temperature` for compose prose, `verdict_temperature` for
+# schema-constrained verdicts and span extraction. A reasoning model decoded greedily (0) can
+# fall into an endless repetition loop in its thinking trace and spend the whole output budget
+# with no answer (observed on the nightly live leg). DeepSeek recommends 0.5-0.7 for its
+# reasoning models to prevent this, so both sit in that range. Verdicts stay at the low end:
+# the JSON schema, not the temperature, constrains their shape. A non-reasoning model can set
+# both back to 0.0.
+temperature = 0.6
+verdict_temperature = 0.5
 # Sized for reasoning models: reasoning tokens are billed against the completion
 # budget and emitted BEFORE the answer, so a small allowance yields an empty answer
 # (MODEL-R5a). Must comfortably hold reasoning trace + visible answer. 32768 gives a

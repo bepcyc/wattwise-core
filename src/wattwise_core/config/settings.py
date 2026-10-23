@@ -352,6 +352,9 @@ class Settings(_GroundingSettings, _AnalyticsSettings, BaseSettings):
     agent__cost__input_per_million_usd: float = Field(ge=0.0)
     agent__cost__output_per_million_usd: float = Field(ge=0.0)
     agent__temperature: float = Field(ge=0.0, le=2.0)
+    # Sampling temperature for schema-constrained verdicts and span extraction (MODEL-R5).
+    # Loaded content (CFG-R1a): reasoning models loop at 0, so the default is not 0.
+    agent__verdict_temperature: float = Field(ge=0.0, le=2.0)
     agent__max_output_tokens: int = Field(ge=1)
     # The target model's context window (tokens) for the MODEL-R3 input budget: the compose
     # context is assembled within this window minus the reserved output headroom (the resolved
