@@ -22,9 +22,10 @@ reproducible (MODEL-R5, the eval-suite stability requirement).
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, cast
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, omit
 from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel
 
@@ -115,6 +116,8 @@ class OpenAICompatibleModel:
         self._extra_body = _provider_preferences(cfg)
         self._input_rate = cfg.agent__cost__input_per_million_usd
         self._output_rate = cfg.agent__cost__output_per_million_usd
+        self._cached_input_rate = cfg.agent__cost__cached_input_per_million_usd
+        self._send_cache_key = cfg.agent__cache__prompt_cache_key
         self._settings = cfg
         self._client = client if client is not None else _build_client(cfg)
 
@@ -142,21 +145,42 @@ class OpenAICompatibleModel:
         usage = getattr(completion, "usage", None)
         prompt = getattr(usage, "prompt_tokens", None) if usage is not None else None
         out = getattr(usage, "completion_tokens", None) if usage is not None else None
+        details = getattr(usage, "prompt_tokens_details", None) if usage is not None else None
+        cached = getattr(details, "cached_tokens", None) if details is not None else None
         span.record_usage(
             model=self._model,
             tier=self._tier,
             reasoning_effort=self._reasoning_effort,
             schema_id=schema_id,
             prompt_tokens=prompt,
+            cached_prompt_tokens=cached,
             completion_tokens=out,
-            cost_usd=self._cost_usd(prompt, out),
+            cost_usd=self._cost_usd(prompt, out, cached),
         )
 
-    def _cost_usd(self, prompt: int | None, completion: int | None) -> float:
-        """Compute call cost from tokens + the config-loaded per-million rates (AGT-OBS-R2)."""
-        in_cost = (prompt or 0) / 1_000_000 * self._input_rate
+    def _cost_usd(self, prompt: int | None, completion: int | None, cached: int | None) -> float:
+        """Compute call cost from tokens + the config-loaded per-million rates (AGT-OBS-R2).
+
+        Prompt tokens the provider served from its prompt cache bill at the cache-read rate,
+        the rest at the full input rate.
+        """
+        hit = min(cached or 0, prompt or 0)
+        in_cost = ((prompt or 0) - hit) / 1_000_000 * self._input_rate
+        cache_cost = hit / 1_000_000 * self._cached_input_rate
         out_cost = (completion or 0) / 1_000_000 * self._output_rate
-        return in_cost + out_cost
+        return in_cost + cache_cost + out_cost
+
+    def _cache_key(self, system: str, schema_id: str | None) -> str | Any:
+        """The ``prompt_cache_key`` for one prompt template, or ``omit`` when disabled.
+
+        Derived from the model, the outbound system prompt and the output schema: the parts a
+        template shares across every run and athlete. Calls with the same template land on the
+        provider already holding that cached prefix; the per-request data never enters the key.
+        """
+        if not self._send_cache_key:
+            return omit
+        template = f"{self._model}\x00{schema_id or 'compose'}\x00{system}"
+        return "wattwise-" + hashlib.sha256(template.encode()).hexdigest()[:32]
 
     def with_output_budget(self, max_output_tokens: int) -> OpenAICompatibleModel:
         """A view of this model whose per-call output budget is ``max_output_tokens`` (AGT-ENT-R1).
@@ -193,6 +217,7 @@ class OpenAICompatibleModel:
         AGT-OBS-R2 fields (model/tier/effort, prompt/completion tokens from the real provider
         usage, computed cost, latency, the structured-output schema id) on it.
         """
+        outbound_system = self._outbound(system)
         with runtrace.span("model.structured") as span:
             completion = await self._client.chat.completions.parse(
                 model=self._model,
@@ -200,9 +225,10 @@ class OpenAICompatibleModel:
                 max_completion_tokens=self._max_output_tokens,
                 reasoning_effort=self._request_effort,
                 extra_body=self._extra_body,
+                prompt_cache_key=self._cache_key(outbound_system, schema.__name__),
                 response_format=schema,
                 messages=[
-                    {"role": "system", "content": self._outbound(system)},
+                    {"role": "system", "content": outbound_system},
                     {"role": "user", "content": self._outbound(data)},
                 ],
             )
@@ -229,6 +255,9 @@ class OpenAICompatibleModel:
         # output tokens on its thinking trace before the answer, so a small per-call cap starved
         # compose to empty (MODEL-R5a); this budget holds reasoning trace + answer.
         bound = min(max_tokens, self._max_output_tokens)
+        outbound_system = self._outbound(system)
+        outbound_context = self._outbound(context)
+        cache_key = self._cache_key(outbound_system, None)
         for attempt in range(_EMPTY_COMPOSE_RETRIES + 1):
             with runtrace.span("model.compose") as span:
                 completion = await self._client.chat.completions.create(
@@ -237,9 +266,10 @@ class OpenAICompatibleModel:
                     max_completion_tokens=bound,
                     reasoning_effort=self._request_effort,
                     extra_body=self._extra_body,
+                    prompt_cache_key=cache_key,
                     messages=[
-                        {"role": "system", "content": self._outbound(system)},
-                        {"role": "user", "content": self._outbound(context)},
+                        {"role": "system", "content": outbound_system},
+                        {"role": "user", "content": outbound_context},
                     ],
                 )
                 self._record_usage(span, completion, schema_id=None)

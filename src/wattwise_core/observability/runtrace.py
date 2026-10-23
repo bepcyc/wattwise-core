@@ -72,6 +72,9 @@ class Span:
     reasoning_effort: str | None = None
     schema_id: str | None = None
     prompt_tokens: int | None = None
+    # The share of ``prompt_tokens`` the provider served from its prompt cache (billed at the
+    # cache-read rate). ``None`` when the provider does not report it.
+    cached_prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cost_usd: float | None = None
 
@@ -90,6 +93,7 @@ class Span:
         reasoning_effort: str | None = None,
         schema_id: str | None = None,
         prompt_tokens: int | None = None,
+        cached_prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
         cost_usd: float | None = None,
     ) -> None:
@@ -100,6 +104,8 @@ class Span:
             self.reasoning_effort = reasoning_effort
         self.schema_id = schema_id if schema_id is not None else self.schema_id
         self.prompt_tokens = prompt_tokens if prompt_tokens is not None else self.prompt_tokens
+        if cached_prompt_tokens is not None:
+            self.cached_prompt_tokens = cached_prompt_tokens
         self.completion_tokens = (
             completion_tokens if completion_tokens is not None else self.completion_tokens
         )
@@ -167,6 +173,7 @@ class RunTrace:
         never fabricated; fields with no recorded usage contribute zero.
         """
         prompt = sum(s.prompt_tokens or 0 for s in self.spans)
+        cached = sum(s.cached_prompt_tokens or 0 for s in self.spans)
         completion = sum(s.completion_tokens or 0 for s in self.spans)
         cost = sum(s.cost_usd or 0.0 for s in self.spans)
         latency_ms = sum(s.latency_ms or 0.0 for s in self.spans)
@@ -176,6 +183,9 @@ class RunTrace:
                 tier_mix[span.tier] = tier_mix.get(span.tier, 0) + 1
         return {
             "total_prompt_tokens": prompt,
+            "total_cached_prompt_tokens": cached,
+            # The run's prompt-cache hit rate (cached / prompt tokens); None with no prompt usage.
+            "prompt_cache_hit_rate": cached / prompt if prompt else None,
             "total_completion_tokens": completion,
             "total_tokens": prompt + completion,
             "total_cost_usd": cost,

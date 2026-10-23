@@ -432,3 +432,23 @@ async def test_e2e_narrate_zeros_ends_degraded_not_completed() -> None:
     assert out["coverage_caveat"]["fidelity"] == "degraded"
     # No grounded observation to drill into a non-answer (COACH-R8).
     assert out["observations"] == []
+
+
+def test_render_context_orders_blocks_most_stable_first_for_the_prompt_cache() -> None:
+    """Evidence precedes the request, so two questions on the same data share a cached prefix.
+
+    The provider's prompt cache bills a repeated leading run of tokens at a fraction of the input
+    price; with the request first, every new question cut the prefix before the evidence.
+    """
+    retrieved = {
+        "weekly_load": _zero_dominated_pmc(),
+        "critical_power": Unavailable(UnavailableReason.INSUFFICIENT_DATA),
+    }
+    first, _ = render_context("how is my training load?", retrieved)
+    second, _ = render_context("should I rest tomorrow?", dict(reversed(list(retrieved.items()))))
+
+    assert first.rstrip().endswith("how is my training load?\n</untrusted-data>")
+    prefix_end = first.index("request:\n")
+    # Everything before the request is identical, whatever the question or retrieval order.
+    assert first[:prefix_end] == second[: second.index("request:\n")]
+    assert "weekly_load:" in first[:prefix_end] and "critical_power:" in first[:prefix_end]

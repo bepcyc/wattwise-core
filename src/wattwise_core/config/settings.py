@@ -351,6 +351,11 @@ class Settings(_GroundingSettings, _AnalyticsSettings, BaseSettings):
     # sets its provider's real rates. Non-negative; 0 reports cost as 0 (a free local model).
     agent__cost__input_per_million_usd: float = Field(ge=0.0)
     agent__cost__output_per_million_usd: float = Field(ge=0.0)
+    # Price of a prompt token served from the provider's prompt cache (USD per million).
+    agent__cost__cached_input_per_million_usd: float = Field(ge=0.0)
+    # Send a per-prompt-template ``prompt_cache_key`` so every call of one template (from any run
+    # or athlete) is routed to the provider that already holds its cached prefix.
+    agent__cache__prompt_cache_key: bool = True
     # OpenRouter provider routing (sent as the request's ``provider`` preferences): provider slugs
     # to skip and the allowed serving quantizations. Both empty sends no preferences at all.
     agent__provider__ignore: list[str] = Field(default_factory=list)
