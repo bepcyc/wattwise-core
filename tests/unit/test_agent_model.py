@@ -264,6 +264,25 @@ async def test_openai_model_compose_uses_bounded_temperature() -> None:
     assert kwargs["max_completion_tokens"] == 256
 
 
+async def test_openai_model_sends_configured_reasoning_effort() -> None:
+    """MODEL-R5a: the configured effort reaches the provider on BOTH call paths.
+
+    Tagging it on the span alone left a reasoning model at its provider default effort, which
+    exhausted the output budget on the weekly digest and returned empty content.
+    """
+    completions = _RecordingCompletions(
+        parse_message=_StubMessage(parsed=_Verdict(decision="x", score=1)), create_content="prose"
+    )
+    model = _make_model(completions)
+    await model.structured(system="s", data="d", schema=_Verdict)
+    await model.compose(system="v", context="c")
+    assert completions.parse_kwargs is not None
+    assert completions.create_kwargs is not None
+    effort = _dev_settings().agent__reasoning_effort
+    assert completions.parse_kwargs["reasoning_effort"] == effort
+    assert completions.create_kwargs["reasoning_effort"] == effort
+
+
 async def test_openai_model_compose_raises_on_empty_content() -> None:
     """MODEL-SEAM-1: empty compose content is a failure mode, not a valid empty draft."""
     completions = _RecordingCompletions(parse_message=_StubMessage(parsed=None), create_content="")

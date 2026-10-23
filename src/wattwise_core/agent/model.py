@@ -21,9 +21,10 @@ reproducible (MODEL-R5, the eval-suite stability requirement).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from openai import AsyncOpenAI
+from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel
 
 from wattwise_core.agent.contracts import ComposedAnswer
@@ -99,6 +100,11 @@ class OpenAICompatibleModel:
         # the per-span/per-run cost is COMPUTED from. No price/tier literal lives in the engine.
         self._tier = cfg.agent__tier
         self._reasoning_effort = cfg.agent__reasoning_effort
+        # The configured effort is SENT on every provider call, not only tagged on the span: a
+        # reasoning model left at its provider default can spend the whole output budget on its
+        # thinking trace and return empty content (MODEL-R5a). The label is validated at boot by
+        # the routing policy (``SingleModelRoutingPolicy.from_labels``), so the cast is sound.
+        self._request_effort = cast(ReasoningEffort, self._reasoning_effort)
         self._input_rate = cfg.agent__cost__input_per_million_usd
         self._output_rate = cfg.agent__cost__output_per_million_usd
         self._settings = cfg
@@ -184,6 +190,7 @@ class OpenAICompatibleModel:
                 model=self._model,
                 temperature=_VERDICT_TEMPERATURE,
                 max_completion_tokens=self._max_output_tokens,
+                reasoning_effort=self._request_effort,
                 response_format=schema,
                 messages=[
                     {"role": "system", "content": self._outbound(system)},
@@ -218,6 +225,7 @@ class OpenAICompatibleModel:
                 model=self._model,
                 temperature=self._compose_temperature,
                 max_completion_tokens=bound,
+                reasoning_effort=self._request_effort,
                 messages=[
                     {"role": "system", "content": self._outbound(system)},
                     {"role": "user", "content": self._outbound(context)},
