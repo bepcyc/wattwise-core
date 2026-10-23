@@ -10,7 +10,7 @@ tolerance) makes such a real, correct answer GROUND instead of degrade.
 
 This tier is OFF by default: it is marked ``llm`` and skipped unless ``WATTWISE_LLM_API_KEY`` is
 set, so the ``-n auto`` offline gate stays network-free and reproducible (TIER-R1). It hits the
-configured OpenAI-compatible model (the OSS default ``deepseek/deepseek-v4-flash``) via the real
+configured OpenAI-compatible model (the OSS default ``minimax/minimax-m3.1-flash``) via the real
 engine path — ``build_agent_engine`` loads the §16 coach-config from ``defaults.toml``.
 
 A real model is stochastic, so a single draft MAY occasionally phrase the answer in a way that

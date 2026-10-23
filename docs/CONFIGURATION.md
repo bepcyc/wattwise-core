@@ -192,8 +192,13 @@ A few model settings worth knowing:
 - `WATTWISE_AGENT__TEMPERATURE` (default `0.6`) and `WATTWISE_AGENT__VERDICT_TEMPERATURE`
   (default `0.5`) are the sampling temperatures for written answers and for the model's
   internal yes/no checks. Reasoning models can get stuck repeating themselves at `0` and
-  run out of budget without answering, so the defaults stay in the 0.5–0.7 range DeepSeek
-  recommends. With a non-reasoning model you can set both to `0` for repeatable output.
+  run out of budget without answering, so the defaults stay in the 0.5–0.7 range that
+  reasoning-model vendors recommend. With a non-reasoning model you can set both to `0` for repeatable output.
+- `WATTWISE_AGENT__PROVIDER__IGNORE` and `WATTWISE_AGENT__PROVIDER__QUANTIZATIONS` steer which
+  OpenRouter providers may serve your model. By default Relace and low-precision fp4
+  endpoints are skipped: on them the model ignored the reasoning-effort setting and
+  sometimes thought until it ran out of budget. If you point `WATTWISE_AGENT__BASE_URL` at a
+  provider other than OpenRouter, set both to `[]`.
 - `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` (default `600`) caps how long a single
   model call may take. A reasoning model's thinking trace can legitimately run for
   minutes, so this is generous; lower it only if you want to fail faster.
@@ -503,7 +508,7 @@ performance-management practice; change them only if you know what you are doing
 | Variable | Default | Limits | Effect |
 | --- | --- | --- | --- |
 | `WATTWISE_AGENT__BASE_URL` | `https://openrouter.ai/api/v1` | — | OpenAI-compatible endpoint base URL. |
-| `WATTWISE_AGENT__MODEL` | `deepseek/deepseek-v4-flash` | — | Model identifier to call. |
+| `WATTWISE_AGENT__MODEL` | `minimax/minimax-m3.1-flash` | — | Model identifier to call. |
 | `WATTWISE_AGENT__TIER` | `flash` | — | Label tagged on model spans for observability. |
 | `WATTWISE_AGENT__REASONING_EFFORT` | `low` | — | Reasoning-effort label tagged on model spans. |
 | `WATTWISE_AGENT__TEMPERATURE` | `0.6` | 0.0–2.0 | Sampling temperature for written answers. |
@@ -515,8 +520,10 @@ performance-management practice; change them only if you know what you are doing
 | `WATTWISE_AGENT__REDACT_PROVIDER_PAYLOADS` | `true` | — | Mask personal data before it reaches the model provider. |
 | `WATTWISE_AGENT__IDEMPOTENCY_DEDUP_WINDOW_SECONDS` | `60` | ≥ 0 | Window in which a resubmitted identical turn reuses the same run; `0` disables. |
 | `WATTWISE_AGENT__ALLOWED_HOSTS` | `["wattwise.app","www.wattwise.app","docs.wattwise.app"]` | — | Hosts whose links the coach may keep in answers. |
-| `WATTWISE_AGENT__COST__INPUT_PER_MILLION_USD` | `0.14` | ≥ 0 | Input-token price (USD per million) for cost reporting. |
-| `WATTWISE_AGENT__COST__OUTPUT_PER_MILLION_USD` | `0.28` | ≥ 0 | Output-token price (USD per million) for cost reporting. |
+| `WATTWISE_AGENT__COST__INPUT_PER_MILLION_USD` | `0.15` | ≥ 0 | Input-token price (USD per million) for cost reporting. |
+| `WATTWISE_AGENT__COST__OUTPUT_PER_MILLION_USD` | `0.60` | ≥ 0 | Output-token price (USD per million) for cost reporting. |
+| `WATTWISE_AGENT__PROVIDER__IGNORE` | `["relace"]` | — | OpenRouter providers never used for model calls. |
+| `WATTWISE_AGENT__PROVIDER__QUANTIZATIONS` | all but fp4 | — | Serving precisions OpenRouter may use (fp4/nvfp4 excluded). Set both provider lists to `[]` for a non-OpenRouter endpoint. |
 
 ### Coach behavior and grounding
 

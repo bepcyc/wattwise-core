@@ -251,6 +251,50 @@ async def test_openai_model_refusal_drives_run_structured_to_typed_error() -> No
         await run_structured(model, system="s", data="d", schema=_Verdict, max_attempts=2)
 
 
+async def test_openai_model_sends_provider_preferences_on_every_call() -> None:
+    """Both call paths carry the configured OpenRouter provider preferences.
+
+    The shipped defaults skip Relace and every fp4-class endpoint, whose fp4 serving ignored
+    ``reasoning_effort`` and produced 32k-token runaway thinking traces.
+    """
+    completions = _RecordingCompletions(
+        parse_message=_StubMessage(parsed=_Verdict(decision="x", score=1)), create_content="prose"
+    )
+    model = OpenAICompatibleModel(
+        settings=load_settings(
+            app__environment="development", database_dsn="sqlite+aiosqlite:///:memory:"
+        ),
+        client=_StubClient(completions),  # type: ignore[arg-type]
+    )
+    await model.structured(system="s", data="d", schema=_Verdict)
+    await model.compose(system="v", context="c")
+    for kwargs in (completions.parse_kwargs, completions.create_kwargs):
+        assert kwargs is not None
+        provider = kwargs["extra_body"]["provider"]
+        assert "relace" in provider["ignore"]
+        assert "fp4" not in provider["quantizations"]
+        assert "nvfp4" not in provider["quantizations"]
+
+
+async def test_openai_model_sends_no_provider_preferences_when_unset() -> None:
+    """Empty preferences send no ``provider`` field, so non-OpenRouter endpoints are unaffected."""
+    completions = _RecordingCompletions(
+        parse_message=_StubMessage(parsed=None), create_content="ok"
+    )
+    model = OpenAICompatibleModel(
+        settings=load_settings(
+            app__environment="development",
+            database_dsn="sqlite+aiosqlite:///:memory:",
+            agent__provider__ignore=[],
+            agent__provider__quantizations=[],
+        ),
+        client=_StubClient(completions),  # type: ignore[arg-type]
+    )
+    await model.compose(system="v", context="c")
+    assert completions.create_kwargs is not None
+    assert completions.create_kwargs["extra_body"] is None
+
+
 def test_default_temperatures_are_non_zero_for_reasoning_models() -> None:
     """The shipped defaults never decode greedily: a reasoning model loops at temperature 0.
 
@@ -380,14 +424,14 @@ class _UsageCompletions:
 async def test_structured_records_provider_usage_and_computed_cost_on_span() -> None:
     """A model span records model/tier/effort + provider token usage + computed cost (AGT-OBS-R2).
 
-    The cost is COMPUTED from the config-loaded per-million rates (flash default: $0.14 in /
-    $0.28 out per M). Reading provider usage instead of discarding it is what this asserts —
+    The cost is COMPUTED from the config-loaded per-million rates (flash default: $0.15 in /
+    $0.60 out per M). Reading provider usage instead of discarding it is what this asserts —
     reverting to the prior code (no usage read) leaves the span fields all ``None``.
     """
     settings = load_settings(
         app__environment="development",
         database_dsn="sqlite+aiosqlite:///:memory:",
-        agent__model="deepseek/deepseek-v4-flash",
+        agent__model="minimax/minimax-m3.1-flash",
     )
     completions = _UsageCompletions(_Verdict(decision="proceed", score=4), _Usage(1000, 500))
     model = OpenAICompatibleModel(
@@ -399,11 +443,11 @@ async def test_structured_records_provider_usage_and_computed_cost_on_span() -> 
         trace = runtrace.active_trace()
         assert trace is not None
         span = trace.spans[-1]
-    assert span.model == "deepseek/deepseek-v4-flash"
+    assert span.model == "minimax/minimax-m3.1-flash"
     assert span.tier == "flash"
     assert span.reasoning_effort == "low"
     assert span.schema_id == "_Verdict"
     assert span.prompt_tokens == 1000
     assert span.completion_tokens == 500
-    # cost = 1000/1e6 * 0.14 + 500/1e6 * 0.28 = 0.00014 + 0.00014 = 0.00028
-    assert span.cost_usd == pytest.approx(0.00028)
+    # cost = 1000/1e6 * 0.15 + 500/1e6 * 0.60 = 0.00015 + 0.0003 = 0.00045
+    assert span.cost_usd == pytest.approx(0.00045)

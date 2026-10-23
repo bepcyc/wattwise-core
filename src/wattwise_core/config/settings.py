@@ -351,6 +351,10 @@ class Settings(_GroundingSettings, _AnalyticsSettings, BaseSettings):
     # sets its provider's real rates. Non-negative; 0 reports cost as 0 (a free local model).
     agent__cost__input_per_million_usd: float = Field(ge=0.0)
     agent__cost__output_per_million_usd: float = Field(ge=0.0)
+    # OpenRouter provider routing (sent as the request's ``provider`` preferences): provider slugs
+    # to skip and the allowed serving quantizations. Both empty sends no preferences at all.
+    agent__provider__ignore: list[str] = Field(default_factory=list)
+    agent__provider__quantizations: list[str] = Field(default_factory=list)
     agent__temperature: float = Field(ge=0.0, le=2.0)
     # Sampling temperature for schema-constrained verdicts and span extraction (MODEL-R5).
     # Loaded content (CFG-R1a): reasoning models loop at 0, so the default is not 0.

@@ -87,7 +87,7 @@ def test_model_span_records_usage_and_run_rollup_totals_them() -> None:
         with span("model_call") as s:
             assert s is not None
             s.record_usage(
-                model="deepseek/deepseek-v4-flash",
+                model="minimax/minimax-m3.1-flash",
                 tier="flash",
                 reasoning_effort="low",
                 schema_id="ReflectDecision",

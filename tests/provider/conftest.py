@@ -9,7 +9,7 @@ Point the tier at any OpenAI-compatible endpoint:
 
 * ``WATTWISE_PROVIDER_API_KEY`` — required, the provider key (e.g. an OpenRouter key);
 * ``WATTWISE_PROVIDER_BASE_URL`` — default ``https://openrouter.ai/api/v1``;
-* ``WATTWISE_PROVIDER_MODEL`` — default ``deepseek/deepseek-v4.1-flash-1017``.
+* ``WATTWISE_PROVIDER_MODEL`` — default ``minimax/minimax-m3.1-flash`` (the shipped default).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import pytest
 from wattwise_core.config import Settings, load_settings
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+DEFAULT_MODEL = "minimax/minimax-m3.1-flash"
 
 
 def _skip_reason() -> str | None:

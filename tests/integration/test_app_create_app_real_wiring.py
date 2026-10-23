@@ -79,7 +79,7 @@ def _settings(tmp_path: Path, *, with_llm: bool) -> Settings:
     live ``GraphAgentEngine``; without it the factory binds the :class:`UnconfiguredAgentEngine`
     (the no-LLM path the findings target).
     """
-    extra = {"agent__model": "deepseek/deepseek-v4-flash", "llm_api_key": "sk-not-called-offline"}
+    extra = {"agent__model": "minimax/minimax-m3.1-flash", "llm_api_key": "sk-not-called-offline"}
     return load_settings(
         app__environment="development",
         database_dsn=f"sqlite+aiosqlite:///{tmp_path / 'real.db'}",

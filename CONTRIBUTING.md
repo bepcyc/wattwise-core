@@ -129,7 +129,7 @@ WATTWISE_PROVIDER_API_KEY=<your OpenRouter key> just test-provider
 ```
 
 `WATTWISE_PROVIDER_BASE_URL` (default `https://openrouter.ai/api/v1`) and
-`WATTWISE_PROVIDER_MODEL` (default `deepseek/deepseek-v4.1-flash-1017`) point it at another
+`WATTWISE_PROVIDER_MODEL` (default `minimax/minimax-m3.1-flash`) point it at another
 endpoint or model. The tier uses its own key variable on purpose: CI holds
 `WATTWISE_LLM_API_KEY` for its nightly live leg.
 
