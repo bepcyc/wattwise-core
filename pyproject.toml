@@ -27,7 +27,7 @@ dependencies = [
   "pydantic>=2.9",
   "pydantic-settings>=2.5",
   # --- persistence (portable ORM, async; SQLite/PostgreSQL/MariaDB via DSN) ---
-  "sqlalchemy[asyncio]>=2.0.36",
+  "sqlalchemy[asyncio]>=2.1",
   "alembic>=1.14",
   "aiosqlite>=0.22",
   # --- analytics / DSP ---
@@ -48,7 +48,9 @@ dependencies = [
   "openai>=1.58",
   "mcp>=1.28.1,<2",
   # --- API ---
-  "fastapi>=0.115",
+  # <0.137: 0.137 replaced flattened include_router routes with lazily-resolved private
+  # _IncludedRouter nodes, which the per-operation OpenAPI scope declaration (DOC-R3) walks.
+  "fastapi>=0.115,<0.137",
   "uvicorn[standard]>=0.34",
   "sse-starlette>=2.1",
   "nh3>=0.2.19",
@@ -226,7 +228,9 @@ extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "ASYNC", "S", "RUF", "PL", "TID", "PTH"]
-ignore = ["PLR0913", "PLR2004"]
+# PLR0917 (too-many-positional-arguments) is PLR0913's sibling, stabilized in ruff 0.17;
+# ignored for the same reason.
+ignore = ["PLR0913", "PLR0917", "PLR2004"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "PLR2004", "PLR0915"]

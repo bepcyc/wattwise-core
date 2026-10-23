@@ -122,9 +122,7 @@ async def _delete_older_than(
     return int(result.rowcount or 0)
 
 
-async def _delete_threads(
-    session: AsyncSession, *, expired_threads_stmt: Select[tuple[str]]
-) -> int:
+async def _delete_threads(session: AsyncSession, *, expired_threads_stmt: Select[str]) -> int:
     """Delete thread rows that are themselves past the cutoff (children already swept)."""
     thread_ids = list((await session.execute(expired_threads_stmt)).scalars().all())
     if not thread_ids:

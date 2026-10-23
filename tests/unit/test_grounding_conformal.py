@@ -48,7 +48,7 @@ def _write_artifact(
     path: Path,
     records: list[dict[str, Any]],
     *,
-    provenance: dict[str, Any] | None | str = "match",
+    provenance: dict[str, Any] | str | None = "match",
 ) -> Path:
     """Write a calibration artifact; ``provenance='match'`` stamps the expected pin."""
     payload: dict[str, Any] = {"records": records}
