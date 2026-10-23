@@ -64,7 +64,9 @@ dependencies = [
 # Async DB drivers for the non-default backends (kept optional so the SQLite
 # default install is lean; the portability CI matrix installs these).
 postgresql = ["asyncpg>=0.30"]
-mariadb = ["aiomysql>=0.2"]
+# pymysql <1.2.1: aiomysql (latest 0.3.2) imports pymysql.converters.escape_bytes_prefixed,
+# which 1.2.1 removed and 1.2.3 replaced with a poison string, breaking every bytes parameter.
+mariadb = ["aiomysql>=0.2", "pymysql>=1.0,<1.2.1"]
 
 [project.urls]
 Homepage = "https://github.com/wattwise/wattwise-core"
@@ -92,6 +94,7 @@ dev = [
   # DB drivers exercised by the portability matrix:
   "asyncpg>=0.30",
   "aiomysql>=0.2",
+  "pymysql>=1.0,<1.2.1",  # see the mariadb extra
   "pytest-xdist>=3.8.0",
   "mutmut>=3.8.0",
 ]
