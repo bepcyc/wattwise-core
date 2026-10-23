@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from openai import omit
 from pydantic import BaseModel
 
 from wattwise_core.agent.contracts import ChatModel
@@ -451,3 +452,85 @@ async def test_structured_records_provider_usage_and_computed_cost_on_span() -> 
     assert span.completion_tokens == 500
     # cost = 1000/1e6 * 0.15 + 500/1e6 * 0.60 = 0.00015 + 0.0003 = 0.00045
     assert span.cost_usd == pytest.approx(0.00045)
+
+
+# --------------------------------------------------------------------------- #
+# Prompt caching: per-template cache key + cache-aware cost accounting         #
+# --------------------------------------------------------------------------- #
+
+
+class _CachedUsage(_Usage):
+    def __init__(self, prompt_tokens: int, completion_tokens: int, cached_tokens: int) -> None:
+        super().__init__(prompt_tokens, completion_tokens)
+        self.prompt_tokens_details = type("Details", (), {"cached_tokens": cached_tokens})()
+
+
+async def test_cached_prompt_tokens_bill_at_the_cache_read_rate() -> None:
+    """Cached prompt tokens are recorded on the span and billed at the cache-read rate.
+
+    Defaults: $0.15 in, $0.015 cached in, $0.60 out per M. 1000 prompt tokens of which 800
+    were cached + 500 completion = 200*0.15 + 800*0.015 + 500*0.60 per M = 0.000342.
+    """
+    settings = load_settings(
+        app__environment="development", database_dsn="sqlite+aiosqlite:///:memory:"
+    )
+    completions = _UsageCompletions(_Verdict(decision="go", score=1), _CachedUsage(1000, 500, 800))
+    model = OpenAICompatibleModel(
+        settings=settings,
+        client=_StubClient(completions),  # type: ignore[arg-type]
+    )
+    with runtrace.run_trace("athlete:conv"):
+        await model.structured(system="s", data="d", schema=_Verdict)
+        trace = runtrace.active_trace()
+        assert trace is not None
+        span = trace.spans[-1]
+        rollup = trace.rollup(status="completed")
+    assert span.cached_prompt_tokens == 800
+    assert span.cost_usd == pytest.approx(0.000342)
+    assert rollup["total_cached_prompt_tokens"] == 800
+    assert rollup["prompt_cache_hit_rate"] == pytest.approx(0.8)
+
+
+async def test_prompt_cache_key_is_per_template_not_per_request() -> None:
+    """One template keeps one cache key whatever its data; another template gets another key.
+
+    OpenRouter routes on the key, so every call of a template lands where its prefix is cached.
+    """
+    completions = _RecordingCompletions(
+        parse_message=_StubMessage(parsed=_Verdict(decision="x", score=1)), create_content="prose"
+    )
+    model = _make_model(completions)
+
+    async def parse_key(system: str, data: str, schema: type[BaseModel]) -> str:
+        await model.structured(system=system, data=data, schema=schema)
+        assert completions.parse_kwargs is not None
+        return str(completions.parse_kwargs["prompt_cache_key"])
+
+    first = await parse_key("claims", "athlete A draft", _Verdict)
+    assert first.startswith("wattwise-")
+    assert await parse_key("claims", "athlete B draft", _Verdict) == first
+    assert await parse_key("other system prompt", "athlete A draft", _Verdict) != first
+    completions._parse_message = _StubMessage(parsed=_OtherVerdict(label="x"))
+    assert await parse_key("claims", "athlete A draft", _OtherVerdict) != first
+
+    await model.compose(system="claims", context="athlete A context")
+    assert completions.create_kwargs is not None
+    assert completions.create_kwargs["prompt_cache_key"] not in {first, None}
+
+
+async def test_prompt_cache_key_can_be_switched_off() -> None:
+    """With the key disabled the SDK sentinel ``omit`` is passed, so no field is sent."""
+    completions = _RecordingCompletions(
+        parse_message=_StubMessage(parsed=None), create_content="ok"
+    )
+    model = OpenAICompatibleModel(
+        settings=load_settings(
+            app__environment="development",
+            database_dsn="sqlite+aiosqlite:///:memory:",
+            agent__cache__prompt_cache_key=False,
+        ),
+        client=_StubClient(completions),  # type: ignore[arg-type]
+    )
+    await model.compose(system="v", context="c")
+    assert completions.create_kwargs is not None
+    assert completions.create_kwargs["prompt_cache_key"] is omit

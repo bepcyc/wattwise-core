@@ -354,23 +354,23 @@ def render_context(
     assembled input is measured with the token estimator; on overflow the lowest-relevance records
     are dropped FIRST and a flag is returned so the caller records the trim in coverage_gaps.
     Returns ``(context, trimmed)``.
+
+    Blocks run most- to least-stable (goals, evidence by relevance then name, memory, request
+    LAST) so a follow-up question on the same data re-reads the evidence from the prompt cache.
     """
     count = token_counter if token_counter is not None else estimate_tokens
     over = token_budget is not None and token_budget > 0
     budget = token_budget if over and token_budget is not None else _CONTEXT_TOKEN_BUDGET
-    header = f"request:\n<untrusted-data>\n{request_text or ''}\n</untrusted-data>"
-    rendered: list[str] = [header]
-    trimmed = False
-    memory_block = _render_recalled_memory(recalled_memory)
-    if memory_block is not None:
-        rendered.append(memory_block)
+    request_block = f"request:\n<untrusted-data>\n{request_text or ''}\n</untrusted-data>"
     goals_block = _render_active_goals(active_goals)
-    if goals_block is not None:
-        rendered.append(goals_block)
+    memory_block = _render_recalled_memory(recalled_memory)
+    leading = [goals_block] if goals_block is not None else []
+    trailing = [*([memory_block] if memory_block is not None else []), request_block]
+    evidence: list[str] = []
+    trimmed = False
     items = sorted(
         ((k, v) for k, v in retrieved.items() if k != RETRIEVED_TRUNCATION_KEY),
-        key=lambda kv: context_relevance(kv[1]),
-        reverse=True,
+        key=lambda kv: (-context_relevance(kv[1]), kv[0]),
     )
     # COMPOSE-R1: render each gathered capability through the deterministic fact-sheet path so
     # the model sees the CURRENT canonical values + trend FIRST (a compact day-series tail
@@ -384,11 +384,11 @@ def render_context(
     for key, _ in items:
         body = sheets.get(key, "no current value available")
         candidate = f"{key}:\n<untrusted-data>\n{body}\n</untrusted-data>"
-        if count("\n".join([*rendered, candidate])) > budget:
+        if count("\n".join([*leading, *evidence, candidate, *trailing])) > budget:
             trimmed = True
             continue
-        rendered.append(candidate)
-    return "\n".join(rendered), trimmed
+        evidence.append(candidate)
+    return "\n".join([*leading, *evidence, *trailing]), trimmed
 
 
 def _render_active_goals(active_goals: Sequence[Mapping[str, Any]] | None) -> str | None:

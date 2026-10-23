@@ -392,6 +392,18 @@ mode = "enforce"
 # 0 = free/local model.
 input_per_million_usd = 0.15
 output_per_million_usd = 0.60
+# A prompt token read from the provider's prompt cache (minimax-m3.1-flash: 0.1x input, writes free).
+cached_input_per_million_usd = 0.015
+
+[agent.cache]
+# Prompt-cache routing. Providers cache a prompt's leading tokens and bill a later request that
+# starts with the same tokens at the cache-read rate (0.1x input for the default model). The
+# engine keeps every prompt "stable text first, per-request data last", and with this on sends a
+# `prompt_cache_key` per prompt template (model + system prompt + output schema). OpenRouter
+# routes on that key, so every call of one template, from any run or athlete, lands on the
+# provider that already holds its cached prefix; OpenAI-direct uses the same field to bucket its
+# own cache. Turn off only for an endpoint that rejects the field.
+prompt_cache_key = true
 
 [agent.provider]
 # OpenRouter provider routing, sent as the request's `provider` preferences on every model call.

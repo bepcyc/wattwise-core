@@ -199,6 +199,13 @@ A few model settings worth knowing:
   endpoints are skipped: on them the model ignored the reasoning-effort setting and
   sometimes thought until it ran out of budget. If you point `WATTWISE_AGENT__BASE_URL` at a
   provider other than OpenRouter, set both to `[]`.
+- Prompt caching keeps model costs down. Providers bill the repeated beginning of a prompt at
+  a fraction of the normal input price (a tenth for the default model). The engine puts the
+  unchanging parts first and your question last, and with
+  `WATTWISE_AGENT__CACHE__PROMPT_CACHE_KEY` (default `true`) it tags each kind of prompt so
+  OpenRouter sends it where it is already cached. The run cost report counts cached input at
+  `WATTWISE_AGENT__COST__CACHED_INPUT_PER_MILLION_USD`. Turn the key off only if your endpoint
+  rejects it.
 - `WATTWISE_AGENT__REQUEST_TIMEOUT_SECONDS` (default `600`) caps how long a single
   model call may take. A reasoning model's thinking trace can legitimately run for
   minutes, so this is generous; lower it only if you want to fail faster.
@@ -522,6 +529,8 @@ performance-management practice; change them only if you know what you are doing
 | `WATTWISE_AGENT__ALLOWED_HOSTS` | `["wattwise.app","www.wattwise.app","docs.wattwise.app"]` | — | Hosts whose links the coach may keep in answers. |
 | `WATTWISE_AGENT__COST__INPUT_PER_MILLION_USD` | `0.15` | ≥ 0 | Input-token price (USD per million) for cost reporting. |
 | `WATTWISE_AGENT__COST__OUTPUT_PER_MILLION_USD` | `0.60` | ≥ 0 | Output-token price (USD per million) for cost reporting. |
+| `WATTWISE_AGENT__COST__CACHED_INPUT_PER_MILLION_USD` | `0.015` | ≥ 0 | Price of input tokens served from the provider's prompt cache (USD per million). |
+| `WATTWISE_AGENT__CACHE__PROMPT_CACHE_KEY` | `true` | — | Send a per-prompt-template cache key so repeated prompts land where they are already cached. |
 | `WATTWISE_AGENT__PROVIDER__IGNORE` | `["relace"]` | — | OpenRouter providers never used for model calls. |
 | `WATTWISE_AGENT__PROVIDER__QUANTIZATIONS` | all but fp4 | — | Serving precisions OpenRouter may use (fp4/nvfp4 excluded). Set both provider lists to `[]` for a non-OpenRouter endpoint. |
 
