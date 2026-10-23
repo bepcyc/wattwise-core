@@ -131,6 +131,7 @@ markers = [
   "inject: prompt-injection isolation tests (INJ-R2)",
   "logging: logging-contract / redaction tests (QA-LOG-R*)",
   "llm: live-LLM tier (real model; skipped unless WATTWISE_LLM_API_KEY is set; never in the offline gate)",
+  "provider: manual tier against a real OpenAI-compatible REST API (skipped unless WATTWISE_PROVIDER_API_KEY is set; never in CI)",
 ]
 
 # T-MUT mutation tier (TIER-R6 / issue #35 / ADR 0006): mutmut over the correctness core —

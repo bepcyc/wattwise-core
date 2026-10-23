@@ -156,6 +156,13 @@ test-e2e:
 test-llm:
     {{uv}} pytest -m llm
 
+# Manual provider tier: OpenAICompatibleModel against a real OpenAI-compatible REST API.
+# NEVER run in CI (no workflow references it, and the tier skips whenever CI is set).
+# Requires WATTWISE_PROVIDER_API_KEY; WATTWISE_PROVIDER_BASE_URL defaults to OpenRouter
+# and WATTWISE_PROVIDER_MODEL to deepseek/deepseek-v4.1-flash-1017.
+test-provider:
+    {{uv}} pytest -m provider
+
 # Nightly fuzz campaign (TIER-R5 (b), CI-R4): the SAME fuzz corpus under the extended
 # `fuzz-nightly` hypothesis profile (orders of magnitude more examples, no deadline).
 # A coverage-guided Atheris/libFuzzer engine is not available on CPython 3.13, so the
