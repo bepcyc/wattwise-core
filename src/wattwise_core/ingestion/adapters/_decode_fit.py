@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import io
 import warnings
-from typing import Any
+from typing import Any, cast
 
 import fitdecode
 from garmin_fit_sdk import Decoder, Stream
@@ -48,7 +48,7 @@ def decode_fit(data: bytes) -> ActivityAsbo:
 
 def _decode_with_sdk(data: bytes) -> ActivityAsbo:
     try:
-        decoder = Decoder(Stream.from_byte_array(data))
+        decoder = Decoder(Stream.from_byte_array(bytearray(data)))
         if not decoder.is_fit():
             raise FileDecodeError("not a FIT file (bad header)")
         messages, errors = decoder.read()
@@ -56,7 +56,9 @@ def _decode_with_sdk(data: bytes) -> ActivityAsbo:
         raise
     except Exception as exc:
         raise FileDecodeError(f"FIT decode failed: {exc}") from exc
-    return _build_asbo(messages, errors)
+    # The SDK types ``messages`` as its own ``FitMessages`` TypedDict; the builder reads the
+    # same keys from both decoders, so it takes the shared plain-dict shape.
+    return _build_asbo(cast(dict[str, Any], messages), errors)
 
 
 def _decode_with_fitdecode(data: bytes) -> ActivityAsbo:

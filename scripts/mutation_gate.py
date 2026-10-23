@@ -59,7 +59,7 @@ import tomllib
 from collections import Counter, deque
 from pathlib import Path
 
-from mutmut.configuration import Config
+from mutmut.configuration import config as mutmut_config
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -255,7 +255,7 @@ def _remove_deleted_cached_helpers() -> None:
     # Use mutmut's effective configuration, including its built-in test/config
     # roots. Its test*.py glob only sees current files, so include cached matches
     # to catch deleted root-level tests as well.
-    roots = set(Config.get().also_copy)
+    roots = set(mutmut_config().also_copy)
     roots.update(path.relative_to(cache_root) for path in cache_root.glob("test*.py"))
     for root in roots:
         if root.is_absolute() or ".." in root.parts:
