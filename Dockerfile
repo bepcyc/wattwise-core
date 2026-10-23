@@ -107,6 +107,12 @@ RUN apt-get purge -y --allow-remove-essential perl-base \
     && test ! -e /usr/bin/perl \
     && rm -rf /var/lib/apt/lists/*
 
+# The base image's system pip is likewise unused: the app runs from the copied /opt/venv and
+# the image installs nothing at runtime. pip vendors its own certifi bundle that lags the
+# lockfile's (GHSA-6q48-6c7w-9gw2), so drop it rather than carry a second, stale CA store.
+RUN python -m pip uninstall -y pip \
+    && ! python -c "import pip" 2>/dev/null
+
 # Copy ONLY the self-contained venv from the builder — no compiler, no uv, no dev deps, no .git,
 # no tests, no lockfile, no source tree beyond what the installed wheel already contains.
 COPY --from=builder --chown=root:root /opt/venv /opt/venv
