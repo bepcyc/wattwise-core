@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from mutmut import __main__ as mutmut
+from mutmut import configuration as mutmut_configuration
 from scripts import mutation_gate
 
 pytestmark = pytest.mark.integration
@@ -45,10 +46,12 @@ def test_warm_cache_refreshes_assets_and_deletions_before_mutmut(
     )
     monkeypatch.setattr(mutation_gate, "_changed_files", lambda _: {"src/unchanged.py"})
     monkeypatch.setattr(mutation_gate, "_restore_commit_mtimes", lambda _: None)
+    # mutmut >= 3.8 caches its effective config in ``configuration._config``; both mutmut's own
+    # copy helpers and the gate read it through ``configuration.config()``.
     monkeypatch.setattr(
-        mutmut.Config,
-        "get",
-        lambda: SimpleNamespace(
+        mutmut_configuration,
+        "_config",
+        SimpleNamespace(
             source_paths=[Path("src")],
             also_copy=[Path(root) for root in [*copied_roots, "setup.cfg"]],
         ),
