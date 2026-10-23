@@ -50,6 +50,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -83,6 +84,9 @@ _UNDETECTED = {0: "survived"}
 _NO_SIGNAL = {5: "no tests", 33: "no tests", 34: "skipped", 2: "interrupted"}
 
 _MUTANTS_DIR = Path("mutants")
+# A mutated copy under mutants/ defines one function per mutant; the meta keys are
+# "<module>.<that name>". Used to size a file whose meta is unreadable.
+_MUTANT_DEF = re.compile(r"def (x\w+__mutmut_\d+)\(")
 _REPORT_DIR = Path("reports")
 
 # Committed ratchet baseline (TIER-R6): per-package mutation-score FLOORS live in DATA
@@ -348,6 +352,46 @@ def _run_mutmut(patterns: list[str], budget_s: int) -> tuple[int, bool, str]:
     return proc.returncode or 0, timed_out, b"".join(tail).decode(errors="replace")
 
 
+def _read_verdicts(meta_path: Path) -> dict[str, int | None] | None:
+    """Return a ``.meta`` file's ``exit_code_by_key``, or ``None`` when it is unreadable.
+
+    mutmut rewrites each ``.meta`` in place (a plain ``open(..., "w")`` + ``json.dump``), so the
+    budget's SIGINT, or the SIGKILL after it, can land mid-write and leave truncated JSON.
+    """
+    try:
+        verdicts = json.loads(meta_path.read_text())["exit_code_by_key"]
+    except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError):
+        return None
+    return verdicts if isinstance(verdicts, dict) else None
+
+
+def _mutants_in(mutated_source: Path) -> int:
+    """Count the mutants a mutated copy defines (0 when the copy is missing)."""
+    if not mutated_source.exists():
+        return 0
+    return len(set(_MUTANT_DEF.findall(mutated_source.read_text())))
+
+
+def _drop_corrupt_metas() -> None:
+    """Delete unreadable ``.meta`` files before mutmut runs.
+
+    mutmut itself crashes loading a truncated ``.meta``, and the mutants/ tree is a
+    persisted CI cache, so one interrupted write would poison every later run. The mutated
+    copy goes too: mutmut skips regenerating a copy whose mtime still matches its source, and
+    a copy without a ``.meta`` then matches no mutant, which the gate would read as "nothing
+    to mutate". Dropping both makes mutmut re-mutate and re-check that file from scratch.
+    """
+    for meta_path in (_REPO_ROOT / _MUTANTS_DIR).rglob("*.py.meta"):
+        if _read_verdicts(meta_path) is None:
+            print(
+                f"mutation-gate: dropping unreadable {meta_path.relative_to(_REPO_ROOT)} "
+                "(interrupted write); mutmut will re-mutate and re-check that file.",
+                file=sys.stderr,
+            )
+            meta_path.with_suffix("").unlink(missing_ok=True)
+            meta_path.unlink()
+
+
 def _collect_verdicts(scope_paths: list[str]) -> tuple[Counter[str], list[str], int]:
     """Aggregate per-mutant verdicts for *scope_paths* from mutants/<path>.meta.
 
@@ -360,7 +404,14 @@ def _collect_verdicts(scope_paths: list[str]) -> tuple[Counter[str], list[str], 
         meta_path = _REPO_ROOT / _MUTANTS_DIR / (path + ".meta")
         if not meta_path.exists():
             continue
-        exit_code_by_key = json.loads(meta_path.read_text())["exit_code_by_key"]
+        exit_code_by_key = _read_verdicts(meta_path)
+        if exit_code_by_key is None:
+            # The verdicts were lost mid-write (see _read_verdicts): count the file's
+            # mutants as not checked, exactly like a budget cut, rather than crash.
+            unverified = _mutants_in(meta_path.with_suffix(""))
+            total += unverified
+            counts["not checked"] += unverified
+            continue
         for mutant_name, exit_code in exit_code_by_key.items():
             total += 1
             if exit_code is None:
@@ -492,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _refresh_cached_source_assets(source_paths)
     _remove_deleted_cached_helpers()
+    _drop_corrupt_metas()
     exit_code, timed_out, output_tail = _run_mutmut(patterns, budget_s)
 
     if exit_code != 0 and not timed_out and _NO_MATCH_MARKER in output_tail:
