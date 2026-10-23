@@ -9,7 +9,7 @@ the size ceiling while the readiness JTBD's concrete wiring lives in one place.
 The readiness JTBD is FIXED — its inputs are gathered deterministically (latest canonical
 TSB/form + its date, latest HRV), NOT via the retrieval planner — and any unavailable
 input fails closed to ``None`` so the deliverable abstains/degrades truthfully rather than
-guessing. The narration closure wraps structured output at temperature 0 and raises
+guessing. The narration closure wraps structured output at the verdict temperature and raises
 :class:`~wattwise_core.agent.readiness_deliverable.StructuredNarrationError` on a provider
 failure so the deliverable falls back to its deterministic per-verdict state sentence.
 
@@ -243,10 +243,11 @@ def readiness_narrator(
 ) -> Callable[[str], Awaitable[_ReadinessNarration]]:
     """Build the structured-narration closure the readiness deliverable drives (STRUCT-R1).
 
-    Wraps ``run_structured`` over the closed :class:`_ReadinessNarration` schema at
-    temperature 0 (provider-enforced); on a structured-output failure it raises
-    :class:`StructuredNarrationError` so the deliverable falls back to the deterministic
-    per-verdict state sentence rather than surfacing a model failure (fail-closed voice).
+    Wraps ``run_structured`` over the closed :class:`_ReadinessNarration` schema at the
+    configured verdict temperature (provider-enforced schema); on a structured-output failure
+    it raises :class:`StructuredNarrationError` so the deliverable falls back to the
+    deterministic per-verdict state sentence rather than surfacing a model failure (fail-closed
+    voice).
 
     ``system`` is the externalized readiness-narration system prompt (§16 / SKILL-R1, CFG-R3): the
     engine embeds NO prompt inline (ARCH-R29) — the engine threads the verbatim fragment loaded from

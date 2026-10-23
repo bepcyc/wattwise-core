@@ -7,9 +7,10 @@ provider and ships a deterministic offline fake.
 reached through the ``openai`` async SDK, with ``base_url``/``model``/key from
 :func:`~wattwise_core.config.get_settings` (MODEL-R4 — one configured model; the OSS
 engine ships no failover and no escalation). ``structured`` performs provider-enforced
-JSON-schema-constrained decoding from a closed pydantic schema at temperature ``0``
-(MODEL-R5 — zero temperature for verdicts and grounding-span extraction); ``compose``
-runs prose at a bounded temperature (MODEL-R5). A model that cannot enforce structured
+JSON-schema-constrained decoding from a closed pydantic schema at the configured verdict
+temperature (MODEL-R5 — a low temperature for verdicts and grounding-span extraction, non-zero
+by default because reasoning models loop when decoded greedily); ``compose`` runs prose at the
+configured bounded temperature (MODEL-R5). A model that cannot enforce structured
 output MUST NOT back a verdict node (MODEL-R4) — this seam refuses any non-schema-valid
 verdict response rather than parsing free text (STRUCT-R1).
 
@@ -33,7 +34,6 @@ from wattwise_core.config import Settings, get_settings
 from wattwise_core.observability import runtrace
 from wattwise_core.observability.logging import get_logger
 
-_VERDICT_TEMPERATURE = 0.0  # MODEL-R5: zero temperature for verdicts / span extraction.
 # Extra compose attempts after an empty answer the provider ended for a reason OTHER than the
 # output cap (MODEL-R5a): a transient upstream glitch, not budget exhaustion, so one fresh call
 # is worth it. An answer cut off at the cap (``finish_reason == "length"``) is never retried.
@@ -78,6 +78,7 @@ class OpenAICompatibleModel:
         cfg = settings if settings is not None else get_settings()
         self._model = cfg.agent__model
         self._compose_temperature = cfg.agent__temperature
+        self._verdict_temperature = cfg.agent__verdict_temperature
         # The per-call output budget AUTHORITY (MODEL-R3 / AGT-ENT-R4): when the caller passes
         # ``max_output_tokens`` it is the resolved entitlement's token bound (the engine sizes it
         # from the carried plan, AGT-ENT-R1) and governs every call; when ``None`` (an isolated
@@ -176,7 +177,7 @@ class OpenAICompatibleModel:
         )
 
     async def structured[M: BaseModel](self, *, system: str, data: str, schema: type[M]) -> M:
-        """Provider-enforced JSON-schema-constrained verdict at temperature 0.
+        """Provider-enforced JSON-schema-constrained verdict at the configured verdict temperature.
 
         Uses the SDK's native parse path (``response_format=schema``), which constrains
         decoding to the schema and validates the result (STRUCT-R1). The untrusted
@@ -192,7 +193,7 @@ class OpenAICompatibleModel:
         with runtrace.span("model.structured") as span:
             completion = await self._client.chat.completions.parse(
                 model=self._model,
-                temperature=_VERDICT_TEMPERATURE,
+                temperature=self._verdict_temperature,
                 max_completion_tokens=self._max_output_tokens,
                 reasoning_effort=self._request_effort,
                 response_format=schema,

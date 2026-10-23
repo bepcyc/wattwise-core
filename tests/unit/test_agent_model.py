@@ -2,7 +2,7 @@
 
 Offline only: the live :class:`OpenAICompatibleModel` is exercised through an injected
 in-memory stub client (no network); every other test uses :class:`FakeModel`. Together
-they assert: provider-enforced structured decoding at temperature 0 (MODEL-R5), the
+they assert: provider-enforced structured decoding at the verdict temperature (MODEL-R5), the
 refusal/unparsed fail-closed paths (STRUCT-R1), the bounded retry that raises a typed
 :class:`StructuredOutputError` rather than free-text-parsing (STRUCT-R2), and that the
 deterministic fake is reproducible for the eval suite.
@@ -189,6 +189,7 @@ def _dev_settings() -> Any:
         api__json_body_max_bytes=262144,
         agent__model="test-model",
         agent__temperature=0.7,
+        agent__verdict_temperature=0.2,
         agent__max_output_tokens=256,
     )
 
@@ -200,7 +201,8 @@ def _make_model(completions: _RecordingCompletions) -> OpenAICompatibleModel:
     )
 
 
-async def test_openai_model_structured_uses_zero_temperature_and_schema() -> None:
+async def test_openai_model_structured_uses_verdict_temperature_and_schema() -> None:
+    """Verdicts decode at the configured verdict temperature with the schema as response_format."""
     want = _Verdict(decision="proceed", score=4)
     completions = _RecordingCompletions(
         parse_message=_StubMessage(parsed=want), create_content="prose"
@@ -210,8 +212,8 @@ async def test_openai_model_structured_uses_zero_temperature_and_schema() -> Non
     assert got is want
     kwargs = completions.parse_kwargs
     assert kwargs is not None
-    # MODEL-R5: verdicts decode at temperature 0; the schema is the response_format.
-    assert kwargs["temperature"] == 0.0
+    # MODEL-R5: verdicts decode at the configured verdict temperature, never the prose one.
+    assert kwargs["temperature"] == 0.2
     assert kwargs["response_format"] is _Verdict
     assert kwargs["model"] == "test-model"
     # INJECT-R1: untrusted data is a separate user message, never folded into system.
@@ -247,6 +249,19 @@ async def test_openai_model_refusal_drives_run_structured_to_typed_error() -> No
     model = _make_model(completions)
     with pytest.raises(StructuredOutputError):
         await run_structured(model, system="s", data="d", schema=_Verdict, max_attempts=2)
+
+
+def test_default_temperatures_are_non_zero_for_reasoning_models() -> None:
+    """The shipped defaults never decode greedily: a reasoning model loops at temperature 0.
+
+    At 0 the nightly live leg saw the model spend its whole 32k output budget on a repeating
+    thinking trace with no answer, on both compose and structured calls.
+    """
+    settings = load_settings(
+        app__environment="development", database_dsn="sqlite+aiosqlite:///:memory:"
+    )
+    assert settings.agent__temperature > 0.0
+    assert settings.agent__verdict_temperature > 0.0
 
 
 async def test_openai_model_compose_uses_bounded_temperature() -> None:
