@@ -25,7 +25,9 @@ def test_warm_cache_refreshes_assets_and_deletions_before_mutmut(
     (cached / "openapi.json").write_text('{"stale": true}\n')
     (source / "unchanged.py").write_text("value = 1\n")
     (cached / "unchanged.py").write_text("cached mutation trampolines\n")
-    (cached / "unchanged.py.meta").write_text("cached verdicts\n")
+    # A real .meta is JSON; the gate drops an unreadable one before mutmut runs.
+    cached_verdicts = '{"exit_code_by_key": {"unchanged.x_f__mutmut_1": 1}}'
+    (cached / "unchanged.py.meta").write_text(cached_verdicts)
     (cached / "deleted.py").write_text("obsolete module\n")
     (cached / "deleted.py.meta").write_text("obsolete verdicts\n")
     (cached / "deleted.json").write_text("obsolete asset\n")
@@ -69,7 +71,7 @@ def test_warm_cache_refreshes_assets_and_deletions_before_mutmut(
         assert not (cached / "deleted.py.meta").exists()
         assert not (cached / "deleted.json").exists()
         assert (cached / "unchanged.py").read_text() == "cached mutation trampolines\n"
-        assert (cached / "unchanged.py.meta").read_text() == "cached verdicts\n"
+        assert (cached / "unchanged.py.meta").read_text() == cached_verdicts
         for root in copied_roots:
             destination = tmp_path / "mutants" / root
             assert not (destination / "deleted.py").exists()
