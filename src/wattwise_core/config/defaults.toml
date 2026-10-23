@@ -251,7 +251,7 @@ srpe_load_per_hour_at_full_scale = 100.0
 # Model-routing seam (MODEL-R*): one configured OpenAI-compatible model in OSS.
 # It is 2026: the default is a contemporary reasoning-capable model (MODEL-R5a).
 base_url = "https://openrouter.ai/api/v1"
-model = "deepseek/deepseek-v4-flash"
+model = "minimax/minimax-m3.1-flash"
 # Observability tier + reasoning effort tagged on every model span (AGT-OBS-R2). The OSS engine
 # runs ONE model (MODEL-R4, no escalation), so the default tier is the cheap-bulk "flash" tier and
 # the effort is "low"; loaded content (CFG-R1a), never a code literal.
@@ -260,9 +260,9 @@ reasoning_effort = "low"
 # Sampling temperatures (MODEL-R5): `temperature` for compose prose, `verdict_temperature` for
 # schema-constrained verdicts and span extraction. A reasoning model decoded greedily (0) can
 # fall into an endless repetition loop in its thinking trace and spend the whole output budget
-# with no answer (observed on the nightly live leg). DeepSeek recommends 0.5-0.7 for its
-# reasoning models to prevent this, so both sit in that range. Verdicts stay at the low end:
-# the JSON schema, not the temperature, constrains their shape. A non-reasoning model can set
+# with no answer (observed on the nightly live leg). Reasoning-model vendors recommend 0.5-0.7
+# to prevent this, so both sit in that range. Verdicts stay at the low end: the JSON schema,
+# not the temperature, constrains their shape. A non-reasoning model can set
 # both back to 0.0.
 temperature = 0.6
 verdict_temperature = 0.5
@@ -276,7 +276,7 @@ max_output_tokens = 32768
 # assembles the compose context within ``context_window_tokens`` minus the reserved OUTPUT
 # headroom (the resolved output-token budget above), trimming lowest-relevance records first.
 # Loaded content (CFG-R1a) — set per the deployed model. The 2026 default model
-# (deepseek-v4-flash) carries a ~1M-token window (MODEL-R5a: no legacy/small-model
+# (minimax-m3.1-flash) carries a ~1M-token window (MODEL-R5a: no legacy/small-model
 # assumptions); a swapped smaller model overrides this down via the env var so it is
 # never silently overrun.
 context_window_tokens = 1000000
@@ -387,10 +387,21 @@ mode = "enforce"
 [agent.cost]
 # Per-token pricing (USD per MILLION tokens) the AGT-OBS-R2 per-run cost is COMPUTED from. Loaded
 # config content (CFG-R1a) — no price literal lives in the engine; a deployment sets its provider's
-# real rates. The OSS default tracks the cheap-bulk flash tier (deepseek-v4-flash: $0.14 in / $0.28
-# out per M, the model-cost lever the unit economics depend on). Non-negative; 0 = free/local model.
-input_per_million_usd = 0.14
-output_per_million_usd = 0.28
+# real rates. The OSS default tracks the default flash model (minimax-m3.1-flash on OpenRouter:
+# $0.15 in / $0.60 out per M, the model-cost lever the unit economics depend on). Non-negative;
+# 0 = free/local model.
+input_per_million_usd = 0.15
+output_per_million_usd = 0.60
+
+[agent.provider]
+# OpenRouter provider routing, sent as the request's `provider` preferences on every model call.
+# `ignore` lists provider slugs never to route to; `quantizations` is the allow-list of serving
+# precisions. Relace and every fp4-class endpoint (fp4, nvfp4) are excluded: on the nightly live
+# leg the Relace fp4 endpoint ignored `reasoning_effort` (low ~= high, even with thinking
+# disabled) and produced the 32k-token runaway thinking traces. Set both to [] for a
+# non-OpenRouter endpoint that rejects unknown request fields.
+ignore = ["relace"]
+quantizations = ["int8", "fp6", "fp8", "fp16", "bf16", "fp32", "unknown"]
 
 [agent.coach]
 # The OSS default coach-config bundle (SKILL-R1 / §16): the engine embeds NO persona

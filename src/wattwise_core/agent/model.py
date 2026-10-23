@@ -110,6 +110,9 @@ class OpenAICompatibleModel:
         # thinking trace and return empty content (MODEL-R5a). The label is validated at boot by
         # the routing policy (``SingleModelRoutingPolicy.from_labels``), so the cast is sound.
         self._request_effort = cast(ReasoningEffort, self._reasoning_effort)
+        # Provider routing preferences (OpenRouter's ``provider`` request field), loaded config
+        # (CFG-R1a), sent on every call so an endpoint the deployment excluded never serves it.
+        self._extra_body = _provider_preferences(cfg)
         self._input_rate = cfg.agent__cost__input_per_million_usd
         self._output_rate = cfg.agent__cost__output_per_million_usd
         self._settings = cfg
@@ -196,6 +199,7 @@ class OpenAICompatibleModel:
                 temperature=self._verdict_temperature,
                 max_completion_tokens=self._max_output_tokens,
                 reasoning_effort=self._request_effort,
+                extra_body=self._extra_body,
                 response_format=schema,
                 messages=[
                     {"role": "system", "content": self._outbound(system)},
@@ -232,6 +236,7 @@ class OpenAICompatibleModel:
                     temperature=self._compose_temperature,
                     max_completion_tokens=bound,
                     reasoning_effort=self._request_effort,
+                    extra_body=self._extra_body,
                     messages=[
                         {"role": "system", "content": self._outbound(system)},
                         {"role": "user", "content": self._outbound(context)},
@@ -260,6 +265,16 @@ class OpenAICompatibleModel:
             f"model returned empty compose content (finish_reason={finish!r}, {trace}) after "
             f"{_EMPTY_COMPOSE_RETRIES + 1} attempts; refusing to store an empty draft (MODEL-R5a)"
         )
+
+
+def _provider_preferences(cfg: Settings) -> dict[str, Any] | None:
+    """The request ``extra_body`` carrying OpenRouter provider preferences, or ``None``."""
+    preferences: dict[str, Any] = {}
+    if cfg.agent__provider__ignore:
+        preferences["ignore"] = list(cfg.agent__provider__ignore)
+    if cfg.agent__provider__quantizations:
+        preferences["quantizations"] = list(cfg.agent__provider__quantizations)
+    return {"provider": preferences} if preferences else None
 
 
 def _build_client(cfg: Settings) -> AsyncOpenAI:
